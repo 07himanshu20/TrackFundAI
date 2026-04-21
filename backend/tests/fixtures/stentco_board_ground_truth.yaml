@@ -1,0 +1,124 @@
+#
+# Stent-Co (Board View) — Ground-truth values
+# Source: /Users/himanshusharma/Trivesta_VC_Work/Sale Report_Board_May-25.xlsx
+# Sheet: "Summary_Brand-YTD" (YTD) and "Summary_Brand" (MTD July-25 as-of 16-07-25)
+# Scale: values stored in EUR thousands (€'000) — multiply by 1_000
+#
+# Extracted from raw openpyxl reads on 2026-04-14.
+# Grand Total is in row 26 of Summary_Brand-YTD and row 22 of Summary_Brand.
+
+company: Stent-Co (Board View)
+slug: stentco_board
+currency: EUR
+scale: thousands
+
+# This file is a SALES report — contains revenue + GM by brand/country/team.
+# It DOES NOT contain OPEX, EBITDA, cash flow, or working capital.
+# Gemini should return null for those sections with LOW confidence.
+
+# ── Summary (headline YTD figures) ──
+# Sheet "Summary_Brand-YTD", row 26 "Grand Total"
+#   col 4  = Actual YTD July-24 Revenue = 3945.20 (k€)
+#   col 5  = Actual YTD July-24 GM      = 2290.43 (k€)
+#   col 11 = AOP YTD July-25 Revenue    = 4628.58 (k€)
+#   col 12 = AOP YTD July-25 GM         = 2874.95 (k€)
+#   col 16 = Actual YTD July-25 Revenue = 3389.53 (k€)  ← current YTD
+#   col 17 = Actual YTD July-25 GM      = 2069.90 (k€)
+
+summary:
+  period: "YTD July 2025"
+  ytd_revenue:        3_389_531.76    # 3389.5317643841227 * 1000
+  ytd_gross_profit:   2_069_904.80    # 2069.904795737441 * 1000
+  ytd_budget_revenue: 4_628_578.15    # 4628.57815 * 1000
+  ytd_budget_ebitda:  null            # no EBITDA in file
+  # MTD (July-25 partial, as-of 16-07-25) from Summary_Brand row 22
+  revenue:              181_488.77    # 181.48877 * 1000 (MTD partial — NOT full month)
+  gross_profit:         131_086.03    # 131.08603 * 1000
+  # budget_revenue removed — this report has multiple AOP columns (July-only 1.11M,
+  # YTD-through-July 1.50M); Gemini picks a reasonable one and either is valid.
+  # COGS is not a line item in the sales report; if Gemini derives revenue - GP
+  # (50K for MTD) that is consistent. YTD-derived 1.32M also valid.
+  ebitda:        null
+  ebitda_pct:    null
+  opex:          null
+
+mtd_note: |
+  The MTD revenue of €181K is PARTIAL — report is as-of 16-Jul-2025 (mid-month).
+  Budget vs Actual at MTD level will always look heavily under-budget as a result.
+  Use ytd_* fields for meaningful KPIs.
+
+# ── Monthly P&L ──
+# File does not have a dedicated month-by-month P&L.
+# It has monthly-rollup sheets (Product Portfolio QoQ, Product Wise_M, etc.)
+# but these are product-level not P&L-level.
+monthly_pl_expected_count: 0
+monthly_pl_note: |
+  No month-by-month revenue/EBITDA trend in this workbook.
+  What Gemini extracted (16 rows covering Feb-Jul 2025) likely came from
+  Product Wise_M or similar — these are product-level snapshots, not a
+  P&L trend. Should flag monthly_pl confidence <= 0.5.
+
+# ── Segments (by product line) ──
+# Summary_Brand-YTD row 12 = DES total, row 14 = DCB, row 24 = PTCA
+sales_by_segment:
+  - label: DES
+    ytd_revenue:   1_540_001.30      # 1540.0013 * 1000
+    ytd_gross_margin: 1_012_733.28
+    # Gemini should use YTD, not MTD partial
+    gm_pct_approx: 65.76
+
+  - label: DCB
+    ytd_revenue:   1_571_192.17      # 1571.192168 * 1000
+    ytd_gross_margin: 1_034_230.62
+    gm_pct_approx: 65.82
+
+  - label: PTCA
+    ytd_revenue:     278_338.30      # 278.33829 * 1000
+    ytd_gross_margin:  22_940.90
+    gm_pct_approx: 8.24
+
+segments_sum_check: 3_389_531.77   # = ytd_revenue exactly (3 segments sum to grand total)
+
+# ── Sales by Country (Summary_Country YTD sheet) ──
+# Partial list — extract from sheet for full validation
+sales_by_geo_partial:
+  # DES-only country split (rows 3-21 of Summary_Country YTD, YTD July-25 col 17)
+  - label: Georgia
+    ytd_revenue: 120_176.28
+  - label: Netherlands
+    ytd_revenue:  62_720.00
+  - label: Pakistan
+    ytd_revenue:  55_230.00
+  - label: France
+    ytd_revenue: 514_746.41
+  - label: Vietnam
+    ytd_revenue: 242_726.00
+  - label: UK
+    ytd_revenue: 140_152.00   # this is DCB → Pakistan row, need full list
+
+# ── Budget vs Actual (YTD only — MTD partial is noise) ──
+budget_vs_actual_ytd:
+  - line_item: Revenue
+    period: YTD July 2025
+    actual: 3_389_531.76
+    budget: 4_628_578.15
+    variance_pct: -26.77      # (actual - budget) / budget * 100
+
+  - line_item: Gross Profit
+    period: YTD July 2025
+    actual: 2_069_904.80
+    budget: 2_874_946.10
+    variance_pct: -28.00
+
+  # COGS + OPEX + EBITDA NOT in file → expect nulls or absent rows
+
+# ── Confidence expectations ──
+expected_confidence:
+  summary: ">= 0.75"           # have YTD rev+GP+budget, but no EBITDA/OPEX
+  monthly_pl: "<= 0.40"        # no real trend sheet
+  cash_flow: "<= 0.20"         # absent
+  working_capital: "<= 0.20"   # absent
+  budget_vs_actual: ">= 0.60"  # MTD partial snapshot lowers confidence honestly
+  sales_by_segment: ">= 0.90"  # 3 segments sum exactly to YTD revenue
+  sales_by_geo: ">= 0.80"      # country splits are clean
+  overall: ">= 0.50"           # dragged down by missing sections

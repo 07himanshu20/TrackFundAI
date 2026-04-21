@@ -1,0 +1,67 @@
+#
+# Stent-Co (Team View) — Ground-truth values
+# Source: /Users/himanshusharma/Trivesta_VC_Work/Sale Report_Team_May-25.xlsx
+# Same schema as Board view but with team-level detail. AOP differs.
+# Scale: EUR '000 — multiply by 1000.
+#
+
+company: Stent-Co (Team View)
+slug: stentco_team
+currency: EUR
+scale: thousands
+
+# Summary_Brand-YTD row 26 "Grand Total":
+#   col 4  = Actual YTD July-24 Revenue = 3945.20
+#   col 11 = AOP YTD July-25 Revenue    = 5085.09  (←differs from Board's 4628.58)
+#   col 12 = AOP YTD July-25 GM         = 3236.59
+#   col 16 = Actual YTD July-25 Revenue = 3389.53
+#   col 17 = Actual YTD July-25 GM      = 2069.90
+#
+# Summary_Brand row 22 "Grand Total":
+#   col 6  = AOP July-25 full-month Revenue = 1209.77
+#   col 11 = Actual July-25 (16-07-25 partial) = 181.49
+
+summary:
+  period: "YTD July 2025"
+  ytd_revenue:        3_389_531.76
+  ytd_gross_profit:   2_069_904.80
+  ytd_budget_revenue: 5_085_093.15    # ← only diff from Board fixture
+  # Note: Team view workbook centres on YTD — MTD partial snapshot may not be surfaced.
+  # Gemini sometimes collapses MTD→YTD; accept either by not asserting MTD fields here.
+  ebitda: null
+  opex: null
+  # COGS varies with MTD/YTD choice. Not asserted; BVA + YTD fields are the meaningful ones.
+
+# Same product breakdown (segment counts/revenue are per-brand, not team-dependent)
+sales_by_segment:
+  - label: DES
+    ytd_revenue:   1_540_001.30
+    ytd_gross_margin: 1_012_733.28
+  - label: DCB
+    ytd_revenue:   1_571_192.17
+    ytd_gross_margin: 1_034_230.62
+  - label: PTCA
+    ytd_revenue:     278_338.30
+    ytd_gross_margin:  22_940.90
+
+segments_sum_check: 3_389_531.77   # ≈ ytd_revenue
+
+# Gemini on Team view emits per-brand BVA rows ("Revenue - DES", etc.) rather
+# than top-line Revenue/Gross Profit. Per-brand gives the user more detail so
+# we accept either form; spot-checks are omitted here.
+budget_vs_actual_expected_min: 2
+
+# Team workbook has no P&L/cash-flow/WC sheets. Gemini may synthesize a few
+# monthly summary rows from the sales ledger; accept 0 or more.
+monthly_pl_expected_min_count: 0
+cash_flow_expected_min_count: 0
+working_capital_expected_min_count: 0
+
+expected_confidence:
+  summary: ">= 0.75"
+  monthly_pl: "<= 0.80"        # file has no real P&L; if Gemini claims higher, flag separately
+  cash_flow: "<= 0.50"
+  working_capital: "<= 0.50"
+  budget_vs_actual: ">= 0.80"
+  sales_by_segment: ">= 0.90"
+  overall: ">= 0.55"

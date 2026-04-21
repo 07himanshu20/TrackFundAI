@@ -1,0 +1,193 @@
+/* ═══════════════════════════════════════════════════════════
+   Doc Vault — TrackFundAI Document Management
+═══════════════════════════════════════════════════════════ */
+
+/* Filter toolbar */
+.filter-select, .filter-search {
+  padding: 8px 14px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  transition: border-color var(--transition);
+}
+.filter-select:focus, .filter-search:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+}
+.filter-select { cursor: pointer; }
+.filter-search { min-width: 200px; }
+
+/* Document table */
+.doc-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-card);
+  background: var(--bg-card);
+}
+.doc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.doc-table thead th {
+  text-align: left;
+  padding: 14px 16px;
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-subtle);
+  white-space: nowrap;
+}
+.doc-table tbody tr {
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+  transition: background var(--transition);
+}
+.doc-table tbody tr:hover {
+  background: rgba(0, 212, 255, 0.03);
+}
+.doc-table tbody td {
+  padding: 12px 16px;
+  color: var(--text-secondary);
+  vertical-align: middle;
+}
+.doc-table .doc-title {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.doc-table .doc-filename {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  margin-top: 2px;
+}
+
+.doc-category-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  background: rgba(0, 212, 255, 0.08);
+  color: var(--accent-blue);
+  border: 1px solid rgba(0, 212, 255, 0.2);
+}
+
+.doc-visibility-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+.doc-visibility-badge.internal {
+  background: rgba(255,255,255,0.05);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+}
+.doc-visibility-badge.lp_visible {
+  background: rgba(0,255,157,0.08);
+  color: var(--accent-green);
+  border: 1px solid rgba(0,255,157,0.25);
+}
+.doc-visibility-badge.public {
+  background: rgba(255,187,0,0.08);
+  color: #ffbb00;
+  border: 1px solid rgba(255,187,0,0.25);
+}
+
+.doc-actions {
+  display: flex;
+  gap: 8px;
+}
+.doc-action-btn {
+  padding: 4px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: all var(--transition);
+  white-space: nowrap;
+}
+.doc-action-btn:hover {
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+}
+.doc-action-btn.delete:hover {
+  border-color: var(--accent-red);
+  color: var(--accent-red);
+}
+
+/* Access log table */
+.access-log-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-top: 12px;
+}
+.access-log-table th {
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.access-log-table td {
+  padding: 8px 12px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+}
+
+/* Empty state */
+.doc-empty {
+  padding: 60px 20px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+/* Light theme overrides for Doc Vault */
+[data-theme="light"] .doc-category-badge {
+  background: rgba(0, 136, 204, 0.06);
+  border-color: rgba(0, 136, 204, 0.2);
+}
+[data-theme="light"] .doc-visibility-badge.internal {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: rgba(0, 0, 0, 0.1);
+}
+[data-theme="light"] .doc-visibility-badge.lp_visible {
+  background: rgba(0, 153, 107, 0.06);
+  border-color: rgba(0, 153, 107, 0.2);
+}
+[data-theme="light"] .doc-visibility-badge.public {
+  background: rgba(194, 136, 0, 0.06);
+  border-color: rgba(194, 136, 0, 0.2);
+}
+[data-theme="light"] .doc-action-btn {
+  border-color: rgba(0, 0, 0, 0.1);
+}
+[data-theme="light"] .doc-action-btn:hover {
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+}
+[data-theme="light"] .doc-action-btn.delete:hover {
+  border-color: var(--accent-red);
+  color: var(--accent-red);
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .toolbar { flex-wrap: wrap; }
+  .filter-search { min-width: 100%; }
+}

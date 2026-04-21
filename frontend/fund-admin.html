@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem('tfai_theme')==='light')document.documentElement.setAttribute('data-theme','light');</script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TrackFundAI — Fund Administration</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='16' fill='%2303030a'/><text y='.9em' font-size='62' x='10' fill='%2300d4ff' font-family='monospace' font-weight='bold'>TF</text></svg>" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="fund-admin.css" />
+</head>
+<body>
+
+  <div id="bg-canvas" aria-hidden="true">
+    <div class="bg-orb bg-orb-1"></div>
+    <div class="bg-orb bg-orb-2"></div>
+    <div class="bg-orb bg-orb-3"></div>
+    <div class="bg-grid"></div>
+  </div>
+
+  <!-- Top bar -->
+  <nav id="navbar">
+    <div class="nav-brand">
+      <span class="brand-dot"></span>
+      TrackFundAI
+    </div>
+    <div class="nav-links">
+      <a href="index.html" class="nav-link">Portfolio Dashboard</a>
+      <span class="nav-link active">Fund Admin</span>
+      <a href="investments.html" class="nav-link">Investments</a>
+      <a href="doc-vault.html" class="nav-link">Doc Vault</a>
+      <a href="lp-portal.html" class="nav-link">LP Portal</a>
+    </div>
+    <div class="nav-actions">
+      <span class="notif-badge" id="notif-badge" title="Notifications">0</span>
+      <span class="user-badge" id="user-badge">—</span>
+      <button class="btn-ghost" id="btn-logout">Logout</button>
+    </div>
+  </nav>
+
+  <main id="main-scroll">
+
+    <!-- Header -->
+    <section class="section section-hero">
+      <div class="hero-content">
+        <div class="hero-eyebrow">MODULE 1 · FUND ADMINISTRATION</div>
+        <h1 class="hero-title">
+          <span class="hero-title-main">Fund</span>
+          <span class="hero-title-sub">Administration</span>
+        </h1>
+        <p class="hero-description" id="org-label">—</p>
+        <div class="hero-stats" id="stats-bar"></div>
+      </div>
+    </section>
+
+    <!-- Fund List -->
+    <section class="section">
+      <div class="section-header">
+        <div class="section-tag">Funds</div>
+        <h2 class="section-title">Registered Funds</h2>
+        <p class="section-subtitle">All AIF funds under your organization. Click to view details.</p>
+      </div>
+
+      <div class="toolbar">
+        <button class="btn-primary" id="btn-new-fund">+ New Fund</button>
+      </div>
+
+      <div class="fund-grid" id="fund-grid">
+        <!-- Populated by JS -->
+      </div>
+    </section>
+
+    <!-- Fund Detail (hidden by default) -->
+    <section class="section hidden" id="fund-detail-section">
+      <div class="section-header">
+        <div class="section-tag" id="detail-tag">Fund Detail</div>
+        <h2 class="section-title" id="detail-title">—</h2>
+        <p class="section-subtitle" id="detail-subtitle">—</p>
+      </div>
+
+      <!-- Fund info card -->
+      <div class="detail-grid" id="fund-info-grid"></div>
+
+      <!-- Schemes -->
+      <div class="subsection">
+        <div class="subsection-header">
+          <h3>Schemes</h3>
+          <button class="btn-ghost small" id="btn-new-scheme">+ Add Scheme</button>
+        </div>
+        <div class="scheme-list" id="scheme-list"></div>
+      </div>
+
+      <!-- Entities -->
+      <div class="subsection">
+        <div class="subsection-header">
+          <h3>Key Entities</h3>
+          <button class="btn-ghost small" id="btn-new-entity">+ Add Entity</button>
+        </div>
+        <div class="entity-list" id="entity-list"></div>
+      </div>
+
+      <div class="detail-actions">
+        <button class="btn-ghost" id="btn-back-list">&larr; Back to Funds</button>
+      </div>
+    </section>
+
+    <!-- Modal for forms -->
+    <div class="modal-overlay hidden" id="modal-overlay">
+      <div class="modal-card" id="modal-card">
+        <div class="modal-header">
+          <h3 id="modal-title">—</h3>
+          <button class="modal-close" id="modal-close">&times;</button>
+        </div>
+        <form id="modal-form">
+          <div id="modal-fields"></div>
+          <div class="modal-actions">
+            <button type="button" class="btn-ghost" id="modal-cancel">Cancel</button>
+            <button type="submit" class="btn-primary" id="modal-submit">Save</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+  </main>
+
+  <script src="theme-switcher.js"></script>
+  <script src="auth.js"></script>
+  <script src="fund-admin.js"></script>
+
+</body>
+</html>

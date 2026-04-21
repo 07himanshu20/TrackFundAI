@@ -1,0 +1,182 @@
+/* ═══════════════════════════════════════════════════════════
+   LP Portal — TrackFundAI Investor View
+═══════════════════════════════════════════════════════════ */
+
+/* Notification list */
+.notif-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.notif-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 16px 20px;
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  transition: border-color var(--transition);
+}
+.notif-card:hover {
+  border-color: var(--border-glow);
+}
+.notif-card.unread {
+  border-left: 3px solid var(--accent-blue);
+}
+.notif-card.read {
+  opacity: 0.7;
+}
+
+.notif-icon {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+}
+.notif-icon.fund { background: rgba(0,212,255,0.1); color: var(--accent-blue); }
+.notif-icon.document { background: rgba(0,255,157,0.1); color: var(--accent-green); }
+.notif-icon.capital_call { background: rgba(255,187,0,0.1); color: #ffbb00; }
+.notif-icon.distribution { background: rgba(0,255,157,0.1); color: var(--accent-green); }
+.notif-icon.compliance { background: rgba(255,68,85,0.1); color: var(--accent-red); }
+.notif-icon.system { background: rgba(255,255,255,0.05); color: var(--text-secondary); }
+.notif-icon.kpi { background: rgba(139,92,246,0.1); color: #8b5cf6; }
+
+.notif-body {
+  flex: 1;
+  min-width: 0;
+}
+.notif-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+.notif-message {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+.notif-time {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  margin-top: 6px;
+}
+
+.notif-action {
+  flex-shrink: 0;
+  align-self: center;
+}
+.notif-mark-read {
+  padding: 4px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.notif-mark-read:hover {
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+}
+
+.notif-empty {
+  text-align: center;
+  padding: 40px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+/* LP fund cards — show read-only info */
+.lp-fund-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-card);
+  padding: 24px;
+  transition: all var(--transition);
+}
+.lp-fund-card:hover {
+  border-color: var(--border-glow);
+  box-shadow: var(--shadow-card);
+}
+.lp-fund-name {
+  font-size: 17px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.lp-fund-sebi {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  margin-bottom: 16px;
+}
+.lp-fund-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 12px;
+}
+.lp-fund-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.lp-fund-metric .label {
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.lp-fund-metric .value {
+  font-size: 14px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+}
+
+/* Mark all read button */
+.mark-all-read {
+  padding: 6px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: all var(--transition);
+  float: right;
+  margin-bottom: 12px;
+}
+.mark-all-read:hover {
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+}
+
+/* Light theme overrides for LP Portal */
+[data-theme="light"] .notif-card {
+  background: #ffffff;
+  border-color: rgba(0, 0, 0, 0.08);
+}
+[data-theme="light"] .notif-card:hover {
+  border-color: rgba(0, 136, 204, 0.25);
+}
+[data-theme="light"] .notif-card.unread {
+  border-left-color: var(--accent-blue);
+}
+[data-theme="light"] .lp-fund-card {
+  background: #ffffff;
+  border-color: rgba(0, 0, 0, 0.08);
+}
+[data-theme="light"] .lp-fund-card:hover {
+  border-color: rgba(0, 136, 204, 0.25);
+  box-shadow: 0 4px 16px rgba(0, 136, 204, 0.08);
+}

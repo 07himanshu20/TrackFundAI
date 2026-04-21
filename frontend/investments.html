@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem('tfai_theme')==='light')document.documentElement.setAttribute('data-theme','light');</script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TrackFundAI — Investments</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='16' fill='%2303030a'/><text y='.9em' font-size='62' x='10' fill='%2300d4ff' font-family='monospace' font-weight='bold'>TF</text></svg>" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="fund-admin.css" />
+</head>
+<body>
+
+  <div id="bg-canvas" aria-hidden="true">
+    <div class="bg-orb bg-orb-1"></div>
+    <div class="bg-orb bg-orb-2"></div>
+    <div class="bg-orb bg-orb-3"></div>
+    <div class="bg-grid"></div>
+  </div>
+
+  <!-- Top bar -->
+  <nav id="navbar">
+    <div class="nav-brand">
+      <span class="brand-dot"></span>
+      TrackFundAI
+    </div>
+    <div class="nav-links">
+      <a href="index.html" class="nav-link">Portfolio Dashboard</a>
+      <a href="fund-admin.html" class="nav-link">Fund Admin</a>
+      <span class="nav-link active">Investments</span>
+      <a href="doc-vault.html" class="nav-link">Doc Vault</a>
+      <a href="lp-portal.html" class="nav-link">LP Portal</a>
+    </div>
+    <div class="nav-actions">
+      <span class="notif-badge" id="notif-badge" title="Notifications">0</span>
+      <span class="user-badge" id="user-badge">—</span>
+      <button class="btn-ghost" id="btn-logout">Logout</button>
+    </div>
+  </nav>
+
+  <main id="main-scroll">
+
+    <!-- Header -->
+    <section class="section section-hero">
+      <div class="hero-content">
+        <div class="hero-eyebrow">MODULE 3 · PORTFOLIO MONITORING</div>
+        <h1 class="hero-title">
+          <span class="hero-title-main">Investments</span>
+          <span class="hero-title-sub">& Valuations</span>
+        </h1>
+        <p class="hero-description" id="org-label">—</p>
+        <div class="hero-stats" id="stats-bar"></div>
+      </div>
+    </section>
+
+    <!-- Tab Navigation -->
+    <section class="section">
+      <div class="inv-tabs" id="inv-tabs">
+        <button class="inv-tab active" data-tab="investments">Investments</button>
+        <button class="inv-tab" data-tab="valuations">Valuations</button>
+        <button class="inv-tab" data-tab="kpis">KPI Tracking</button>
+        <button class="inv-tab" data-tab="exits">Exit Scenarios</button>
+        <button class="inv-tab" data-tab="board">Board Meetings</button>
+      </div>
+    </section>
+
+    <!-- ═══ INVESTMENTS TAB ═══ -->
+    <section class="section" id="tab-investments">
+      <div class="section-header">
+        <div class="section-tag">Investments</div>
+        <h2 class="section-title">Portfolio Investments</h2>
+        <p class="section-subtitle">Track investments across all schemes. Click an investment to manage tranches, valuations, and KPIs.</p>
+      </div>
+
+      <!-- Scheme selector -->
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <label>Scheme:</label>
+          <select id="scheme-select" class="select-dark">
+            <option value="">All Schemes</option>
+          </select>
+        </div>
+        <button class="btn-primary" id="btn-new-investment">+ New Investment</button>
+      </div>
+
+      <div class="fund-grid" id="investment-grid"></div>
+    </section>
+
+    <!-- ═══ INVESTMENT DETAIL (hidden) ═══ -->
+    <section class="section hidden" id="investment-detail-section">
+      <div class="section-header">
+        <div class="section-tag" id="inv-detail-tag">Investment Detail</div>
+        <h2 class="section-title" id="inv-detail-title">—</h2>
+        <p class="section-subtitle" id="inv-detail-subtitle">—</p>
+      </div>
+
+      <div class="detail-grid" id="inv-info-grid"></div>
+
+      <!-- Tranches -->
+      <div class="subsection">
+        <div class="subsection-header">
+          <h3>Tranches</h3>
+          <button class="btn-ghost small" id="btn-new-tranche">+ Add Tranche</button>
+        </div>
+        <div class="scheme-list" id="tranche-list"></div>
+      </div>
+
+      <!-- Valuations (inline) -->
+      <div class="subsection">
+        <div class="subsection-header">
+          <h3>Valuations</h3>
+          <button class="btn-ghost small" id="btn-new-valuation">+ Submit Valuation</button>
+        </div>
+        <div class="scheme-list" id="valuation-list"></div>
+      </div>
+
+      <!-- Exit Scenarios (inline) -->
+      <div class="subsection">
+        <div class="subsection-header">
+          <h3>Exit Scenarios</h3>
+          <button class="btn-ghost small" id="btn-new-exit">+ Model Exit</button>
+        </div>
+        <div class="scheme-list" id="exit-list"></div>
+      </div>
+
+      <!-- Board Meetings (inline) -->
+      <div class="subsection">
+        <div class="subsection-header">
+          <h3>Board Meetings</h3>
+          <button class="btn-ghost small" id="btn-new-board">+ Add Meeting</button>
+        </div>
+        <div class="scheme-list" id="board-list"></div>
+      </div>
+
+      <div class="detail-actions">
+        <button class="btn-ghost" id="btn-back-investments">&larr; Back to Investments</button>
+      </div>
+    </section>
+
+    <!-- ═══ VALUATIONS TAB (summary across all investments) ═══ -->
+    <section class="section hidden" id="tab-valuations">
+      <div class="section-header">
+        <div class="section-tag">Valuations</div>
+        <h2 class="section-title">Valuation Overview</h2>
+        <p class="section-subtitle">IPEV-standard fair value tracking across the portfolio. Approve or reject submitted valuations.</p>
+      </div>
+      <div class="scheme-list" id="all-valuations-list"></div>
+    </section>
+
+    <!-- ═══ KPI TAB ═══ -->
+    <section class="section hidden" id="tab-kpis">
+      <div class="section-header">
+        <div class="section-tag">KPI Tracking</div>
+        <h2 class="section-title">KPI Submissions</h2>
+        <p class="section-subtitle">Review KPI data submitted by portfolio companies.</p>
+      </div>
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <label>Status:</label>
+          <select id="kpi-status-filter" class="select-dark">
+            <option value="">All</option>
+            <option value="submitted">Submitted (Pending Review)</option>
+            <option value="approved">Approved</option>
+            <option value="rejected">Rejected</option>
+          </select>
+        </div>
+      </div>
+      <div class="scheme-list" id="kpi-list"></div>
+    </section>
+
+    <!-- ═══ EXITS TAB ═══ -->
+    <section class="section hidden" id="tab-exits">
+      <div class="section-header">
+        <div class="section-tag">Exit Scenarios</div>
+        <h2 class="section-title">Exit Events & Models</h2>
+        <p class="section-subtitle">Model IPO, M&A, secondary, and write-off scenarios across portfolio.</p>
+      </div>
+      <div class="scheme-list" id="all-exits-list"></div>
+    </section>
+
+    <!-- ═══ BOARD MEETINGS TAB ═══ -->
+    <section class="section hidden" id="tab-board">
+      <div class="section-header">
+        <div class="section-tag">Board Meetings</div>
+        <h2 class="section-title">Board Meeting Tracker</h2>
+        <p class="section-subtitle">Governance tracking for portfolio companies.</p>
+      </div>
+      <div class="toolbar">
+        <button class="btn-primary" id="btn-generate-board-pack">Generate Board Pack</button>
+        <div class="toolbar-left" style="margin-left: 16px;">
+          <label>Scheme for Board Pack:</label>
+          <select id="board-pack-scheme" class="select-dark"></select>
+        </div>
+      </div>
+      <div class="scheme-list" id="all-board-list"></div>
+    </section>
+
+    <!-- Modal for forms -->
+    <div class="modal-overlay hidden" id="modal-overlay">
+      <div class="modal-card" id="modal-card">
+        <div class="modal-header">
+          <h3 id="modal-title">—</h3>
+          <button class="modal-close" id="modal-close">&times;</button>
+        </div>
+        <form id="modal-form">
+          <div id="modal-fields"></div>
+          <div class="modal-actions">
+            <button type="button" class="btn-ghost" id="modal-cancel">Cancel</button>
+            <button type="submit" class="btn-primary" id="modal-submit">Save</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+  </main>
+
+  <script src="theme-switcher.js"></script>
+  <script src="auth.js"></script>
+  <script src="investments.js"></script>
+
+</body>
+</html>

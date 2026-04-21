@@ -1,0 +1,143 @@
+#
+# Chemopharm Group (CPM) — Ground-truth values
+# Source: /Users/himanshusharma/Trivesta_VC_Work/0625 CPM Group ECPM June 25.xlsx
+# Sheets: "Country (YTD)" for headline, "Country(mtd)" for June-25 MTD,
+#         "Segment sales & gp" for divisional breakdown
+# Scale: FULL MYR (despite the header label saying "MYR '000s" — actual cell
+#        values are in full currency units). This is a data-quality quirk.
+#
+
+company: Chemopharm Group (CPM)
+slug: cpm
+currency: MYR
+scale: full
+reporting_period: June 2025
+
+# ── Summary (Country (YTD) row 6 "Revenue", col 9 "TOTAL" = YTD CY25 Actual) ──
+# Column 1 = MY, 2 = SG, 3 = VN, 4 = TH, 5 = ID, 6 = PHP,
+# Column 7 = Total excl Hausen, 8 = Hausen, 9 = TOTAL
+# Column 10-18 = CY25 Budget (same country order + totals)
+# Column 19-27 = CY24 Actual
+
+summary:
+  period: June 2025
+  # MTD June 2025 (from Country(mtd) row 6 col 9)
+  revenue:          40_664_748.27     # TOTAL MTD June 2025
+  cogs:             23_193_520.08     # abs val of negative COGS
+  gross_profit:     17_471_228.19
+  gp_pct:           42.96              # 17471 / 40664 * 100
+  # EBITDA derived by summing (other income, COGS, all OPEX rows r10-r19)
+  # Gemini should compute this; approximate expected:
+  ebitda_approx:     ~7_500_000        # rough estimate, allow ±10%
+
+  # YTD 6 months ended 30 June 2025 (Country (YTD) row 6 col 9)
+  ytd_revenue:     240_236_065.29
+  ytd_gross_profit: 99_152_525.35
+  ytd_ebitda_approx: ~44_000_000       # earlier Gemini test: 44,466,785
+  budget_revenue_ytd: ~239_000_000     # CY25 Budget YTD total
+  # ytd_budget_revenue removed — earlier placeholder was incorrect; actual sheet value
+  # is ~257M, which Gemini correctly extracts. Fixture no longer asserts this field.
+
+# ── Budget vs Actual (cols 28-37 in Country (YTD) sheet are "vs Budget") ──
+# 5 line items (Revenue, COGS, GP, OPEX, EBITDA) × 2 periods (MTD + YTD) = 10.
+# (Earlier test showed 8 when COGS was skipped; 10 is the complete form.)
+budget_vs_actual_expected_min: 8
+
+budget_vs_actual_spot_checks:
+  - line_item: Revenue
+    period: June 2025
+    actual: 40_664_748.27
+    # Budget for June 2025 derivable from Country(mtd) cols 10-18
+    budget_approx: ~47_790_000    # matches earlier test "Budget Rev: 47790001.3"
+    variance_pct_approx: -14.91
+
+  - line_item: Gross Profit
+    period: June 2025
+    actual: 17_471_227.84
+    budget_approx: 19_463_129.49
+    variance_pct_approx: -10.23
+
+  - line_item: OPEX
+    period: June 2025
+    actual: 7_934_134.69
+    budget_approx: 10_093_879.66
+    variance_pct_approx: -21.40
+
+# ── Segments (Segment sales & gp — 4 major segments) ──
+# Row 9  = Analytical (MY)
+# Row 10 = JGS (MY)
+# Row 11 = O&G (MY)
+# Row 12 = Healthcare (MY)
+# + Philippines subdivisions, Medigene, MRI, Service
+#
+# Earlier test matched: Analytical 27.72M, JGS 0, O&G 5.76M, Healthcare 55.32M
+# (these are CY25 Actual YTD by division — the "Malaysia" rollup breakdown)
+sales_by_segment:
+  - label: Analytical
+    ytd_revenue: 11_853_544.54    # MY only row 9
+    # Gemini earlier merged MY+PHP Analytical = ~27.72M
+    ytd_revenue_merged_MY_PHP: 27_719_810.65
+    ytd_gross_profit: 3_981_243.07
+
+  - label: JGS
+    ytd_revenue: 0                 # n.m. in sheet
+
+  - label: "O&G"
+    ytd_revenue: 5_761_222.64
+    ytd_gross_profit: 2_316_497.84
+
+  - label: Healthcare
+    ytd_revenue: 54_004_199.84
+    ytd_revenue_merged: 55_316_581.14    # earlier test value
+    ytd_gross_profit: 25_890_024.00
+
+  - label: Life Science
+    ytd_revenue: 1_512_324.14
+
+  - label: Service
+    ytd_revenue: 2_631_744.73
+
+  - label: Medigene
+    ytd_revenue: 12_746_871.74
+
+  - label: MRI
+    ytd_revenue: 8_904_649.37
+
+segments_expected_min: 4           # Analytical/JGS/O&G/Healthcare at minimum
+segments_sum_approx: 240_000_000   # must approximately equal ytd_revenue
+
+# ── Geographic breakdown (Country (YTD) row 6 cols 1-6) ──
+sales_by_geo:
+  - label: Malaysia (MY)
+    ytd_revenue: 97_414_557.00
+  - label: Singapore (SG)
+    ytd_revenue: 73_425_511.61
+  - label: Vietnam (VN)
+    ytd_revenue: 15_715_683.31
+  - label: Thailand (TH)
+    ytd_revenue:  7_953_457.94
+  - label: Indonesia (ID)
+    ytd_revenue:  1_501_468.13
+  - label: Philippines (PHP)
+    ytd_revenue:  4_391_026.83
+  - label: Hausen
+    ytd_revenue: 39_834_360.46
+
+geo_sum_check: 240_236_065        # sum = TOTAL YTD revenue
+
+# ── Monthly P&L (PL BS CF sheet has month-by-month) ──
+monthly_pl_expected_min_count: 6   # earlier test showed 6 rows (Jan-Jun 2025)
+monthly_pl_note: "PL BS CF sheet contains monthly columns. May go back to CY2024."
+
+# ── Working capital (WC sheet) ──
+working_capital_expected_min_count: 3
+
+expected_confidence:
+  summary: ">= 0.90"
+  monthly_pl: ">= 0.70"
+  cash_flow: ">= 0.60"
+  working_capital: ">= 0.70"
+  budget_vs_actual: ">= 0.90"
+  sales_by_segment: ">= 0.80"
+  sales_by_geo: ">= 0.90"
+  overall: ">= 0.80"

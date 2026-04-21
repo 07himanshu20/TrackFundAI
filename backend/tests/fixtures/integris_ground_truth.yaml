@@ -1,0 +1,152 @@
+#
+# Integris EL Group — Ground-truth values
+# Source: /Users/himanshusharma/Trivesta_VC_Work/Integris EL MIS - EL May'25.xlsx
+# Sheet: "Finance" (values are in USD Millions — multiply by 1_000_000)
+#
+# Extracted directly from raw cell reads (openpyxl, no LLM) on 2026-04-14.
+# Use this as the expected-output for validating Gemini extraction.
+#
+# Tolerance: values within abs(diff) < $1 (i.e. ±0.000001 of the $M figure).
+
+company: Integris EL Group
+slug: integris
+currency: USD
+scale: millions
+reporting_period: May 2025
+
+# ── Summary (Finance sheet, column 1 = MTD Actual May'25, col 7 = YTD FY26 Actual) ──
+summary:
+  period: May 2025
+
+  # Row 5 "Total Revenue"
+  revenue:           16_574_011.51         # col 1 * 1M
+  ytd_revenue:       31_746_031.74         # col 7 * 1M
+  budget_revenue:    16_233_533.47         # col 2 "AOP" * 1M
+  ytd_budget_revenue: 31_497_567.91        # col 8 * 1M
+
+  # Row 6 "Total GM"
+  gross_profit:       6_713_500.00         # 6.7135 * 1M
+  ytd_gross_profit:  12_724_153.98
+
+  # Row 7 "GM%" (stored as fraction 0.4050618)
+  gp_pct:            40.51
+
+  # Row 8 "SG&A" (absolute value, stored negative in sheet)
+  opex:               3_272_343.61
+
+  # Row 9 "EBITDA"
+  ebitda:             3_441_156.39
+  ytd_ebitda:         5_900_029.73
+  budget_ebitda:      2_983_473.29
+  ytd_budget_ebitda:  5_602_168.89
+
+  # Row 10 "EBITDA %"
+  ebitda_pct:        20.76
+
+# ── Monthly P&L ──
+# This file has NO month-by-month historical columns —
+# only current month (May 2025) + YTD + prior-year comparatives.
+# So monthly_pl should have AT MOST one row (May 2025), possibly zero.
+monthly_pl_expected_count: 0   # acceptable range: 0–1
+monthly_pl_note: "Integris MIS does not contain a month-by-month trend sheet."
+
+# ── Cash Flow ──
+# Workbook has no dedicated statement; Gemini may pull a few opening/closing-cash rows.
+cash_flow_expected_min_count: 0
+cash_flow_note: "No dedicated cash-flow statement in this workbook; 0–5 rows acceptable."
+
+# ── Working Capital (Efficiency sheet) ──
+# Row 7 DSO, Row 8 DIO, Row 9 DPO
+# Col 2 = Total (Dec 2024), Col 3 = May 2025, Col 4 = May 2024
+working_capital:
+  - period: "2025-05"
+    dso: 78
+    dio: 75
+    dpo: 54
+    ccc_computed: 99   # 78 + 75 - 54
+
+# ── Budget vs Actual (MTD + YTD, 4 line items each = 8 rows) ──
+budget_vs_actual:
+  # MTD (May 2025 vs AOP)
+  - line_item: Revenue
+    period_contains: May 2025
+    actual:  16_574_011.51
+    budget:  16_233_533.47
+    variance_pct: 2.10     # (340477.61 / 16233533.47) * 100
+
+  - line_item: Gross Profit
+    actual:   6_713_499.999696244   # allow ±1 rounding
+    budget:   6_520_767.31
+    variance_pct: 2.96
+
+  - line_item: OPEX
+    actual:   3_272_343.61
+    budget:   3_537_294.02
+    variance_pct: -7.49
+
+  - line_item: EBITDA
+    actual:   3_441_156.39
+    budget:   2_983_473.29
+    variance_pct: 15.34
+
+  # YTD (FY26 YTD vs FY26 AOP YTD)
+  - line_item: Revenue
+    period_contains: YTD
+    actual:  31_746_031.74
+    budget:  31_497_567.91
+    variance_pct: 0.79      # ← the bug we just fixed
+
+  - line_item: Gross Profit
+    period_contains: YTD
+    actual:  12_724_153.98
+    budget:  12_613_978.95
+    variance_pct: 0.87
+
+  - line_item: OPEX
+    period_contains: YTD
+    actual:   6_824_124.26
+    budget:   7_011_810.06
+    variance_pct: -2.68
+
+  - line_item: EBITDA
+    period_contains: YTD
+    actual:   5_900_029.73
+    budget:   5_602_168.89
+    variance_pct: 5.32
+
+# ── Sales by Segment (NOT in this file) ──
+# Countries are in Finance sheet rows 16-23; Gemini may surface them as
+# "segments" if the workbook lacks a true segment breakdown. Accept 0-8 rows.
+sales_by_segment_expected_min: 0
+sales_by_segment_note: |
+  The Finance sheet has COUNTRY breakdown (rows 16-23), not segment breakdown.
+  If Gemini surfaces country-as-segment, that is acceptable here — so we only
+  require ≥0 and rely on the confidence score (expected ≤0.40) to flag it.
+
+# ── Sales by Geography (COUNTRY) ──
+# These are the rows 16-23 in the Finance sheet — MTD Actual in col 1
+sales_by_geo:
+  - label: Malaysia
+    revenue: 4_247_196.25       # 4.2471962 * 1M
+    ytd_revenue: 8_458_435.25
+  - label: Singapore
+    revenue: 2_845_539.03
+    ytd_revenue: 5_228_409.82
+  - label: India
+    revenue: 2_865_339.03
+    ytd_revenue: 5_703_447.14
+  - label: Philippines
+    revenue: 3_875_556.83
+    ytd_revenue: 7_469_073.80
+  # Thailand, Others (ID & VN) — verify against file for full list
+
+# ── Confidence expectations ──
+# Given this file has no monthly trend, no cashflow, no segments:
+expected_confidence:
+  summary: ">= 0.90"           # clean headline data
+  monthly_pl: "<= 0.30"        # N/A in source — Gemini should say so
+  cash_flow: "<= 0.50"         # partial cash rows may be pulled; <=0.5 is honest
+  sales_by_segment: "<= 0.95"  # if country-as-segment is used, may be higher
+  budget_vs_actual: ">= 0.90"
+  sales_by_geo: ">= 0.85"
+  overall: ">= 0.60"

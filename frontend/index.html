@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem('tfai_theme')==='light')document.documentElement.setAttribute('data-theme','light');</script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <title>TrackFundAI — Portfolio Dashboard</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='16' fill='%2303030a'/><text y='.9em' font-size='62' x='10' fill='%2300d4ff' font-family='monospace' font-weight='bold'>TF</text></svg>" />
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+
+  <!-- Chart.js 4 -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <!-- Marked for markdown -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+  <link rel="stylesheet" href="styles.css?v=2" />
+  <link rel="stylesheet" href="fund-admin.css?v=2" />
+  <link rel="stylesheet" href="portfolio.css?v=2" />
+</head>
+<body>
+
+  <!-- Animated background (kept from old design) -->
+  <div id="bg-canvas" aria-hidden="true">
+    <div class="bg-orb bg-orb-1"></div>
+    <div class="bg-orb bg-orb-2"></div>
+    <div class="bg-orb bg-orb-3"></div>
+    <div class="bg-grid"></div>
+  </div>
+
+  <!-- Top bar -->
+  <nav id="navbar">
+    <div class="nav-brand">
+      <span class="brand-dot"></span>
+      TrackFundAI
+    </div>
+    <div class="nav-links">
+      <span class="nav-link active">Portfolio Dashboard</span>
+      <a href="fund-admin.html" class="nav-link">Fund Admin</a>
+      <a href="investments.html" class="nav-link">Investments</a>
+      <a href="doc-vault.html" class="nav-link">Doc Vault</a>
+      <a href="lp-portal.html" class="nav-link">LP Portal</a>
+    </div>
+    <div class="nav-actions">
+      <span id="fx-badge" class="fx-badge">FX —</span>
+      <span class="user-badge" id="user-badge">—</span>
+      <button class="btn-ghost" id="btn-logout">Logout</button>
+    </div>
+  </nav>
+  <!-- Breadcrumb bar for portfolio hierarchy navigation -->
+  <div id="breadcrumb-bar" style="padding: 0 24px; display: flex; align-items: center; gap: 8px; min-height: 36px;">
+    <div id="breadcrumb" style="display: flex; align-items: center; gap: 4px;"></div>
+    <div style="flex:1;"></div>
+    <button id="btn-home" class="btn-ghost" style="font-size: 12px; padding: 4px 10px;">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 4px;">
+        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+      </svg>
+      Portfolio Home
+    </button>
+  </div>
+
+  <!-- Main content -->
+  <main id="main-scroll">
+
+    <!-- Hero: current-level title & subtitle -->
+    <section id="section-hero" class="section section-hero">
+      <div class="hero-content">
+        <div class="hero-eyebrow" id="hero-eyebrow">LEVEL · PORTFOLIO</div>
+        <h1 class="hero-title">
+          <span class="hero-title-main" id="hero-title-main">Trivesta</span>
+          <span class="hero-title-sub" id="hero-title-sub">VC Portfolio</span>
+        </h1>
+        <p class="hero-description" id="hero-description">
+          5 funds · 9 sectors · 17 segments · 31 companies · USD base
+        </p>
+        <div class="hero-stats" id="hero-stats">
+          <!-- Populated dynamically -->
+        </div>
+      </div>
+    </section>
+
+    <!-- Comparison Panel (appears at every non-leaf level) -->
+    <section id="section-compare" class="section">
+      <div class="section-header">
+        <div class="section-tag" id="compare-tag">Children Comparison</div>
+        <h2 class="section-title" id="compare-title">Compare</h2>
+        <p class="section-subtitle" id="compare-subtitle">Switch mode and metric to analyse across the set.</p>
+      </div>
+
+      <!-- Comparison controls -->
+      <div class="compare-controls">
+        <div class="mode-tabs" id="mode-tabs">
+          <button class="mode-tab active" data-mode="actual">Budget vs Actual (MIS)</button>
+          <button class="mode-tab" data-mode="sales_margin">Sales &amp; Margin</button>
+          <button class="mode-tab" data-mode="variance">Budget Variance</button>
+          <button class="mode-tab" data-mode="kpi_table">KPI Table</button>
+        </div>
+        <div class="metric-picker" id="metric-picker">
+          <label>Metric:</label>
+          <select id="metric-select" class="select-dark">
+            <option value="revenue">Revenue</option>
+            <option value="gross_profit">Gross Profit</option>
+            <option value="ebitda">EBITDA</option>
+            <option value="opex">OPEX</option>
+            <option value="gp_pct">GP %</option>
+            <option value="ebitda_pct">EBITDA %</option>
+            <option value="closing_cash">Closing Cash</option>
+            <option value="nwc">Net Working Capital</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- KPI table date controls (only visible when kpi_table mode is active) -->
+      <div class="kpi-date-controls" id="kpi-date-controls" style="display:none;">
+        <div class="kpi-submode-tabs" id="kpi-submode-tabs">
+          <button class="kpi-submode-tab active" data-submode="latest">Latest snapshot</button>
+          <button class="kpi-submode-tab" data-submode="as_of">As of month</button>
+          <button class="kpi-submode-tab" data-submode="range">Date range</button>
+        </div>
+        <div class="kpi-date-inputs" id="kpi-date-inputs-asof" style="display:none;">
+          <label>Month:</label>
+          <input type="month" id="kpi-as-of" class="input-dark" />
+        </div>
+        <div class="kpi-date-inputs" id="kpi-date-inputs-range" style="display:none;">
+          <label>From:</label>
+          <input type="month" id="kpi-range-from" class="input-dark" />
+          <label>To:</label>
+          <input type="month" id="kpi-range-to" class="input-dark" />
+          <button id="btn-apply-range" class="btn-ghost small">Apply</button>
+        </div>
+        <div class="kpi-transpose">
+          <label class="switch-label">
+            <input type="checkbox" id="kpi-transpose" />
+            <span>Transpose (KPIs as rows)</span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Comparison chart + table -->
+      <div class="compare-panel" id="compare-panel">
+        <div class="chart-card wide">
+          <div class="chart-title" id="compare-chart-title">Loading…</div>
+          <canvas id="compare-chart" height="320"></canvas>
+        </div>
+
+        <div class="table-card">
+          <div class="table-header">
+            <div class="chart-title" id="compare-table-title">Comparison Table</div>
+            <button id="btn-export-compare" class="btn-ghost small">Export CSV</button>
+          </div>
+          <div class="table-wrap">
+            <table id="compare-table" class="data-table">
+              <thead><tr id="compare-thead"></tr></thead>
+              <tbody id="compare-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Children Grid (click-through to drill down) -->
+    <section id="section-children" class="section">
+      <div class="section-header">
+        <div class="section-tag" id="children-tag">Children</div>
+        <h2 class="section-title" id="children-title">Drill Down</h2>
+        <p class="section-subtitle" id="children-subtitle">Click any tile to drill in.</p>
+      </div>
+      <div class="children-grid" id="children-grid">
+        <!-- Populated dynamically -->
+      </div>
+    </section>
+
+    <!-- Company deep-dive: KPIs, monthly trends, cash flow, segments
+         Only visible when level === 'company' -->
+    <section id="section-deepdive" class="section hidden">
+      <div class="section-header">
+        <div class="section-tag">Company Deep-Dive</div>
+        <h2 class="section-title" id="deepdive-title">—</h2>
+        <p class="section-subtitle" id="deepdive-subtitle">Native currency preserved alongside USD roll-ups.</p>
+      </div>
+
+      <div class="kpi-grid" id="deepdive-kpis"></div>
+
+      <div class="chart-row">
+        <div class="chart-card wide">
+          <div class="chart-title">Monthly Revenue &amp; EBITDA</div>
+          <canvas id="dd-chart-pl" height="260"></canvas>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">Cost Structure</div>
+          <canvas id="dd-chart-cost" height="260"></canvas>
+        </div>
+      </div>
+
+      <div class="chart-row">
+        <div class="chart-card wide">
+          <div class="chart-title">Cash Flow Waterfall</div>
+          <canvas id="dd-chart-cf" height="240"></canvas>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">Closing Cash Trend</div>
+          <canvas id="dd-chart-cash" height="240"></canvas>
+        </div>
+      </div>
+
+      <div class="chart-row">
+        <div class="chart-card wide">
+          <div class="chart-title">Sales by Sub-Segment</div>
+          <canvas id="dd-chart-seg" height="260"></canvas>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">Sales by Geography</div>
+          <canvas id="dd-chart-geo" height="260"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <!-- Chatbot — scoped to current level -->
+    <section id="section-chatbot" class="section section-chat">
+      <div class="section-header">
+        <div class="section-tag">Gemini AI</div>
+        <h2 class="section-title">AI Analyst</h2>
+        <p class="section-subtitle" id="chat-scope-label">Scope: Full portfolio</p>
+      </div>
+
+      <div class="chat-container">
+        <div class="chat-suggestions" id="chat-suggestions">
+          <button class="suggestion-chip" data-q="Which fund has the strongest EBITDA margin?">Top EBITDA Fund</button>
+          <button class="suggestion-chip" data-q="Which entity has the worst budget variance?">Worst Variance</button>
+          <button class="suggestion-chip" data-q="Summarise the portfolio in 3 bullets.">Executive Summary</button>
+          <button class="suggestion-chip" data-q="Compare the children of the current scope.">Compare Children</button>
+        </div>
+
+        <div class="chat-messages" id="chat-messages">
+          <div class="chat-message assistant">
+            <div class="chat-avatar">AI</div>
+            <div class="chat-bubble">
+              Hi — I'm your portfolio analyst. I can see whichever level you're viewing. Drill into a fund, sector, segment or company and ask me anything about that scope.
+            </div>
+          </div>
+        </div>
+
+        <div class="chat-input-area">
+          <div class="chat-input-wrap">
+            <textarea id="chat-input" class="chat-input" placeholder="Ask about the current scope…" rows="1"></textarea>
+            <button id="chat-send" class="chat-send-btn" disabled>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+              </svg>
+            </button>
+          </div>
+          <div class="chat-actions">
+            <span class="chat-model-label">Gemini 2.5 Flash</span>
+            <button id="chat-clear" class="btn-ghost small">Clear Chat</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Loading overlay -->
+  <div id="loading-screen">
+    <div class="loading-content">
+      <div class="loading-logo">TV</div>
+      <div class="loading-bar-wrap">
+        <div id="loading-bar" class="loading-bar-fill"></div>
+      </div>
+      <p class="loading-text">Loading portfolio…</p>
+    </div>
+  </div>
+
+  <!-- Tooltip -->
+  <div id="tooltip" class="tooltip hidden"></div>
+
+  <!-- Scripts -->
+  <script src="theme-switcher.js"></script>
+  <script src="auth.js"></script>
+  <script>
+    // Require login for portfolio dashboard
+    if (!Auth.isLoggedIn()) {
+      window.location.href = 'login.html';
+    } else {
+      const user = Auth.getUser();
+      document.getElementById('user-badge').textContent =
+        (user.first_name || user.username) + ' · ' + user.role.replace('_', ' ').toUpperCase();
+      document.getElementById('btn-logout').onclick = () => Auth.logout();
+    }
+  </script>
+  <script src="portfolio.js?v=2"></script>
+  <script src="compare.js?v=2"></script>
+  <script src="deepdive.js?v=2"></script>
+  <script src="chatbot.js?v=2"></script>
+  <script src="app.js?v=2"></script>
+
+</body>
+</html>

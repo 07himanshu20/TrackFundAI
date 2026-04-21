@@ -1,0 +1,89 @@
+#
+# Analisa Resources (M) Sdn. Bhd. — Ground-truth values
+# Source: /Users/himanshusharma/Trivesta_VC_Work/01 Monthly Financial Presentation 2025 May Analisa.xlsx
+# Sheet: "05 Summary P&L (2)" — header "In MYR'000"
+# Scale: MYR thousands (multiply by 1000)
+#
+# NOTE: earlier configs said scale="full" — this is WRONG; the sheet header
+# explicitly says "In MYR'000". Config fixed 2026-04-15.
+#
+
+company: Analisa Resources (M) Sdn. Bhd.
+slug: analisa
+currency: MYR
+scale: thousands
+reporting_period: May 2025
+
+# Row 5 (Revenue): col 1 = May 25 Actual, col 2 = Budget, col 3 = May 24 Actual
+#                  col 7 = YTD CY25 Actual, col 8 = YTD CY25 Budget, col 9 = YTD CY24
+# Row 7 Gross Profit, Row 8 GP%, Row 9 OPEX, Row 10 EBITDA, Row 12 Normalized EBITDA
+
+summary:
+  period: May 2025
+  revenue:             1_656_081_380      # 1656081.38 * 1000
+  cogs:                1_031_188_170
+  gross_profit:          624_893_210
+  gp_pct:                37.73             # 0.37733 * 100
+  opex:                  465_045_900
+  ebitda:                159_847_310       # row 10 (pre-normalisation)
+  # Normalized EBITDA is 239,848,310 (row 12) — prefer this for EBITDA summary
+  ebitda_pct:            9.65              # 159847 / 1656081 * 100
+  ytd_revenue:         3_694_112_180
+  ytd_gross_profit:    1_239_303_270
+  ytd_ebitda:            233_485_320       # row 10 YTD col 7
+  budget_revenue:      1_407_000_000       # col 2
+  budget_ebitda:        -107_956_064       # May budget shows negative EBITDA
+  ytd_budget_revenue:  3_904_000_000
+  ytd_budget_ebitda:     132_069_972
+
+# Monthly P&L — sheet "Montly PL (2)" has 2025 month columns (Jan..May)
+# Header row 4: col 6=Jan, col 7=Feb, col 8=Mar, col 9=Apr, col 10=May (plus more for summaries)
+# Data is a GL listing — need to aggregate. Row 0 col 6 "(+) Other Income" = 1,786,685.16
+# Sheet "Montly PL" has 2024 months back to Jan 2022 per notes.
+# This is COMPLEX aggregation — Gemini should extract the aggregated totals per month.
+monthly_pl_expected_min_count: 17         # at least Jan 2024 - May 2025
+monthly_pl_note: |
+  File contains GL-detail monthly sheets which Gemini aggregates into revenue/EBITDA
+  per month. Expect 17+ months ideally going back to Jan 2022 (P & L - Jan 2022 sheet).
+  Earlier test showed 50 months — that is the upper bound.
+
+# Working Capital — sheet "12. DSO DSI DIO"
+working_capital_expected_min_count: 5   # several months of DSO/DIO/DPO
+
+# Cash Flow — "09 Cash Flow (Jan-May)" has 5 months for 2025,
+# but workbook also contains historical monthly cash flow back to 2021.
+# Gemini may pull 5–50 rows depending on scope; require at least 5.
+cash_flow_expected_min_count: 5
+
+# Budget vs Actual — 5 line items (Revenue, COGS, GP, OPEX, EBITDA) × up to 2 periods
+# (MTD + YTD).  Gemini currently emits YTD-only (5 rows) which is the more-useful set.
+# MTD+YTD split would be 10; accept either.
+budget_vs_actual_expected_min: 5
+
+budget_vs_actual_spot_checks:
+  # Gemini currently emits YTD-only BVA rows (period like "YTD CY 25").
+  # Leaving `period` blank matches any period string with the line_item.
+  - line_item: Revenue
+    period: ""
+    actual: 3_694_112_180
+    budget: 3_904_000_000
+    variance_pct: -5.38       # (3694 - 3904)/3904 * 100
+
+  - line_item: EBITDA
+    period: ""
+    actual:   233_485_320
+    budget:   132_069_972
+    variance_pct: 76.79       # (233485 - 132070)/132070 * 100
+
+# Sales by Segment — sheet "03 Sales update" / "02 Business Segment"
+# Extract actual segment names + revenue once tested
+sales_by_segment_expected_min: 4     # HID, LabFriend, Sci.Lab, NGS, Service expected
+
+expected_confidence:
+  summary: ">= 0.90"
+  monthly_pl: ">= 0.70"
+  cash_flow: ">= 0.70"
+  working_capital: ">= 0.70"
+  budget_vs_actual: ">= 0.90"
+  sales_by_segment: ">= 0.80"
+  overall: ">= 0.80"

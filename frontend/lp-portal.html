@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem('tfai_theme')==='light')document.documentElement.setAttribute('data-theme','light');</script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TrackFundAI — LP Portal</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='16' fill='%2303030a'/><text y='.9em' font-size='62' x='10' fill='%2300d4ff' font-family='monospace' font-weight='bold'>TF</text></svg>" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="fund-admin.css" />
+  <link rel="stylesheet" href="doc-vault.css" />
+  <link rel="stylesheet" href="lp-portal.css" />
+</head>
+<body>
+
+  <div id="bg-canvas" aria-hidden="true">
+    <div class="bg-orb bg-orb-1"></div>
+    <div class="bg-orb bg-orb-2"></div>
+    <div class="bg-orb bg-orb-3"></div>
+    <div class="bg-grid"></div>
+  </div>
+
+  <!-- Top bar -->
+  <nav id="navbar">
+    <div class="nav-brand">
+      <span class="brand-dot"></span>
+      TrackFundAI
+    </div>
+    <div class="nav-links">
+      <a href="index.html" class="nav-link">Portfolio Dashboard</a>
+      <a href="fund-admin.html" class="nav-link">Fund Admin</a>
+      <a href="investments.html" class="nav-link">Investments</a>
+      <a href="doc-vault.html" class="nav-link">Doc Vault</a>
+      <span class="nav-link active">LP Portal</span>
+    </div>
+    <div class="nav-actions">
+      <span class="notif-badge" id="notif-badge" title="Notifications">0</span>
+      <span class="user-badge" id="user-badge">—</span>
+      <button class="btn-ghost" id="btn-logout">Logout</button>
+    </div>
+  </nav>
+
+  <main id="main-scroll">
+
+    <!-- Header -->
+    <section class="section section-hero">
+      <div class="hero-content">
+        <div class="hero-eyebrow">INVESTOR PORTAL</div>
+        <h1 class="hero-title">
+          <span class="hero-title-main">Welcome,</span>
+          <span class="hero-title-sub" id="lp-name">Investor</span>
+        </h1>
+        <p class="hero-description" id="org-label">—</p>
+        <div class="hero-stats" id="stats-bar"></div>
+      </div>
+    </section>
+
+    <!-- Fund Overview Cards -->
+    <section class="section">
+      <div class="section-header">
+        <div class="section-tag">Funds</div>
+        <h2 class="section-title">Fund Overview</h2>
+        <p class="section-subtitle">Funds you have access to through your organization.</p>
+      </div>
+      <div class="fund-grid" id="fund-grid"></div>
+    </section>
+
+    <!-- LP-Visible Documents -->
+    <section class="section">
+      <div class="section-header">
+        <div class="section-tag">Documents</div>
+        <h2 class="section-title">Your Documents</h2>
+        <p class="section-subtitle">Documents shared with you by the fund manager.</p>
+      </div>
+      <div class="doc-table-wrap" id="lp-doc-table-wrap">
+        <table class="doc-table">
+          <thead>
+            <tr>
+              <th>Title</th>
+              <th>Category</th>
+              <th>Fund</th>
+              <th>Size</th>
+              <th>Date</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="lp-doc-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Notifications -->
+    <section class="section">
+      <div class="section-header">
+        <div class="section-tag">Notifications</div>
+        <h2 class="section-title">Recent Notifications</h2>
+        <p class="section-subtitle">Updates and alerts from your fund manager.</p>
+      </div>
+      <div class="notif-list" id="notif-list"></div>
+    </section>
+
+  </main>
+
+  <script src="theme-switcher.js"></script>
+  <script src="auth.js"></script>
+  <script src="lp-portal.js"></script>
+
+</body>
+</html>
