@@ -31,6 +31,10 @@ INSTALLED_APPS = [
     'notifications',
     'portfolio',
     'investments',
+    'lp',
+    'accounting',
+    'compliance',
+    'dataimport',
     'api',
 ]
 

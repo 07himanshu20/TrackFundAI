@@ -22,6 +22,7 @@
 
   <link rel="stylesheet" href="styles.css?v=2" />
   <link rel="stylesheet" href="fund-admin.css?v=2" />
+  <link rel="stylesheet" href="notification-drawer.css" />
   <link rel="stylesheet" href="portfolio.css?v=2" />
 </head>
 <body>
@@ -44,11 +45,15 @@
       <span class="nav-link active">Portfolio Dashboard</span>
       <a href="fund-admin.html" class="nav-link">Fund Admin</a>
       <a href="investments.html" class="nav-link">Investments</a>
+      <a href="lp-management.html" class="nav-link">LP Management</a>
+      <a href="fund-accounting.html" class="nav-link">Fund Accounting</a>
+      <a href="compliance.html" class="nav-link">Compliance</a>
       <a href="doc-vault.html" class="nav-link">Doc Vault</a>
-      <a href="lp-portal.html" class="nav-link">LP Portal</a>
+      <a href="data-upload.html" class="nav-link">Data Upload</a>
     </div>
     <div class="nav-actions">
       <span id="fx-badge" class="fx-badge">FX —</span>
+      <span class="notif-badge" id="notif-badge" title="Notifications">0</span>
       <span class="user-badge" id="user-badge">—</span>
       <button class="btn-ghost" id="btn-logout">Logout</button>
     </div>
@@ -282,6 +287,7 @@
   <!-- Scripts -->
   <script src="theme-switcher.js"></script>
   <script src="auth.js"></script>
+  <script src="notification-drawer.js"></script>
   <script>
     // Require login for portfolio dashboard
     if (!Auth.isLoggedIn()) {

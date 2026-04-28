@@ -163,10 +163,10 @@ PHASE 1: Foundation (Module 1 + Module 6)  [DONE]
   |  PostgreSQL setup                            [DONE]
   |  Fund & scheme tables                        [DONE]
   |  Entity management                           [DONE]
-  |  User auth + RBAC                            [DONE]
+  |  User auth + RBAC (incl. GET+PUT /me/)       [DONE]
   |  Doc Vault                                   [DONE]
   |  LP Portal                                   [DONE]
-  |  Notifications                               [DONE]
+  |  Notifications (in-app only)                 [DONE]
   |  Audit Log (full integration)                [DONE]
   |
   |  WHY FIRST: Everything references funds + users.
@@ -188,30 +188,58 @@ PHASE 2: Portfolio Monitoring Database (Module 3)  [DONE]
   |    - Board meetings (2 endpoints)                  [DONE]
   |    - Board pack generation (1 endpoint)            [DONE]
   |  investments.html + investments.js frontend     [DONE]
-  |  Nav updated on all 5 pages                    [DONE]
+  |  Nav updated on all 9 pages (7 modules)         [DONE]
   |
   |  Our dashboard is now Module 3 of TrackFundAI.
 
-PHASE 3: LP Management (Module 2)
-  |  Investor onboarding + KYC
-  |  Commitment tracking
-  |  Capital call generation + notices
-  |  Distribution processing (with TDS calculation)
-  |  LP capital accounts (running ledger)
+PHASE 3: LP Management (Module 2)  [DONE]
+  |  Investor onboarding CRUD                    [DONE]
+  |  Commitment tracking CRUD                    [DONE]
+  |  Capital call CRUD + line items              [DONE]
+  |  Distribution CRUD + line items              [DONE]
+  |  LP capital accounts CRUD                    [DONE]
+  |  lp-management.html + lp-management.js       [DONE — 6 tabs]
+  |  Waterfall simulator (frontend + backend)    [DONE]
+  |  KYC verification (verify-kyc)               [DONE]
+  |  Bank verification / penny drop (verify-bank)[DONE]
+  |  Capital call send-notices                   [DONE]
+  |  Capital call UTR match                      [DONE]
+  |  Distribution process + LP notify            [DONE]
+  |  Unit allotment at NAV                       [DONE]
+  |  LP portal dashboard (/lp/dashboard/)        [DONE]
+  |  LP portal capital account + scheme breakdown[DONE]
+  |  22 URL patterns in lp/urls.py               [DONE]
 
-PHASE 4: Fund Accounting (Module 4)
-  |  NAV computation engine
-  |  General ledger (double-entry)
-  |  Management fee calculator
-  |  Carried interest waterfall
-  |  Depository reconciliation (CDSL/NSDL)
+PHASE 4: Fund Accounting (Module 4)  [PARTIAL — ~40%]
+  |  Chart of Accounts CRUD                      [DONE]
+  |  NAV records CRUD                            [DONE]
+  |  Carried interest CRUD                       [DONE]
+  |  Fund ledger CRUD                            [DONE]
+  |  Management fee schedule CRUD                [DONE]
+  |  fund-accounting.html + fund-accounting.js   [DONE — 8 tabs, fallback rendering]
+  |  --- MISSING ---
+  |  NAV calculation engine (/nav/calculate/)
+  |  CDSL/NSDL depository reconciliation (/nav/reconcile/)
+  |  Trial balance generation endpoint
+  |  Management fee auto-calculator (/management-fees/calculate/)
+  |  Waterfall carry computation (/waterfall/calculate/)
+  |  Tally import endpoint (/tally/import/)
+  |  Tally export endpoint (/tally/export/)
+  |  Financial statements: balance sheet (/financials/bs/)
+  |  Financial statements: income statement (/financials/is/)
+  |  Financial statements: cash flow (/financials/cf/)
 
-PHASE 5: SEBI Compliance (Module 5)
-  |  QAR/AAR report generation
-  |  CTR checklist management
-  |  AML due diligence workflow
-  |  Compliance calendar + alerts
-  |  PPM amendment tracking
+PHASE 5: SEBI Compliance (Module 5)  [PARTIAL — ~95%]
+  |  SEBI reports (QAR/AAR) CRUD                 [DONE]
+  |  AML due diligence CRUD                      [DONE]
+  |  CTR + checklist items CRUD                  [DONE]
+  |  Equity threshold alerts                     [DONE]
+  |  Compliance calendar CRUD                    [DONE]
+  |  PPM amendment tracking CRUD                 [DONE]
+  |  SEBI circulars + action items CRUD          [DONE]
+  |  compliance.html + compliance.js             [DONE — 7 tabs]
+  |  --- MISSING ---
+  |  Equity threshold alerts POST endpoint
 
 PHASE 6: Documents & LP Portal Expansion (Module 7)
   |  Document vault with advanced access control
@@ -481,17 +509,19 @@ backend/
   compliance/      # QAR, AAR, CTR, AML, Calendar (Phase 5)
 
 frontend/
-  index.html       # Portfolio dashboard (Phase 0)
-  login.html       # JWT login page (Phase 1)
-  fund-admin.html  # Fund administration (Phase 1)
-  investments.html # Investments, valuations, KPIs, exits, board meetings (Phase 2) [DONE]
-  doc-vault.html   # Document vault (Phase 1)
-  lp-portal.html   # LP portal (Phase 1)
-  styles.css       # Global design system
-  auth.js          # JWT utilities
-  fund-admin.js    # Fund admin logic
-  doc-vault.js     # Document vault logic
-  lp-portal.js     # LP portal logic
+  index.html            # Portfolio dashboard (Phase 0)              [DONE]
+  login.html            # JWT login page (Phase 1)                   [DONE]
+  fund-admin.html/js    # Fund administration (Phase 1)              [DONE]
+  investments.html/js   # Investments, valuations, KPIs (Phase 2)    [DONE]
+  doc-vault.html/js     # Document vault (Phase 1)                   [DONE]
+  lp-portal.html/js     # LP portal (Phase 1)                       [DONE]
+  lp-management.html/js # LP management — 6 tabs (Phase 3)          [DONE]
+  fund-accounting.html/js # Fund accounting — 8 tabs (Phase 4)      [DONE]
+  compliance.html/js    # SEBI compliance — 7 tabs (Phase 5)        [DONE]
+  styles.css            # Global design system
+  auth.js               # JWT utilities (apiGet/Post/Put/Delete/Upload/GetBlob)
+  notification-drawer.js # In-app notification badge + drawer
+  theme-switcher.js     # Dark/light theme toggle
 ```
 
 ---

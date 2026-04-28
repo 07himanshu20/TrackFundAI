@@ -1,4 +1,5 @@
 import mimetypes
+from django.db.models import Q
 from django.http import FileResponse
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes, parser_classes
@@ -7,6 +8,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from accounts.audit import log_audit, _get_client_ip
+from accounts.fund_access_helpers import get_accessible_fund_ids, user_has_fund_access
 from accounts.permissions import IsGPUser, IsGPAdmin
 from funds.models import Fund, Scheme
 from .models import Document, DocumentAccessLog
@@ -23,7 +25,13 @@ def document_list(request):
     if not org:
         return Response({'detail': 'No organization.'}, status=403)
 
-    qs = Document.objects.filter(organization=org)
+    fund_ids = get_accessible_fund_ids(request.user)
+    # Show documents for accessible funds OR org-level docs (no fund)
+    qs = Document.objects.filter(
+        organization=org,
+    ).filter(
+        Q(fund__isnull=True) | Q(fund__id__in=fund_ids)
+    )
 
     # Filter by fund
     fund_id = request.query_params.get('fund')
@@ -116,6 +124,9 @@ def document_detail(request, doc_id):
     except Document.DoesNotExist:
         return Response({'detail': 'Document not found.'}, status=404)
 
+    if doc.fund and not user_has_fund_access(request.user, doc.fund):
+        return Response({'detail': 'Document not found.'}, status=404)
+
     # Log view access
     DocumentAccessLog.objects.create(
         document=doc,
@@ -135,6 +146,9 @@ def document_download(request, doc_id):
     try:
         doc = Document.objects.get(pk=doc_id, organization=org)
     except Document.DoesNotExist:
+        return Response({'detail': 'Document not found.'}, status=404)
+
+    if doc.fund and not user_has_fund_access(request.user, doc.fund):
         return Response({'detail': 'Document not found.'}, status=404)
 
     # Log download
@@ -167,6 +181,9 @@ def document_delete(request, doc_id):
     except Document.DoesNotExist:
         return Response({'detail': 'Document not found.'}, status=404)
 
+    if doc.fund and not user_has_fund_access(request.user, doc.fund):
+        return Response({'detail': 'Document not found.'}, status=404)
+
     log_audit(request, 'delete', 'document', doc.id, {
         'title': doc.title, 'file_name': doc.file_name,
     })
@@ -186,6 +203,9 @@ def document_access_log(request, doc_id):
     try:
         doc = Document.objects.get(pk=doc_id, organization=org)
     except Document.DoesNotExist:
+        return Response({'detail': 'Document not found.'}, status=404)
+
+    if doc.fund and not user_has_fund_access(request.user, doc.fund):
         return Response({'detail': 'Document not found.'}, status=404)
 
     logs = doc.access_logs.all()[:50]

@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem('tfai_theme')==='light')document.documentElement.setAttribute('data-theme','light');</script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TrackFundAI — Data Upload</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='16' fill='%2303030a'/><text y='.9em' font-size='62' x='10' fill='%2300d4ff' font-family='monospace' font-weight='bold'>TF</text></svg>" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="fund-admin.css" />
+  <link rel="stylesheet" href="notification-drawer.css" />
+  <link rel="stylesheet" href="data-upload.css" />
+</head>
+<body>
+
+  <div id="bg-canvas" aria-hidden="true">
+    <div class="bg-orb bg-orb-1"></div>
+    <div class="bg-orb bg-orb-2"></div>
+    <div class="bg-orb bg-orb-3"></div>
+    <div class="bg-grid"></div>
+  </div>
+
+  <!-- Top bar -->
+  <nav id="navbar">
+    <div class="nav-brand">
+      <span class="brand-dot"></span>
+      TrackFundAI
+    </div>
+    <div class="nav-links">
+      <a href="index.html" class="nav-link">Portfolio Dashboard</a>
+      <a href="fund-admin.html" class="nav-link">Fund Admin</a>
+      <a href="investments.html" class="nav-link">Investments</a>
+      <a href="lp-management.html" class="nav-link">LP Management</a>
+      <a href="fund-accounting.html" class="nav-link">Fund Accounting</a>
+      <a href="compliance.html" class="nav-link">Compliance</a>
+      <a href="doc-vault.html" class="nav-link">Doc Vault</a>
+      <span class="nav-link active">Data Upload</span>
+    </div>
+    <div class="nav-actions">
+      <span class="notif-badge" id="notif-badge" title="Notifications">0</span>
+      <span class="user-badge" id="user-badge">—</span>
+      <button class="btn-ghost" id="btn-logout">Logout</button>
+    </div>
+  </nav>
+
+  <main id="main-scroll">
+
+    <!-- Hero section -->
+    <section class="hero-strip" style="padding: 60px 0 30px;">
+      <div class="hero-inner" style="max-width:800px; margin:0 auto; padding:0 24px;">
+        <p class="hero-eyebrow">MODULE 8 — DATA IMPORT</p>
+        <h1 class="hero-title">Fund Data Upload</h1>
+        <p class="hero-sub">
+          Drag and drop your fund Excel files below. Gemini AI will automatically
+          map columns and import data across all modules — investors, commitments,
+          portfolios, compliance, and more.
+        </p>
+      </div>
+    </section>
+
+    <!-- Upload Section -->
+    <section class="upload-container">
+
+      <!-- Drop Zone -->
+      <div class="drop-zone" id="drop-zone">
+        <div class="drop-icon">&#128451;</div>
+        <div class="drop-text">Drag & drop Excel files here</div>
+        <div class="drop-sub">or click to browse</div>
+        <div class="file-types">.xlsx files only — up to 50 MB each</div>
+        <input type="file" id="file-input" multiple accept=".xlsx,.xls" style="display:none;" />
+      </div>
+
+      <!-- File Queue -->
+      <div class="file-queue" id="file-queue"></div>
+
+      <!-- Actions -->
+      <div class="upload-actions" id="upload-actions" style="display:none;">
+        <div>
+          <span class="file-count" id="file-count">0 files selected</span>
+          <button class="btn-clear-all" id="btn-clear">Clear All</button>
+        </div>
+        <button class="btn-start-import" id="btn-start">Start Import</button>
+      </div>
+
+      <!-- Progress -->
+      <div class="import-progress" id="import-progress">
+        <div class="progress-header">
+          <span class="progress-title">Importing Fund Data</span>
+          <span class="progress-percent" id="progress-percent">0%</span>
+        </div>
+        <div class="progress-bar-container">
+          <div class="progress-bar-fill" id="progress-bar"></div>
+        </div>
+        <div class="progress-message" id="progress-message">Preparing upload...</div>
+        <div class="progress-file-name" id="progress-file"></div>
+      </div>
+
+      <!-- Results -->
+      <div class="import-results" id="import-results">
+        <div class="results-header">
+          <span class="check-icon">&#10003;</span>
+          <h3 id="results-title">Import Complete</h3>
+        </div>
+        <div class="results-grid" id="results-grid"></div>
+        <div style="display:flex; gap:12px; justify-content:center; flex-wrap:wrap; margin-top:8px;">
+          <a href="fund-admin.html" class="btn-new-import" style="text-decoration:none; background:var(--accent-blue); color:var(--bg-void);">Go to Fund Admin</a>
+          <button class="btn-new-import" id="btn-new-import" style="background:transparent; border:1px solid var(--border-subtle); color:var(--text-secondary);">Upload More Files</button>
+        </div>
+      </div>
+
+      <!-- Errors -->
+      <div class="import-errors" id="import-errors">
+        <h4 style="color: var(--accent-red); margin-bottom: 12px; font-size: 14px;">Import Errors</h4>
+        <div id="error-list"></div>
+      </div>
+
+    </section>
+
+    <!-- Spacer -->
+    <div style="height: 100px;"></div>
+
+  </main>
+
+  <!-- Notification drawer (reused component) -->
+  <div id="notif-drawer" class="notif-drawer" style="display:none;">
+    <div class="notif-drawer-header">
+      <h3>Notifications</h3>
+      <button class="btn-ghost" id="notif-mark-all">Mark all read</button>
+      <button class="btn-ghost" id="notif-close">&times;</button>
+    </div>
+    <div class="notif-filters" id="notif-filters"></div>
+    <ul class="notif-list" id="notif-list"></ul>
+  </div>
+
+  <script src="auth.js"></script>
+  <script src="theme-switcher.js"></script>
+  <script src="notification-drawer.js"></script>
+  <script src="data-upload.js"></script>
+</body>
+</html>

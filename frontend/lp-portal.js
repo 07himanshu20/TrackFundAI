@@ -8,6 +8,7 @@
   let funds = [];
   let documents = [];
   let notifications = [];
+  let dashboardData = null;
 
   const esc = (s) => {
     if (s === null || s === undefined) return '—';
@@ -77,6 +78,7 @@
 
     // Load everything in parallel
     await Promise.all([
+      loadDashboard(),
       loadFunds(),
       loadDocuments(),
       loadNotifications(),
@@ -98,6 +100,109 @@
     }
   }
 
+  // ── Dashboard (Capital Account Summary) ────────────────────
+  async function loadDashboard() {
+    try {
+      dashboardData = await Auth.apiGet('/lp/dashboard/');
+      renderCapitalSummary();
+    } catch (e) {
+      console.warn('LP dashboard not available:', e.message);
+      const el = document.getElementById('lp-capital-summary');
+      if (el) el.innerHTML = '<p style="color:var(--text-muted);padding:20px;">Capital account data not yet available.</p>';
+    }
+  }
+
+  function renderCapitalSummary() {
+    const el = document.getElementById('lp-capital-summary');
+    if (!el || !dashboardData) return;
+
+    const d = dashboardData;
+    const fmtM = (v) => {
+      const n = parseFloat(v);
+      if (isNaN(n)) return '—';
+      if (Math.abs(n) >= 1e9) return `₹${(n / 1e9).toFixed(2)}B`;
+      if (Math.abs(n) >= 1e7) return `₹${(n / 1e7).toFixed(1)}Cr`;
+      if (Math.abs(n) >= 1e5) return `₹${(n / 1e5).toFixed(1)}L`;
+      return '₹' + n.toLocaleString('en-IN');
+    };
+    const fmtX = (v) => v !== null && v !== undefined ? parseFloat(v).toFixed(2) + 'x' : '—';
+    const fmtPctVal = (v) => v !== null && v !== undefined ? (parseFloat(v) * 100).toFixed(1) + '%' : '—';
+
+    const irrVal = d.irr;
+    const irrCls = irrVal === null ? '' : parseFloat(irrVal) >= 0 ? 'style="color:var(--accent-green)"' : 'style="color:#ef4444"';
+
+    el.innerHTML = `
+      <div class="fund-grid">
+        <div class="lp-fund-card">
+          <div class="lp-fund-name">Committed Capital</div>
+          <div class="lp-fund-sebi" style="font-size:24px;font-weight:700;color:var(--accent);">${fmtM(d.total_committed)}</div>
+        </div>
+        <div class="lp-fund-card">
+          <div class="lp-fund-name">Called Capital</div>
+          <div class="lp-fund-sebi" style="font-size:24px;font-weight:700;">${fmtM(d.total_called)}</div>
+        </div>
+        <div class="lp-fund-card">
+          <div class="lp-fund-name">Distributed</div>
+          <div class="lp-fund-sebi" style="font-size:24px;font-weight:700;color:var(--accent-green);">${fmtM(d.total_distributed)}</div>
+        </div>
+        <div class="lp-fund-card">
+          <div class="lp-fund-name">Unrealized Value</div>
+          <div class="lp-fund-sebi" style="font-size:24px;font-weight:700;">${fmtM(d.total_unrealized)}</div>
+        </div>
+        <div class="lp-fund-card">
+          <div class="lp-fund-name">Total Value</div>
+          <div class="lp-fund-sebi" style="font-size:24px;font-weight:700;color:var(--accent);">${fmtM(d.total_value)}</div>
+        </div>
+        <div class="lp-fund-card">
+          <div class="lp-fund-name">IRR</div>
+          <div class="lp-fund-sebi" style="font-size:24px;font-weight:700;" ${irrCls}>${fmtPctVal(irrVal)}</div>
+        </div>
+        <div class="lp-fund-card">
+          <div class="lp-fund-name">TVPI</div>
+          <div class="lp-fund-sebi" style="font-size:24px;font-weight:700;">${fmtX(d.tvpi)}</div>
+        </div>
+        <div class="lp-fund-card">
+          <div class="lp-fund-name">DPI</div>
+          <div class="lp-fund-sebi" style="font-size:24px;font-weight:700;">${fmtX(d.dpi)}</div>
+        </div>
+        <div class="lp-fund-card">
+          <div class="lp-fund-name">MOIC</div>
+          <div class="lp-fund-sebi" style="font-size:24px;font-weight:700;">${fmtX(d.moic)}</div>
+        </div>
+      </div>
+    `;
+
+    // Scheme breakdown table
+    const breakdownEl = document.getElementById('lp-scheme-breakdown');
+    if (breakdownEl && d.schemes && d.schemes.length) {
+      breakdownEl.innerHTML = `
+        <h3 style="color:var(--text);margin-bottom:12px;font-size:14px;font-weight:600;">Per-Scheme Breakdown</h3>
+        <div class="doc-table-wrap">
+          <table class="doc-table">
+            <thead><tr>
+              <th>Scheme</th>
+              <th>Committed</th>
+              <th>Called</th>
+              <th>Distributed</th>
+              <th>Unrealized</th>
+              <th>Total Value</th>
+            </tr></thead>
+            <tbody>
+              ${d.schemes.map(s => `<tr>
+                <td style="font-weight:600;">${esc(s.scheme_name)}</td>
+                <td>${fmtM(s.committed)}</td>
+                <td>${fmtM(s.called)}</td>
+                <td style="color:var(--accent-green);">${fmtM(s.distributed)}</td>
+                <td>${fmtM(s.unrealized)}</td>
+                <td style="font-weight:600;">${fmtM(s.total_value)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+  }
+
   // ── Stats ─────────────────────────────────────────────────
   function renderStats() {
     const bar = document.getElementById('stats-bar');
@@ -106,6 +211,7 @@
     const chips = [
       ['Funds', funds.length],
       ['Documents', documents.length],
+      ['Commitments', dashboardData?.commitment_count || 0],
       ['Unread Alerts', unread],
     ];
     chips.forEach(([label, value]) => {
@@ -144,7 +250,7 @@
         <div class="lp-fund-metrics">
           <div class="lp-fund-metric">
             <span class="label">Category</span>
-            <span class="value">${f.category_display}</span>
+            <span class="value">${f.category_name || '—'}</span>
           </div>
           <div class="lp-fund-metric">
             <span class="label">Structure</span>

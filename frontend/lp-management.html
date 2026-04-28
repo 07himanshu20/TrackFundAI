@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem('tfai_theme')==='light')document.documentElement.setAttribute('data-theme','light');</script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TrackFundAI — LP Management</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='16' fill='%2303030a'/><text y='.9em' font-size='62' x='10' fill='%2300d4ff' font-family='monospace' font-weight='bold'>TF</text></svg>" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="fund-admin.css" />
+  <link rel="stylesheet" href="lp-management.css" />
+  <link rel="stylesheet" href="notification-drawer.css" />
+</head>
+<body>
+
+  <div id="bg-canvas" aria-hidden="true">
+    <div class="bg-orb bg-orb-1"></div>
+    <div class="bg-orb bg-orb-2"></div>
+    <div class="bg-orb bg-orb-3"></div>
+    <div class="bg-grid"></div>
+  </div>
+
+  <!-- Top bar -->
+  <nav id="navbar">
+    <div class="nav-brand">
+      <span class="brand-dot"></span>
+      TrackFundAI
+    </div>
+    <div class="nav-links">
+      <a href="index.html" class="nav-link">Portfolio Dashboard</a>
+      <a href="fund-admin.html" class="nav-link">Fund Admin</a>
+      <a href="investments.html" class="nav-link">Investments</a>
+      <span class="nav-link active">LP Management</span>
+      <a href="fund-accounting.html" class="nav-link">Fund Accounting</a>
+      <a href="compliance.html" class="nav-link">Compliance</a>
+      <a href="doc-vault.html" class="nav-link">Doc Vault</a>
+      <a href="data-upload.html" class="nav-link">Data Upload</a>
+    </div>
+    <div class="nav-actions">
+      <span class="notif-badge" id="notif-badge" title="Notifications">0</span>
+      <span class="user-badge" id="user-badge">—</span>
+      <button class="btn-ghost" id="btn-logout">Logout</button>
+    </div>
+  </nav>
+
+  <main id="main-scroll">
+
+    <!-- Header -->
+    <section class="section section-hero">
+      <div class="hero-content">
+        <div class="hero-eyebrow">MODULE 2 · LP MANAGEMENT</div>
+        <h1 class="hero-title">
+          <span class="hero-title-main">Limited Partner</span>
+          <span class="hero-title-sub">Management</span>
+        </h1>
+        <p class="hero-description" id="org-label">—</p>
+        <div class="hero-stats" id="stats-bar"></div>
+      </div>
+    </section>
+
+    <!-- Tab Navigation -->
+    <section class="section">
+      <div class="inv-tabs" id="lp-tabs">
+        <button class="inv-tab active" data-tab="investors">Investors</button>
+        <button class="inv-tab" data-tab="commitments">Commitments</button>
+        <button class="inv-tab" data-tab="capital-calls">Capital Calls</button>
+        <button class="inv-tab" data-tab="distributions">Distributions</button>
+        <button class="inv-tab" data-tab="capital-accounts">LP Capital Accounts</button>
+        <button class="inv-tab" data-tab="waterfall">Waterfall Simulator</button>
+      </div>
+    </section>
+
+    <!-- ═══ INVESTORS TAB ═══ -->
+    <section class="section" id="tab-investors">
+      <div class="section-header">
+        <div class="section-tag">Investors</div>
+        <h2 class="section-title">Investor Registry</h2>
+        <p class="section-subtitle">All LPs onboarded to your organization — individuals, corporates, family offices, and institutions.</p>
+      </div>
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <label>Type:</label>
+          <select id="investor-type-filter" class="select-dark">
+            <option value="">All Types</option>
+            <option value="individual_resident">Individual (Resident)</option>
+            <option value="individual_nri">Individual (NRI)</option>
+            <option value="huf">HUF</option>
+            <option value="family_office">Family Office</option>
+            <option value="corporate">Corporate</option>
+            <option value="bank">Bank</option>
+            <option value="insurance">Insurance Company</option>
+            <option value="mf">Mutual Fund</option>
+            <option value="pension_fund">Pension Fund</option>
+            <option value="endowment">Endowment</option>
+            <option value="fpi">FPI</option>
+            <option value="trust">Trust</option>
+            <option value="nbfc">NBFC</option>
+            <option value="vc_fund">VC Fund</option>
+            <option value="pe_fund">PE Fund</option>
+            <option value="other">Other</option>
+          </select>
+          <label style="margin-left:12px;">KYC:</label>
+          <select id="kyc-filter" class="select-dark">
+            <option value="">All</option>
+            <option value="pending">Pending</option>
+            <option value="in_review">In Review</option>
+            <option value="approved">Approved</option>
+            <option value="rejected">Rejected</option>
+            <option value="expired">Expired</option>
+          </select>
+        </div>
+        <button class="btn-primary" id="btn-new-investor">+ Add Investor</button>
+      </div>
+      <div class="lp-table-wrap">
+        <table class="lp-table">
+          <thead>
+            <tr>
+              <th>Investor</th>
+              <th>Type</th>
+              <th>PAN</th>
+              <th>KYC Status</th>
+              <th>FATCA</th>
+              <th>Flags</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="investor-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ═══ COMMITMENTS TAB ═══ -->
+    <section class="section hidden" id="tab-commitments">
+      <div class="section-header">
+        <div class="section-tag">Commitments</div>
+        <h2 class="section-title">LP Commitments</h2>
+        <p class="section-subtitle">Capital commitments from LPs across all schemes. Manage subscription forms and close types.</p>
+      </div>
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <label>Scheme:</label>
+          <select id="commitment-scheme-filter" class="select-dark">
+            <option value="">All Schemes</option>
+          </select>
+        </div>
+        <button class="btn-primary" id="btn-new-commitment">+ New Commitment</button>
+        <button class="btn-ghost" id="btn-allot-units" style="margin-left:8px;">Allot Units at NAV</button>
+      </div>
+      <div class="lp-table-wrap">
+        <table class="lp-table">
+          <thead>
+            <tr>
+              <th>Investor</th>
+              <th>Scheme</th>
+              <th>Commitment</th>
+              <th>Close</th>
+              <th>Units</th>
+              <th>Status</th>
+              <th>Side Letter</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="commitment-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ═══ CAPITAL CALLS TAB ═══ -->
+    <section class="section hidden" id="tab-capital-calls">
+      <div class="section-header">
+        <div class="section-tag">Capital Calls</div>
+        <h2 class="section-title">Capital Calls</h2>
+        <p class="section-subtitle">Issue and track capital calls to LPs. Monitor payment status per call line item.</p>
+      </div>
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <label>Scheme:</label>
+          <select id="call-scheme-filter" class="select-dark">
+            <option value="">All Schemes</option>
+          </select>
+        </div>
+        <button class="btn-primary" id="btn-new-call">+ Issue Capital Call</button>
+      </div>
+      <div id="capital-calls-list"></div>
+    </section>
+
+    <!-- ═══ DISTRIBUTIONS TAB ═══ -->
+    <section class="section hidden" id="tab-distributions">
+      <div class="section-header">
+        <div class="section-tag">Distributions</div>
+        <h2 class="section-title">Distributions</h2>
+        <p class="section-subtitle">Return of capital, income, and carry distributions to LPs. Includes TDS computation.</p>
+      </div>
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <label>Scheme:</label>
+          <select id="dist-scheme-filter" class="select-dark">
+            <option value="">All Schemes</option>
+          </select>
+        </div>
+        <button class="btn-primary" id="btn-new-distribution">+ New Distribution</button>
+      </div>
+      <div id="distributions-list"></div>
+    </section>
+
+    <!-- ═══ LP CAPITAL ACCOUNTS TAB ═══ -->
+    <section class="section hidden" id="tab-capital-accounts">
+      <div class="section-header">
+        <div class="section-tag">Capital Accounts</div>
+        <h2 class="section-title">LP Capital Accounts</h2>
+        <p class="section-subtitle">Per-LP capital account statements with IRR, TVPI, DPI, RVPI, and MOIC metrics.</p>
+      </div>
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <label>Scheme:</label>
+          <select id="acc-scheme-filter" class="select-dark">
+            <option value="">All Schemes</option>
+          </select>
+        </div>
+        <button class="btn-primary" id="btn-new-capital-account">+ Record Capital Account</button>
+      </div>
+      <div class="lp-table-wrap">
+        <table class="lp-table">
+          <thead>
+            <tr>
+              <th>Investor</th>
+              <th>Scheme</th>
+              <th>As Of</th>
+              <th>Committed</th>
+              <th>Called</th>
+              <th>Uncalled</th>
+              <th>Distributed</th>
+              <th>Unrealized</th>
+              <th>Total Value</th>
+              <th>IRR</th>
+              <th>TVPI</th>
+              <th>DPI</th>
+              <th>MOIC</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="capital-accounts-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ═══ WATERFALL SIMULATOR TAB ═══ -->
+    <section class="section hidden" id="tab-waterfall">
+      <div class="section-header">
+        <div class="section-tag">Waterfall</div>
+        <h2 class="section-title">Waterfall Simulator</h2>
+        <p class="section-subtitle">Model carried interest waterfall outcomes with interactive sliders. Adjust distributions, committed capital, and hurdle rate to see the GP / LP split in real time.</p>
+      </div>
+      <div class="waterfall-simulator">
+        <div class="wf-controls">
+          <div class="wf-control-group">
+            <label>Scheme</label>
+            <select id="wf-scheme-select" class="select-dark"></select>
+          </div>
+          <div class="wf-control-group">
+            <label>Total Distributions (₹ Cr)</label>
+            <input type="range" id="wf-distributions" min="0" max="500" step="1" value="200" />
+            <span id="wf-distributions-val">₹200 Cr</span>
+          </div>
+          <div class="wf-control-group">
+            <label>Called Capital (₹ Cr)</label>
+            <input type="range" id="wf-called" min="0" max="500" step="1" value="100" />
+            <span id="wf-called-val">₹100 Cr</span>
+          </div>
+          <div class="wf-control-group">
+            <label>Hurdle Rate (%)</label>
+            <input type="range" id="wf-hurdle" min="0" max="25" step="0.5" value="8" />
+            <span id="wf-hurdle-val">8.0%</span>
+          </div>
+          <div class="wf-control-group">
+            <label>Carry % (GP share above hurdle)</label>
+            <input type="range" id="wf-carry" min="10" max="30" step="1" value="20" />
+            <span id="wf-carry-val">20%</span>
+          </div>
+          <div class="wf-control-group">
+            <label>Fund Tenure (years)</label>
+            <input type="range" id="wf-tenure" min="1" max="15" step="1" value="7" />
+            <span id="wf-tenure-val">7 years</span>
+          </div>
+        </div>
+        <div class="wf-output">
+          <div class="wf-steps" id="wf-steps">
+            <!-- Rendered by JS -->
+          </div>
+          <div class="wf-summary" id="wf-summary">
+            <!-- Summary rendered by JS -->
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Modal for forms -->
+    <div class="modal-overlay hidden" id="modal-overlay">
+      <div class="modal-card" id="modal-card">
+        <div class="modal-header">
+          <h3 id="modal-title">—</h3>
+          <button class="modal-close" id="modal-close">&times;</button>
+        </div>
+        <form id="modal-form">
+          <div id="modal-fields"></div>
+          <div class="modal-actions">
+            <button type="button" class="btn-ghost" id="modal-cancel">Cancel</button>
+            <button type="submit" class="btn-primary" id="modal-submit">Save</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+  </main>
+
+  <script src="theme-switcher.js"></script>
+  <script src="auth.js"></script>
+  <script src="notification-drawer.js"></script>
+  <script src="lp-management.js"></script>
+
+</body>
+</html>

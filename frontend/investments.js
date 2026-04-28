@@ -55,6 +55,11 @@
     document.getElementById('btn-new-board').onclick = () => openBoardForm();
     document.getElementById('btn-generate-board-pack').onclick = () => generateBoardPack();
 
+    // KPI sub-tabs
+    document.querySelectorAll('.kpi-sub-tab').forEach(btn => {
+      btn.onclick = () => switchKpiSubTab(btn.dataset.kpiSub);
+    });
+
     // Modal
     document.getElementById('modal-close').onclick = closeModal;
     document.getElementById('modal-cancel').onclick = closeModal;
@@ -516,6 +521,119 @@
     } catch (e) {
       alert('Failed: ' + e.message);
     }
+  }
+
+  // ── KPI Sub-tab switching ─────────────────────────────────
+  function switchKpiSubTab(sub) {
+    document.querySelectorAll('.kpi-sub-tab').forEach(b => {
+      b.classList.toggle('active', b.dataset.kpiSub === sub);
+    });
+    document.getElementById('kpi-sub-submissions').classList.toggle('hidden', sub !== 'submissions');
+    document.getElementById('kpi-sub-definitions').classList.toggle('hidden', sub !== 'definitions');
+    if (sub === 'definitions') loadKPIDefinitions();
+  }
+
+  // ── KPI Definitions ───────────────────────────────────────
+  let kpiDefs = [];
+
+  async function loadKPIDefinitions() {
+    const list = document.getElementById('kpi-def-list');
+    list.innerHTML = '<p style="color: var(--text-muted); padding: 12px;">Loading...</p>';
+    try {
+      kpiDefs = await Auth.apiGet('/kpi-definitions/');
+      renderKPIDefinitions();
+    } catch (e) {
+      list.innerHTML = '<p style="color: var(--text-muted);">Failed to load KPI definitions.</p>';
+    }
+  }
+
+  function renderKPIDefinitions() {
+    const list = document.getElementById('kpi-def-list');
+    list.innerHTML = '';
+
+    // Wire up the new-definition button
+    const newBtn = document.getElementById('btn-new-kpi-def');
+    if (newBtn) newBtn.onclick = () => openKPIDefForm();
+
+    if (!kpiDefs.length) {
+      list.innerHTML = '<p style="color: var(--text-muted); padding: 12px;">No KPI definitions yet. Create one to allow founders to submit KPI data.</p>';
+      return;
+    }
+
+    kpiDefs.sort((a, b) => (a.sort_order || 999) - (b.sort_order || 999));
+
+    kpiDefs.forEach(def => {
+      const row = document.createElement('div');
+      row.className = 'scheme-row';
+      const activeColor = def.is_active ? 'var(--accent-green)' : 'var(--text-muted)';
+      row.innerHTML = `
+        <div class="scheme-row-main">
+          <strong>${esc(def.name)}</strong>
+          <span class="scheme-row-meta" style="font-family:var(--font-mono);">${esc(def.slug)}</span>
+          <span class="fund-status ${def.is_active ? 'active' : 'closed'}" style="margin-left:8px;">${def.is_active ? 'ACTIVE' : 'INACTIVE'}</span>
+          ${def.is_required ? '<span class="fund-status active" style="margin-left:4px;background:rgba(168,85,247,0.1);color:#a855f7;border-color:rgba(168,85,247,0.3);">REQUIRED</span>' : ''}
+        </div>
+        <div class="scheme-row-detail" style="margin-top:4px;">
+          Format: <strong>${esc(def.format || '—')}</strong>
+          · Frequency: ${esc(def.frequency || '—')}
+          ${def.is_financial ? ' · Financial KPI' : ''}
+          ${def.unit ? ' · Unit: ' + esc(def.unit) : ''}
+          ${def.description ? '<div style="margin-top:4px;color:var(--text-muted);">' + esc(def.description) + '</div>' : ''}
+        </div>
+        <div class="scheme-row-actions" style="margin-top:8px;">
+          <button class="btn-ghost small" data-id="${def.id}" data-action="edit-def">Edit</button>
+          <button class="btn-ghost small" data-id="${def.id}" data-action="toggle-def"
+            style="color:${activeColor};">${def.is_active ? 'Deactivate' : 'Activate'}</button>
+        </div>
+      `;
+      list.appendChild(row);
+
+      row.querySelector('[data-action="edit-def"]').onclick = () => openKPIDefForm(def);
+      row.querySelector('[data-action="toggle-def"]').onclick = async () => {
+        try {
+          await Auth.apiPut(`/kpi-definitions/${def.id}/`, { ...def, is_active: !def.is_active });
+          await loadKPIDefinitions();
+        } catch (e) { alert('Failed: ' + e.message); }
+      };
+    });
+  }
+
+  function openKPIDefForm(existing = null) {
+    const isEdit = !!existing;
+    openModal(isEdit ? 'Edit KPI Definition' : 'New KPI Definition', [
+      { name: 'name', label: 'KPI Name', required: true, value: existing?.name || '' },
+      { name: 'slug', label: 'Slug (unique identifier)', required: true, value: existing?.slug || '', type: 'text' },
+      { name: 'description', label: 'Description', type: 'textarea', value: existing?.description || '' },
+      { name: 'format', label: 'Format', type: 'select', options: [
+        { value: 'number', label: 'Number' },
+        { value: 'currency', label: 'Currency (₹)' },
+        { value: 'percentage', label: 'Percentage (%)' },
+        { value: 'ratio', label: 'Ratio' },
+        { value: 'text', label: 'Text' },
+      ].map(o => ({ ...o, selected: o.value === existing?.format })),
+        value: existing?.format || 'number' },
+      { name: 'unit', label: 'Unit (e.g., ₹, %, users)', value: existing?.unit || '' },
+      { name: 'frequency', label: 'Reporting Frequency', type: 'select', options: [
+        { value: 'monthly', label: 'Monthly' },
+        { value: 'quarterly', label: 'Quarterly' },
+        { value: 'half_yearly', label: 'Half-Yearly' },
+        { value: 'annually', label: 'Annually' },
+      ].map(o => ({ ...o, selected: o.value === existing?.frequency })),
+        value: existing?.frequency || 'quarterly' },
+      { name: 'sort_order', label: 'Sort Order', type: 'text', value: existing?.sort_order ?? '0' },
+      { name: 'is_required', label: 'Required KPI', type: 'checkbox', value: existing?.is_required ?? false },
+      { name: 'is_financial', label: 'Financial KPI', type: 'checkbox', value: existing?.is_financial ?? false },
+      { name: 'is_active', label: 'Active', type: 'checkbox', value: existing?.is_active ?? true },
+    ], async (data) => {
+      // Convert numeric fields
+      if (data.sort_order !== undefined) data.sort_order = parseInt(data.sort_order) || 0;
+      if (isEdit) {
+        await Auth.apiPut(`/kpi-definitions/${existing.id}/`, data);
+      } else {
+        await Auth.apiPost('/kpi-definitions/', data);
+      }
+      await loadKPIDefinitions();
+    });
   }
 
   // ── All Exits Tab ─────────────────────────────────────────

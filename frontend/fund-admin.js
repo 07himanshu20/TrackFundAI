@@ -9,6 +9,8 @@
   let funds = [];
   let currentFund = null;    // full fund detail (with schemes + entities)
   let modalCallback = null;  // function called with form data on submit
+  let fundCategories = [];   // cached SEBI fund categories for dropdowns
+  let orgEntities = [];      // cached org-level entities for dropdowns
 
   // ── Formatting ────────────────────────────────────────────
   const fmtCurrency = (v) => {
@@ -42,13 +44,14 @@
     document.getElementById('btn-back-list').onclick = () => showList();
     document.getElementById('btn-new-scheme').onclick = () => openSchemeForm();
     document.getElementById('btn-new-entity').onclick = () => openEntityForm();
+    document.getElementById('btn-link-entity').onclick = () => openLinkEntityForm();
 
     // Modal controls
     document.getElementById('modal-close').onclick = closeModal;
     document.getElementById('modal-cancel').onclick = closeModal;
     document.getElementById('modal-form').onsubmit = handleModalSubmit;
 
-    await loadFunds();
+    await Promise.all([loadFunds(), loadFundCategories(), loadOrgEntities()]);
     loadNotifCount();
   }
 
@@ -63,6 +66,23 @@
       }
     } catch (e) {
       console.error('Failed to load notification count:', e);
+    }
+  }
+
+  // ── Load fund categories & entities ────────────────────────
+  async function loadFundCategories() {
+    try {
+      fundCategories = await Auth.apiGet('/funds/categories/');
+    } catch (e) {
+      console.error('Failed to load fund categories:', e);
+    }
+  }
+
+  async function loadOrgEntities() {
+    try {
+      orgEntities = await Auth.apiGet('/funds/entities/');
+    } catch (e) {
+      console.error('Failed to load entities:', e);
     }
   }
 
@@ -82,7 +102,7 @@
     bar.innerHTML = '';
     const chips = [
       ['Total Funds', funds.length],
-      ['Active', funds.filter(f => f.status === 'active').length],
+      ['Active', funds.filter(f => f.fund_status === 'active').length],
       ['Total Schemes', funds.reduce((a, f) => a + (f.scheme_count || 0), 0)],
     ];
     chips.forEach(([label, value]) => {
@@ -98,7 +118,14 @@
     grid.innerHTML = '';
 
     if (funds.length === 0) {
-      grid.innerHTML = '<p style="color: var(--text-muted); padding: 40px; text-align: center;">No funds yet. Click "+ New Fund" to create one.</p>';
+      grid.innerHTML = `
+        <div style="text-align:center; padding:60px 20px;">
+          <div style="font-size:48px; margin-bottom:16px;">📂</div>
+          <p style="color:var(--text-secondary); font-size:16px; margin-bottom:8px;">No fund data found</p>
+          <p style="color:var(--text-muted); font-size:13px; margin-bottom:24px;">Upload your fund Excel files to get started. Gemini AI will map columns and import everything automatically.</p>
+          <a href="data-upload.html" style="display:inline-block; padding:12px 32px; background:var(--accent-blue); color:var(--bg-void); border-radius:8px; text-decoration:none; font-weight:600; font-size:14px;">Upload Fund Data</a>
+          <p style="color:var(--text-muted); font-size:12px; margin-top:16px;">or click "+ New Fund" above to create manually</p>
+        </div>`;
       return;
     }
 
@@ -111,12 +138,12 @@
             <div class="fund-card-name">${esc(f.name)}</div>
             <div class="fund-card-sebi">${f.sebi_registration_number || 'No SEBI registration'}</div>
           </div>
-          <span class="fund-card-badge ${f.status}">${f.status_display}</span>
+          <span class="fund-card-badge ${f.fund_status}">${f.status_display}</span>
         </div>
         <div class="fund-card-metrics">
           <div class="fund-card-metric">
             <span class="label">Category</span>
-            <span class="value">${f.category_display}</span>
+            <span class="value">${f.category_name || '—'}</span>
           </div>
           <div class="fund-card-metric">
             <span class="label">Structure</span>
@@ -147,7 +174,7 @@
 
   function renderFundDetail() {
     const f = currentFund;
-    document.getElementById('detail-tag').textContent = f.category_display;
+    document.getElementById('detail-tag').textContent = f.category_name || 'Fund Detail';
     document.getElementById('detail-title').textContent = f.name;
     document.getElementById('detail-subtitle').textContent =
       f.sebi_registration_number || 'No SEBI registration number';
@@ -155,14 +182,18 @@
     // Info grid
     const grid = document.getElementById('fund-info-grid');
     grid.innerHTML = '';
+    const catDetail = f.fund_category_detail;
     const items = [
       ['Status', f.status_display],
-      ['Category', f.category_display],
+      ['Category', f.category_name || '—'],
+      ['Sub-Category', catDetail ? catDetail.sub_category || '—' : '—'],
       ['Structure', f.structure_display],
       ['Base Currency', f.base_currency],
       ['Target Corpus', `${f.base_currency} ${fmtCurrency(f.corpus_target)}`],
       ['Inception Date', f.inception_date || '—'],
       ['SEBI Registration', f.sebi_registration_number || '—'],
+      ['PAN', f.pan || '—'],
+      ['GSTIN', f.gstin || '—'],
       ['GIFT City', f.is_gift_city ? 'Yes' : 'No'],
     ];
     items.forEach(([label, value]) => {
@@ -198,28 +229,36 @@
       schemeList.innerHTML = '<p style="color: var(--text-muted); padding: 20px;">No schemes yet.</p>';
     }
 
-    // Entities
+    // Entities (linked via FK on fund)
     const entityList = document.getElementById('entity-list');
     entityList.innerHTML = '';
-    (f.entities || []).forEach(e => {
+    const entitySlots = [
+      ['Investment Manager', f.manager_entity_detail],
+      ['Trustee', f.trustee_entity_detail],
+      ['Sponsor', f.sponsor_entity_detail],
+      ['Custodian', f.custodian_entity_detail],
+      ['Statutory Auditor', f.auditor_entity_detail],
+    ];
+    let entityCount = 0;
+    entitySlots.forEach(([role, e]) => {
+      if (!e) return;
+      entityCount++;
       const card = document.createElement('div');
       card.className = 'entity-card';
       card.innerHTML = `
         <div class="entity-card-header">
-          <span class="entity-card-name">${esc(e.name)}</span>
-          <span class="scheme-card-role">${e.role_display}</span>
+          <span class="entity-card-name">${esc(e.entity_name)}</span>
+          <span class="scheme-card-role">${role}</span>
         </div>
         <div class="entity-card-details">
-          <div class="entity-detail"><span class="label">Contact</span><span class="value">${esc(e.contact_person)}</span></div>
-          <div class="entity-detail"><span class="label">Email</span><span class="value">${esc(e.email)}</span></div>
-          <div class="entity-detail"><span class="label">Phone</span><span class="value">${esc(e.phone)}</span></div>
+          <div class="entity-detail"><span class="label">Type</span><span class="value">${esc(e.entity_type_display)}</span></div>
           <div class="entity-detail"><span class="label">SEBI Reg.</span><span class="value">${esc(e.sebi_registration)}</span></div>
         </div>
       `;
       entityList.appendChild(card);
     });
-    if (f.entities.length === 0) {
-      entityList.innerHTML = '<p style="color: var(--text-muted); padding: 20px;">No entities yet.</p>';
+    if (entityCount === 0) {
+      entityList.innerHTML = '<p style="color: var(--text-muted); padding: 20px;">No entities linked. Use "+ Link Entity" to assign entities to this fund.</p>';
     }
   }
 
@@ -280,7 +319,7 @@
       // Convert numeric fields
       if (v === '') return;
       const num = Number(v);
-      if (!isNaN(num) && v.trim() !== '' && !['name', 'description', 'contact_person', 'email', 'phone', 'sebi_registration', 'sebi_registration_number', 'address'].includes(k)) {
+      if (!isNaN(num) && v.trim() !== '' && !['name', 'entity_name', 'description', 'contact_person', 'email', 'phone', 'sebi_registration', 'sebi_registration_number', 'address', 'city', 'state', 'country', 'pan', 'gstin', 'fund_category', 'manager_entity', 'trustee_entity', 'sponsor_entity', 'custodian_entity', 'auditor_entity'].includes(k)) {
         data[k] = num;
       } else {
         data[k] = v;
@@ -304,14 +343,20 @@
 
   // ── Fund form ─────────────────────────────────────────────
   function openFundForm() {
+    const categoryOptions = [{value: '', label: '— Select Category —'}].concat(
+      fundCategories.map(c => ({value: c.id, label: `${c.name}${c.sub_category ? ' — ' + c.sub_category : ''}`}))
+    );
+    const entityOptions = (type) => {
+      const filtered = orgEntities.filter(e => !type || e.entity_type === type);
+      return [{value: '', label: '— None —'}].concat(
+        filtered.map(e => ({value: e.id, label: e.entity_name}))
+      );
+    };
+
     openModal('Create New Fund', [
       {name: 'name', label: 'Fund Name', required: true, placeholder: 'e.g., Trivesta Growth Fund II'},
       {name: 'sebi_registration_number', label: 'SEBI Registration Number', placeholder: 'IN/AIF2/XX-XX/XXXX'},
-      {name: 'category', label: 'Category', type: 'select', default: 'cat_2', options: [
-        {value: 'cat_1', label: 'Category I'},
-        {value: 'cat_2', label: 'Category II'},
-        {value: 'cat_3', label: 'Category III'},
-      ]},
+      {name: 'fund_category', label: 'SEBI Category', type: 'select', options: categoryOptions},
       {name: 'structure_type', label: 'Structure', type: 'select', default: 'trust', options: [
         {value: 'trust', label: 'Trust'},
         {value: 'company', label: 'Company'},
@@ -322,9 +367,21 @@
         {value: 'INR', label: 'INR'},
         {value: 'USD', label: 'USD'},
       ]},
+      {name: 'pan', label: 'PAN', placeholder: 'AAACX1234X'},
+      {name: 'gstin', label: 'GSTIN', placeholder: 'Optional'},
       {name: 'inception_date', label: 'Inception Date', type: 'date'},
+      {name: 'manager_entity', label: 'Investment Manager', type: 'select', options: entityOptions('manager')},
+      {name: 'trustee_entity', label: 'Trustee', type: 'select', options: entityOptions('trustee')},
+      {name: 'sponsor_entity', label: 'Sponsor', type: 'select', options: entityOptions('sponsor')},
+      {name: 'custodian_entity', label: 'Custodian', type: 'select', options: entityOptions('custodian')},
+      {name: 'auditor_entity', label: 'Statutory Auditor', type: 'select', options: entityOptions('statutory_auditor')},
       {name: 'description', label: 'Description', type: 'textarea', placeholder: 'Fund description...'},
     ], async (data) => {
+      // Remove empty string values for optional FK fields
+      ['fund_category', 'manager_entity', 'trustee_entity', 'sponsor_entity',
+       'custodian_entity', 'auditor_entity'].forEach(k => {
+        if (!data[k]) delete data[k];
+      });
       await Auth.apiPost('/funds/', data);
       await loadFunds();
     });
@@ -357,11 +414,10 @@
     });
   }
 
-  // ── Entity form ───────────────────────────────────────────
+  // ── Entity form (org-level) ────────────────────────────────
   function openEntityForm() {
-    if (!currentFund) return;
-    openModal('Add Entity', [
-      {name: 'role', label: 'Role', type: 'select', required: true, options: [
+    openModal('Create Entity', [
+      {name: 'entity_type', label: 'Entity Type', type: 'select', required: true, options: [
         {value: 'manager', label: 'Investment Manager'},
         {value: 'trustee', label: 'Trustee'},
         {value: 'sponsor', label: 'Sponsor'},
@@ -370,13 +426,50 @@
         {value: 'legal_counsel', label: 'Legal Counsel'},
         {value: 'registrar', label: 'Registrar & Transfer Agent'},
       ]},
-      {name: 'name', label: 'Entity Name', required: true, placeholder: 'e.g., Axis Trustee Services Ltd.'},
+      {name: 'entity_name', label: 'Entity Name', required: true, placeholder: 'e.g., Axis Trustee Services Ltd.'},
+      {name: 'pan', label: 'PAN', placeholder: 'AAACX1234X'},
+      {name: 'gstin', label: 'GSTIN', placeholder: 'Optional'},
+      {name: 'sebi_registration', label: 'SEBI Registration', placeholder: 'If applicable'},
       {name: 'contact_person', label: 'Contact Person', placeholder: 'Name'},
       {name: 'email', label: 'Email', type: 'email', placeholder: 'email@example.com'},
       {name: 'phone', label: 'Phone', placeholder: '+91-XXXXX-XXXXX'},
-      {name: 'sebi_registration', label: 'SEBI Registration', placeholder: 'If applicable'},
+      {name: 'address', label: 'Address', type: 'textarea', placeholder: 'Full address'},
+      {name: 'city', label: 'City', placeholder: 'Mumbai'},
+      {name: 'state', label: 'State', placeholder: 'Maharashtra'},
+      {name: 'country', label: 'Country', default: 'India'},
     ], async (data) => {
-      await Auth.apiPost(`/funds/${currentFund.id}/entities/`, data);
+      await Auth.apiPost('/funds/entities/', data);
+      await loadOrgEntities();
+      if (currentFund) await loadFundDetail(currentFund.id);
+    });
+  }
+
+  // ── Link entity to fund form ──────────────────────────────
+  function openLinkEntityForm() {
+    if (!currentFund) return;
+    const makeOpts = (role) => {
+      const filtered = orgEntities.filter(e => !role || e.entity_type === role);
+      return [{value: '', label: '— None —'}].concat(
+        filtered.map(e => ({value: e.id, label: e.entity_name}))
+      );
+    };
+
+    openModal('Link Entities to Fund', [
+      {name: 'manager_entity', label: 'Investment Manager', type: 'select',
+       default: currentFund.manager_entity || '', options: makeOpts('manager')},
+      {name: 'trustee_entity', label: 'Trustee', type: 'select',
+       default: currentFund.trustee_entity || '', options: makeOpts('trustee')},
+      {name: 'sponsor_entity', label: 'Sponsor', type: 'select',
+       default: currentFund.sponsor_entity || '', options: makeOpts('sponsor')},
+      {name: 'custodian_entity', label: 'Custodian', type: 'select',
+       default: currentFund.custodian_entity || '', options: makeOpts('custodian')},
+      {name: 'auditor_entity', label: 'Statutory Auditor', type: 'select',
+       default: currentFund.auditor_entity || '', options: makeOpts('statutory_auditor')},
+    ], async (data) => {
+      // Convert empty strings to null for FK clearing
+      const payload = {};
+      Object.entries(data).forEach(([k, v]) => { payload[k] = v || null; });
+      await Auth.apiPut(`/funds/${currentFund.id}/`, payload);
       await loadFundDetail(currentFund.id);
     });
   }

@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import User, Organization, AuditLog
+from .models import User, Organization, FundAccess, SchemeAccess, AuditLog
 
 
 class OrganizationSerializer(serializers.ModelSerializer):
@@ -34,6 +34,36 @@ class ChangePasswordSerializer(serializers.Serializer):
     new_password = serializers.CharField(write_only=True, min_length=8)
 
 
+class FundAccessSerializer(serializers.ModelSerializer):
+    user_name = serializers.CharField(source='user.username', read_only=True)
+    fund_name = serializers.CharField(source='fund.name', read_only=True)
+    is_active = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = FundAccess
+        fields = [
+            'id', 'user', 'user_name', 'fund', 'fund_name',
+            'access_level', 'granted_at', 'expires_at', 'revoked_at',
+            'is_active',
+        ]
+        read_only_fields = ['id', 'granted_at']
+
+
+class SchemeAccessSerializer(serializers.ModelSerializer):
+    user_name = serializers.CharField(source='user.username', read_only=True)
+    scheme_name = serializers.CharField(source='scheme.name', read_only=True)
+    is_active = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = SchemeAccess
+        fields = [
+            'id', 'user', 'user_name', 'scheme', 'scheme_name',
+            'access_level', 'granted_at', 'expires_at', 'revoked_at',
+            'is_active',
+        ]
+        read_only_fields = ['id', 'granted_at']
+
+
 class AuditLogSerializer(serializers.ModelSerializer):
     user_name = serializers.SerializerMethodField()
     action_display = serializers.CharField(source='get_action_display', read_only=True)
@@ -42,7 +72,8 @@ class AuditLogSerializer(serializers.ModelSerializer):
         model = AuditLog
         fields = [
             'id', 'user', 'user_name', 'action', 'action_display',
-            'resource_type', 'resource_id', 'details',
+            'resource_type', 'resource_id',
+            'old_values', 'new_values', 'details',
             'ip_address', 'timestamp',
         ]
 

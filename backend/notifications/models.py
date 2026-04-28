@@ -4,7 +4,13 @@ from django.db import models
 
 
 class Notification(models.Model):
-    """In-app notification delivered to a specific user."""
+    """
+    In-app notification delivered to a specific user.
+    Maps to FundOS: lp_notifications table.
+
+    Added: sent_via_email, sent_via_whatsapp, sent_via_sms for delivery tracking.
+    FundOS targets investors directly; we target users (investors are linked via User model).
+    """
 
     CATEGORY_CHOICES = [
         ('fund', 'Fund Update'),
@@ -13,6 +19,7 @@ class Notification(models.Model):
         ('distribution', 'Distribution'),
         ('compliance', 'Compliance'),
         ('kpi', 'KPI Submission'),
+        ('nav_update', 'NAV Update'),
         ('system', 'System'),
     ]
 
@@ -45,6 +52,20 @@ class Notification(models.Model):
 
     is_read = models.BooleanField(default=False)
     read_at = models.DateTimeField(null=True, blank=True)
+
+    # Delivery tracking — India's primary channels
+    sent_via_email = models.BooleanField(
+        default=False,
+        help_text='Email delivery tracking',
+    )
+    sent_via_whatsapp = models.BooleanField(
+        default=False,
+        help_text='WhatsApp delivery — India\'s primary messaging channel',
+    )
+    sent_via_sms = models.BooleanField(
+        default=False,
+        help_text='SMS delivery tracking',
+    )
 
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,

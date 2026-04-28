@@ -9,14 +9,6 @@
 ============================================================ */
 
 (() => {
-  // In dev, the frontend is served on a static port (5500/5501/8765/etc.)
-  // while Django serves the API on :8000. In production behind a reverse
-  // proxy both share the same origin, so only :8000 itself (or no port)
-  // should use the relative /api path.
-  const _port = window.location.port;
-  const _sameOriginAsApi = (_port === '8000' || _port === '' || _port === '80' || _port === '443');
-  const API_BASE = _sameOriginAsApi ? '/api' : 'http://127.0.0.1:8000/api';
-
   const state = {
     meta: null,        // {schema_version, fx_rates, fx_as_of, period_range, base_currency}
     currentId: null,   // null when at portfolio root
@@ -43,20 +35,37 @@
     return Number(v).toLocaleString();
   };
 
-  // ── Fetch wrappers ────────────────────────────────────────
+  // ── Fetch wrappers (use Auth module for JWT authentication) ──
   async function apiGet(path) {
-    const r = await fetch(`${API_BASE}${path}`);
-    if (!r.ok) throw new Error(`API ${path} → ${r.status}`);
-    return r.json();
+    return Auth.apiGet(path);
   }
   async function apiPost(path, body) {
-    const r = await fetch(`${API_BASE}${path}`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body),
+    return Auth.apiPost(path, body);
+  }
+
+  function showEmptyState(message) {
+    // Hide loading screen
+    const ls = document.getElementById('loading-screen');
+    if (ls) { ls.style.opacity = '0'; setTimeout(() => ls.style.display = 'none', 300); }
+
+    // Hide sections that need data
+    ['section-compare', 'section-children', 'section-deepdive'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.classList.add('hidden');
     });
-    if (!r.ok) throw new Error(`API ${path} → ${r.status}`);
-    return r.json();
+
+    // Show a helpful message in the hero area
+    const eyebrow = document.getElementById('hero-eyebrow');
+    const titleMain = document.getElementById('hero-title-main');
+    const titleSub = document.getElementById('hero-title-sub');
+    const desc = document.getElementById('hero-description');
+    const stats = document.getElementById('hero-stats');
+
+    if (eyebrow) eyebrow.textContent = 'PORTFOLIO DASHBOARD';
+    if (titleMain) titleMain.textContent = 'No Data';
+    if (titleSub) titleSub.textContent = 'Yet';
+    if (desc) desc.textContent = message || 'Upload fund Excel files via Data Upload to populate the portfolio dashboard.';
+    if (stats) stats.innerHTML = '';
   }
 
   // ── Navigation ────────────────────────────────────────────
@@ -70,7 +79,9 @@
         name: 'TrackFundAI Portfolio',
         level: 'portfolio',
         is_real: true,
-        description: `${state.meta.period_range.start} → ${state.meta.period_range.end} · Base currency ${state.meta.base_currency}`,
+        description: (state.meta.period_range && state.meta.period_range.start)
+          ? `${state.meta.period_range.start} → ${state.meta.period_range.end} · Base currency ${state.meta.base_currency}`
+          : `Base currency ${state.meta.base_currency}`,
         financials: null,
       };
       state.children = state.meta.funds;
@@ -304,12 +315,31 @@
         if (id !== state.currentId) navigate(id);
       });
 
+      // Load notification count
+      try {
+        const ndata = await Auth.apiGet('/notifications/unread-count/');
+        const badge = document.getElementById('notif-badge');
+        if (badge) {
+          badge.textContent = ndata.unread_count || 0;
+          badge.classList.toggle('zero', !ndata.unread_count);
+        }
+      } catch (ne) { console.error('Notif count failed:', ne); }
+
       // Hide loading
       const ls = document.getElementById('loading-screen');
       if (ls) ls.style.opacity = '0';
       setTimeout(() => ls && (ls.style.display = 'none'), 400);
     } catch (e) {
       console.error('Portfolio init failed:', e);
+      // Don't show alert for auth errors — _authFetch already redirects to login
+      if (e.message && (e.message.includes('401') || e.message.includes('Session expired'))) {
+        return;
+      }
+      // Show friendly empty state for "no data" errors (503) instead of a scary alert
+      if (e.message && e.message.includes('503')) {
+        showEmptyState('Upload fund Excel files via Data Upload to populate the portfolio dashboard.');
+        return;
+      }
       alert('Failed to load portfolio: ' + e.message);
     }
   }

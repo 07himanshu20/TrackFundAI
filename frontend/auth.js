@@ -108,7 +108,13 @@
 
   async function _authFetch(url, options = {}) {
     options.headers = options.headers || {};
-    options.headers['Authorization'] = `Bearer ${getToken()}`;
+    const token = getToken();
+    if (!token) {
+      window.location.href = 'login.html';
+      // Return a never-resolving promise so callers don't run error handlers
+      return new Promise(() => {});
+    }
+    options.headers['Authorization'] = `Bearer ${token}`;
 
     let r = await fetch(url, options);
 
@@ -121,7 +127,8 @@
       } else {
         _clear();
         window.location.href = 'login.html';
-        throw new Error('Session expired');
+        // Return a never-resolving promise so callers don't show error alerts
+        return new Promise(() => {});
       }
     }
     return r;
@@ -169,16 +176,33 @@
     return r.json();
   }
 
+  async function apiGetBlob(path) {
+    const r = await _authFetch(`${API_BASE}${path}`);
+    if (!r.ok) throw new Error(`API ${path} → ${r.status}`);
+    return r.blob();
+  }
+
   function requireAuth() {
     if (!isLoggedIn()) {
       window.location.href = 'login.html';
       return false;
     }
+    // Quick check: if access token is expired AND no refresh token, redirect now
+    try {
+      const token = getToken();
+      const payload = JSON.parse(atob(token.split('.')[1]));
+      const expiredAccess = payload.exp && payload.exp < Date.now() / 1000;
+      if (expiredAccess && !getRefreshToken()) {
+        _clear();
+        window.location.href = 'login.html';
+        return false;
+      }
+    } catch { /* ignore parse errors, let the API call handle it */ }
     return true;
   }
 
   window.Auth = {
     login, logout, getToken, getUser, isLoggedIn, requireAuth,
-    apiGet, apiPost, apiPut, apiDelete, apiUpload,
+    apiGet, apiPost, apiPut, apiDelete, apiUpload, apiGetBlob,
   };
 })();

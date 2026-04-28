@@ -5,13 +5,136 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from accounts.audit import log_audit
+from accounts.fund_access_helpers import filter_funds_for_user, user_has_fund_access
+from accounts.models import FundAccess
 from accounts.permissions import IsGPUser, IsGPAdmin
 from notifications.helpers import notify_org_admins
-from .models import Fund, Scheme, Entity
+from .models import FundCategory, Entity, Fund, Scheme
 from .serializers import (
+    FundCategorySerializer,
+    EntitySerializer, EntityListSerializer,
     FundListSerializer, FundDetailSerializer, FundCreateSerializer,
-    SchemeSerializer, EntitySerializer,
+    SchemeSerializer,
 )
+
+
+# ── Fund Category CRUD ───────────────────────────────────────
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsGPUser])
+def fund_category_list(request):
+    """List all SEBI fund categories, or create a new one (admin only)."""
+    if request.method == 'GET':
+        categories = FundCategory.objects.all()
+        return Response(FundCategorySerializer(categories, many=True).data)
+
+    if not request.user.is_admin:
+        return Response({'detail': 'Only admins can create fund categories.'}, status=403)
+
+    ser = FundCategorySerializer(data=request.data)
+    ser.is_valid(raise_exception=True)
+    cat = ser.save()
+    log_audit(request, 'create', 'fund_category', cat.id, {
+        'code': cat.sebi_category_code, 'name': cat.name,
+    })
+    return Response(ser.data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET', 'PUT', 'DELETE'])
+@permission_classes([IsGPUser])
+def fund_category_detail(request, category_id):
+    """Get, update, or delete a fund category."""
+    try:
+        cat = FundCategory.objects.get(pk=category_id)
+    except FundCategory.DoesNotExist:
+        return Response({'detail': 'Fund category not found.'}, status=404)
+
+    if request.method == 'GET':
+        return Response(FundCategorySerializer(cat).data)
+
+    if not request.user.is_admin:
+        return Response({'detail': 'Only admins can modify fund categories.'}, status=403)
+
+    if request.method == 'PUT':
+        ser = FundCategorySerializer(cat, data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        log_audit(request, 'update', 'fund_category', cat.id, {
+            'code': cat.sebi_category_code, 'fields': list(request.data.keys()),
+        })
+        return Response(ser.data)
+
+    log_audit(request, 'delete', 'fund_category', cat.id, {
+        'code': cat.sebi_category_code,
+    })
+    cat.delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# ── Entity CRUD (organization-level) ────────────────────────
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsGPUser])
+def entity_list(request):
+    """
+    List all entities for the user's organization, or create a new entity.
+    Entities are organization-level (shared across funds).
+    """
+    org = request.organization
+    if not org:
+        return Response({'detail': 'No organization.'}, status=403)
+
+    if request.method == 'GET':
+        entities = Entity.objects.filter(organization=org)
+        # Optional filter by entity_type
+        entity_type = request.query_params.get('entity_type')
+        if entity_type:
+            entities = entities.filter(entity_type=entity_type)
+        return Response(EntitySerializer(entities, many=True).data)
+
+    if not request.user.is_admin:
+        return Response({'detail': 'Only admins can manage entities.'}, status=403)
+
+    ser = EntitySerializer(data=request.data)
+    ser.is_valid(raise_exception=True)
+    entity = ser.save(organization=org)
+    log_audit(request, 'create', 'entity', entity.id, {
+        'name': entity.entity_name, 'type': entity.entity_type,
+    })
+    return Response(ser.data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET', 'PUT', 'DELETE'])
+@permission_classes([IsGPUser])
+def entity_detail(request, entity_id):
+    """Get, update, or delete an entity."""
+    org = request.organization
+    try:
+        entity = Entity.objects.get(pk=entity_id, organization=org)
+    except Entity.DoesNotExist:
+        return Response({'detail': 'Entity not found.'}, status=404)
+
+    if request.method == 'GET':
+        return Response(EntitySerializer(entity).data)
+
+    if not request.user.is_admin:
+        return Response({'detail': 'Only admins can modify entities.'}, status=403)
+
+    if request.method == 'PUT':
+        ser = EntitySerializer(entity, data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        log_audit(request, 'update', 'entity', entity.id, {
+            'name': entity.entity_name, 'type': entity.entity_type,
+            'fields': list(request.data.keys()),
+        })
+        return Response(ser.data)
+
+    log_audit(request, 'delete', 'entity', entity.id, {
+        'name': entity.entity_name, 'type': entity.entity_type,
+    })
+    entity.delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 # ── Fund CRUD ──────────────────────────────────────────────
@@ -27,9 +150,10 @@ def fund_list(request):
     if request.method == 'GET':
         funds = (
             Fund.objects
-            .filter(organization=org)
+            .select_related('fund_category')
             .annotate(scheme_count=Count('schemes'))
         )
+        funds = filter_funds_for_user(funds, request.user)
         return Response(FundListSerializer(funds, many=True).data)
 
     # POST — create
@@ -39,6 +163,12 @@ def fund_list(request):
     ser = FundCreateSerializer(data=request.data)
     ser.is_valid(raise_exception=True)
     fund = ser.save(organization=org, created_by=request.user)
+
+    # Auto-grant fund access to the creator
+    FundAccess.objects.get_or_create(
+        user=request.user, fund=fund,
+        defaults={'access_level': 'admin'},
+    )
 
     log_audit(request, 'create', 'fund', fund.id, {'name': fund.name})
     notify_org_admins(
@@ -57,8 +187,15 @@ def fund_detail(request, fund_id):
     """Get, update, or delete a single fund."""
     org = request.organization
     try:
-        fund = Fund.objects.get(pk=fund_id, organization=org)
+        fund = Fund.objects.select_related(
+            'fund_category',
+            'manager_entity', 'trustee_entity', 'sponsor_entity',
+            'custodian_entity', 'auditor_entity',
+        ).get(pk=fund_id, organization=org)
     except Fund.DoesNotExist:
+        return Response({'detail': 'Fund not found.'}, status=404)
+
+    if not user_has_fund_access(request.user, fund):
         return Response({'detail': 'Fund not found.'}, status=404)
 
     if request.method == 'GET':
@@ -94,6 +231,9 @@ def scheme_list(request, fund_id):
     except Fund.DoesNotExist:
         return Response({'detail': 'Fund not found.'}, status=404)
 
+    if not user_has_fund_access(request.user, fund):
+        return Response({'detail': 'Fund not found.'}, status=404)
+
     if request.method == 'GET':
         schemes = fund.schemes.all()
         return Response(SchemeSerializer(schemes, many=True).data)
@@ -122,6 +262,9 @@ def scheme_detail(request, scheme_id):
     except Scheme.DoesNotExist:
         return Response({'detail': 'Scheme not found.'}, status=404)
 
+    if not user_has_fund_access(request.user, scheme.fund):
+        return Response({'detail': 'Scheme not found.'}, status=404)
+
     if request.method == 'GET':
         return Response(SchemeSerializer(scheme).data)
 
@@ -139,61 +282,4 @@ def scheme_detail(request, scheme_id):
 
     log_audit(request, 'delete', 'scheme', scheme.id, {'name': scheme.name})
     scheme.delete()
-    return Response(status=status.HTTP_204_NO_CONTENT)
-
-
-# ── Entity CRUD ────────────────────────────────────────────
-
-@api_view(['GET', 'POST'])
-@permission_classes([IsGPUser])
-def entity_list(request, fund_id):
-    """List entities for a fund, or add a new entity."""
-    org = request.organization
-    try:
-        fund = Fund.objects.get(pk=fund_id, organization=org)
-    except Fund.DoesNotExist:
-        return Response({'detail': 'Fund not found.'}, status=404)
-
-    if request.method == 'GET':
-        entities = fund.entities.all()
-        return Response(EntitySerializer(entities, many=True).data)
-
-    if not request.user.is_admin:
-        return Response({'detail': 'Only admins can manage entities.'}, status=403)
-
-    ser = EntitySerializer(data=request.data)
-    ser.is_valid(raise_exception=True)
-    entity = ser.save(fund=fund)
-    log_audit(request, 'create', 'entity', entity.id, {
-        'name': entity.name, 'role': entity.role, 'fund': str(fund.id),
-    })
-    return Response(ser.data, status=status.HTTP_201_CREATED)
-
-
-@api_view(['PUT', 'DELETE'])
-@permission_classes([IsGPAdmin])
-def entity_detail(request, entity_id):
-    """Update or delete an entity."""
-    org = request.organization
-    try:
-        entity = Entity.objects.select_related('fund').get(
-            pk=entity_id, fund__organization=org,
-        )
-    except Entity.DoesNotExist:
-        return Response({'detail': 'Entity not found.'}, status=404)
-
-    if request.method == 'PUT':
-        ser = EntitySerializer(entity, data=request.data, partial=True)
-        ser.is_valid(raise_exception=True)
-        ser.save()
-        log_audit(request, 'update', 'entity', entity.id, {
-            'name': entity.name, 'role': entity.role,
-            'fields': list(request.data.keys()),
-        })
-        return Response(ser.data)
-
-    log_audit(request, 'delete', 'entity', entity.id, {
-        'name': entity.name, 'role': entity.role,
-    })
-    entity.delete()
     return Response(status=status.HTTP_204_NO_CONTENT)

@@ -22,15 +22,19 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from accounts.audit import log_audit
+from accounts.fund_access_helpers import (
+    user_has_fund_access, get_accessible_fund_ids, filter_by_fund_access,
+)
 from accounts.permissions import IsGPUser, IsGPAdmin
 from funds.models import Scheme
 from notifications.helpers import notify_user, notify_org_admins
 
 from .models import (
-    Investment, InvestmentTranche, Valuation,
+    PortfolioCompany, Investment, InvestmentTranche, Valuation,
     KPIDefinition, PortfolioKPI, ExitEvent, BoardMeeting,
 )
 from .serializers import (
+    PortfolioCompanySerializer, PortfolioCompanyListSerializer,
     InvestmentListSerializer, InvestmentDetailSerializer, InvestmentCreateSerializer,
     InvestmentTrancheSerializer,
     ValuationSerializer, ValuationCreateSerializer,
@@ -57,6 +61,9 @@ def investment_list(request, scheme_id):
             pk=scheme_id, fund__organization=org,
         )
     except Scheme.DoesNotExist:
+        return Response({'detail': 'Scheme not found.'}, status=404)
+
+    if not user_has_fund_access(request.user, scheme.fund):
         return Response({'detail': 'Scheme not found.'}, status=404)
 
     if request.method == 'GET':
@@ -110,6 +117,9 @@ def investment_detail(request, investment_id):
     except Investment.DoesNotExist:
         return Response({'detail': 'Investment not found.'}, status=404)
 
+    if not user_has_fund_access(request.user, inv.scheme.fund):
+        return Response({'detail': 'Investment not found.'}, status=404)
+
     if request.method == 'GET':
         return Response(InvestmentDetailSerializer(inv).data)
 
@@ -139,6 +149,9 @@ def tranche_list(request, investment_id):
             pk=investment_id, scheme__fund__organization=org,
         )
     except Investment.DoesNotExist:
+        return Response({'detail': 'Investment not found.'}, status=404)
+
+    if not user_has_fund_access(request.user, inv.scheme.fund):
         return Response({'detail': 'Investment not found.'}, status=404)
 
     if request.method == 'GET':
@@ -185,6 +198,9 @@ def valuation_list(request, investment_id):
     except Investment.DoesNotExist:
         return Response({'detail': 'Investment not found.'}, status=404)
 
+    if not user_has_fund_access(request.user, inv.scheme.fund):
+        return Response({'detail': 'Investment not found.'}, status=404)
+
     if request.method == 'GET':
         return Response(ValuationSerializer(inv.valuations.all(), many=True).data)
 
@@ -215,6 +231,9 @@ def valuation_update(request, valuation_id):
     except Valuation.DoesNotExist:
         return Response({'detail': 'Valuation not found.'}, status=404)
 
+    if not user_has_fund_access(request.user, val.investment.scheme.fund):
+        return Response({'detail': 'Valuation not found.'}, status=404)
+
     if val.status == 'approved':
         return Response({'detail': 'Cannot edit an approved valuation.'}, status=400)
 
@@ -242,6 +261,9 @@ def valuation_approve(request, valuation_id):
             pk=valuation_id, investment__scheme__fund__organization=org,
         )
     except Valuation.DoesNotExist:
+        return Response({'detail': 'Valuation not found.'}, status=404)
+
+    if not user_has_fund_access(request.user, val.investment.scheme.fund):
         return Response({'detail': 'Valuation not found.'}, status=404)
 
     if val.status not in ('submitted', 'draft'):
@@ -301,16 +323,20 @@ def founder_companies(request):
     user = request.user
     org = request.organization
 
+    fund_ids = get_accessible_fund_ids(user)
+
     if user.role == 'founder_user':
         # Founders see only investments where they are the point of contact
         investments = Investment.objects.filter(
             scheme__fund__organization=org,
+            scheme__fund__id__in=fund_ids,
             created_by=user,
         ).select_related('scheme__fund')
     else:
-        # GP users see all investments in their org
+        # GP users see investments in funds they have access to
         investments = Investment.objects.filter(
             scheme__fund__organization=org,
+            scheme__fund__id__in=fund_ids,
         ).select_related('scheme__fund')
 
     return Response(InvestmentListSerializer(
@@ -338,6 +364,9 @@ def founder_submit_kpi(request, investment_id):
             pk=investment_id, scheme__fund__organization=org,
         )
     except Investment.DoesNotExist:
+        return Response({'detail': 'Investment not found.'}, status=404)
+
+    if not user_has_fund_access(request.user, inv.scheme.fund):
         return Response({'detail': 'Investment not found.'}, status=404)
 
     ser = KPISubmitSerializer(data=request.data)
@@ -405,6 +434,9 @@ def founder_kpi_history(request, investment_id):
     except Investment.DoesNotExist:
         return Response({'detail': 'Investment not found.'}, status=404)
 
+    if not user_has_fund_access(request.user, inv.scheme.fund):
+        return Response({'detail': 'Investment not found.'}, status=404)
+
     kpis = inv.kpis.select_related('kpi_definition').all()
 
     # Optional period filter
@@ -433,6 +465,9 @@ def investment_kpis(request, investment_id):
     except Investment.DoesNotExist:
         return Response({'detail': 'Investment not found.'}, status=404)
 
+    if not user_has_fund_access(request.user, inv.scheme.fund):
+        return Response({'detail': 'Investment not found.'}, status=404)
+
     kpis = inv.kpis.select_related('kpi_definition').all()
 
     # Optional status filter
@@ -458,6 +493,9 @@ def kpi_review(request, kpi_id):
             pk=kpi_id, investment__scheme__fund__organization=org,
         )
     except PortfolioKPI.DoesNotExist:
+        return Response({'detail': 'KPI not found.'}, status=404)
+
+    if not user_has_fund_access(request.user, kpi.investment.scheme.fund):
         return Response({'detail': 'KPI not found.'}, status=404)
 
     action = request.data.get('action', 'approve')
@@ -507,6 +545,9 @@ def exit_scenario_list(request, investment_id):
     except Investment.DoesNotExist:
         return Response({'detail': 'Investment not found.'}, status=404)
 
+    if not user_has_fund_access(request.user, inv.scheme.fund):
+        return Response({'detail': 'Investment not found.'}, status=404)
+
     if request.method == 'GET':
         return Response(ExitEventSerializer(inv.exit_scenarios.all(), many=True).data)
 
@@ -547,6 +588,9 @@ def board_meeting_list(request, investment_id):
     except Investment.DoesNotExist:
         return Response({'detail': 'Investment not found.'}, status=404)
 
+    if not user_has_fund_access(request.user, inv.scheme.fund):
+        return Response({'detail': 'Investment not found.'}, status=404)
+
     if request.method == 'GET':
         return Response(BoardMeetingSerializer(inv.board_meetings.all(), many=True).data)
 
@@ -580,6 +624,9 @@ def board_pack_generate(request, scheme_id):
             pk=scheme_id, fund__organization=org,
         )
     except Scheme.DoesNotExist:
+        return Response({'detail': 'Scheme not found.'}, status=404)
+
+    if not user_has_fund_access(request.user, scheme.fund):
         return Response({'detail': 'Scheme not found.'}, status=404)
 
     investments = scheme.investments.prefetch_related(
@@ -634,3 +681,126 @@ def board_pack_generate(request, scheme_id):
 
     # Return as JSON (PDF rendering to be added in Phase 6)
     return Response(pack_data)
+
+
+# ═══════════════════════════════════════════════════════════════
+# PORTFOLIO COMPANY CRUD
+# ═══════════════════════════════════════════════════════════════
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsGPUser])
+def portfolio_company_list(request):
+    """List all portfolio companies for the org, or create one."""
+    org = request.organization
+    if not org:
+        return Response({'detail': 'No organization.'}, status=403)
+
+    if request.method == 'GET':
+        fund_ids = get_accessible_fund_ids(request.user)
+        # Only show companies that have investments in funds user can access
+        qs = PortfolioCompany.objects.filter(
+            organization=org,
+            investments__scheme__fund__id__in=fund_ids,
+        ).distinct()
+        sector = request.query_params.get('sector')
+        if sector:
+            qs = qs.filter(sector__iexact=sector)
+        active = request.query_params.get('active')
+        if active is not None:
+            qs = qs.filter(is_active=active.lower() == 'true')
+        return Response(PortfolioCompanyListSerializer(qs, many=True).data)
+
+    ser = PortfolioCompanySerializer(data=request.data)
+    ser.is_valid(raise_exception=True)
+    company = ser.save(organization=org)
+    log_audit(request, 'create', 'portfolio_company', company.id, {
+        'name': company.name, 'sector': company.sector,
+    })
+    return Response(PortfolioCompanySerializer(company).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET', 'PUT', 'DELETE'])
+@permission_classes([IsGPUser])
+def portfolio_company_detail(request, company_id):
+    """Get, update, or delete a portfolio company."""
+    org = request.organization
+    try:
+        company = PortfolioCompany.objects.get(pk=company_id, organization=org)
+    except PortfolioCompany.DoesNotExist:
+        return Response({'detail': 'Portfolio company not found.'}, status=404)
+
+    if request.method == 'GET':
+        return Response(PortfolioCompanySerializer(company).data)
+
+    if request.method == 'PUT':
+        ser = PortfolioCompanySerializer(company, data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        log_audit(request, 'update', 'portfolio_company', company.id, {
+            'name': company.name, 'fields': list(request.data.keys()),
+        })
+        return Response(PortfolioCompanySerializer(company).data)
+
+    log_audit(request, 'delete', 'portfolio_company', company.id, {
+        'name': company.name,
+    })
+    company.delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# ═══════════════════════════════════════════════════════════════
+# KPI DEFINITION CRUD
+# ═══════════════════════════════════════════════════════════════
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsGPUser])
+def kpi_definition_list(request):
+    """List or create KPI definitions for the org."""
+    org = request.organization
+    if not org:
+        return Response({'detail': 'No organization.'}, status=403)
+
+    if request.method == 'GET':
+        qs = KPIDefinition.objects.filter(organization=org)
+        return Response(KPIDefinitionSerializer(qs, many=True).data)
+
+    if not request.user.is_admin:
+        return Response({'detail': 'Only admins can create KPI definitions.'}, status=403)
+
+    ser = KPIDefinitionSerializer(data=request.data)
+    ser.is_valid(raise_exception=True)
+    kpi_def = ser.save(organization=org)
+    log_audit(request, 'create', 'kpi_definition', kpi_def.id, {
+        'name': kpi_def.name,
+    })
+    return Response(ser.data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET', 'PUT', 'DELETE'])
+@permission_classes([IsGPUser])
+def kpi_definition_detail(request, kpi_def_id):
+    """Get, update, or delete a KPI definition."""
+    org = request.organization
+    try:
+        kpi_def = KPIDefinition.objects.get(pk=kpi_def_id, organization=org)
+    except KPIDefinition.DoesNotExist:
+        return Response({'detail': 'KPI definition not found.'}, status=404)
+
+    if request.method == 'GET':
+        return Response(KPIDefinitionSerializer(kpi_def).data)
+
+    if not request.user.is_admin:
+        return Response({'detail': 'Only admins can modify KPI definitions.'}, status=403)
+
+    if request.method == 'PUT':
+        ser = KPIDefinitionSerializer(kpi_def, data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        log_audit(request, 'update', 'kpi_definition', kpi_def.id, {
+            'name': kpi_def.name, 'fields': list(request.data.keys()),
+        })
+        return Response(ser.data)
+
+    log_audit(request, 'delete', 'kpi_definition', kpi_def.id)
+    kpi_def.delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)

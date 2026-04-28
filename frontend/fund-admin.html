@@ -13,6 +13,7 @@
 
   <link rel="stylesheet" href="styles.css" />
   <link rel="stylesheet" href="fund-admin.css" />
+  <link rel="stylesheet" href="notification-drawer.css" />
 </head>
 <body>
 
@@ -33,8 +34,11 @@
       <a href="index.html" class="nav-link">Portfolio Dashboard</a>
       <span class="nav-link active">Fund Admin</span>
       <a href="investments.html" class="nav-link">Investments</a>
+      <a href="lp-management.html" class="nav-link">LP Management</a>
+      <a href="fund-accounting.html" class="nav-link">Fund Accounting</a>
+      <a href="compliance.html" class="nav-link">Compliance</a>
       <a href="doc-vault.html" class="nav-link">Doc Vault</a>
-      <a href="lp-portal.html" class="nav-link">LP Portal</a>
+      <a href="data-upload.html" class="nav-link">Data Upload</a>
     </div>
     <div class="nav-actions">
       <span class="notif-badge" id="notif-badge" title="Notifications">0</span>
@@ -95,11 +99,12 @@
         <div class="scheme-list" id="scheme-list"></div>
       </div>
 
-      <!-- Entities -->
+      <!-- Entities (linked from organization-level) -->
       <div class="subsection">
         <div class="subsection-header">
           <h3>Key Entities</h3>
-          <button class="btn-ghost small" id="btn-new-entity">+ Add Entity</button>
+          <button class="btn-ghost small" id="btn-link-entity">+ Link Entity</button>
+          <button class="btn-ghost small" id="btn-new-entity">+ Create Entity</button>
         </div>
         <div class="entity-list" id="entity-list"></div>
       </div>
@@ -130,6 +135,7 @@
 
   <script src="theme-switcher.js"></script>
   <script src="auth.js"></script>
+  <script src="notification-drawer.js"></script>
   <script src="fund-admin.js"></script>
 
 </body>

@@ -1,11 +1,34 @@
 from rest_framework import serializers
 from .models import (
-    Investment, InvestmentTranche, Valuation,
+    PortfolioCompany, Investment, InvestmentTranche, Valuation,
     KPIDefinition, PortfolioKPI, ExitEvent, BoardMeeting,
 )
 
 
-# ── Investment & Tranche ─────────────────────────────────────
+# ── Portfolio Company ──────────────────────────────────────────
+
+class PortfolioCompanySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PortfolioCompany
+        fields = [
+            'id', 'organization', 'name', 'cin', 'pan',
+            'sector', 'sub_sector',
+            'incorporation_date', 'headquarters_city', 'headquarters_country',
+            'website', 'founder_names', 'description',
+            'is_active', 'portfolio_node_id',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'organization', 'created_at', 'updated_at']
+
+
+class PortfolioCompanyListSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for dropdowns."""
+    class Meta:
+        model = PortfolioCompany
+        fields = ['id', 'name', 'sector', 'headquarters_city', 'is_active']
+
+
+# ── Investment & Tranche ─────���───────────────────────────────
 
 class InvestmentTrancheSerializer(serializers.ModelSerializer):
     class Meta:
@@ -30,15 +53,23 @@ class InvestmentListSerializer(serializers.ModelSerializer):
     latest_valuation = serializers.DecimalField(
         max_digits=18, decimal_places=2, read_only=True,
     )
+    portfolio_company_name = serializers.CharField(
+        source='portfolio_company.name', read_only=True, default=None,
+    )
 
     class Meta:
         model = Investment
         fields = [
-            'id', 'scheme', 'company_name', 'portfolio_node_id',
+            'id', 'scheme', 'company_name',
+            'portfolio_company', 'portfolio_company_name',
+            'portfolio_node_id',
             'instrument_type', 'instrument_type_display',
-            'ownership_pct', 'total_invested', 'investment_date',
+            'ownership_pct', 'percentage_stake_fully_diluted',
+            'exceeds_10pct_threshold', 'threshold_breach_date',
+            'total_invested', 'investment_date',
             'currency', 'status', 'status_display',
-            'sector', 'board_seat', 'tranche_count', 'latest_valuation',
+            'sector', 'board_seat', 'is_lead_investor',
+            'tranche_count', 'latest_valuation',
             'created_at',
         ]
 
@@ -51,15 +82,23 @@ class InvestmentDetailSerializer(serializers.ModelSerializer):
         source='get_status_display', read_only=True,
     )
     tranches = InvestmentTrancheSerializer(many=True, read_only=True)
+    portfolio_company_detail = PortfolioCompanyListSerializer(
+        source='portfolio_company', read_only=True,
+    )
 
     class Meta:
         model = Investment
         fields = [
-            'id', 'scheme', 'company_name', 'portfolio_node_id',
+            'id', 'scheme', 'company_name',
+            'portfolio_company', 'portfolio_company_detail',
+            'portfolio_node_id',
             'instrument_type', 'instrument_type_display',
-            'ownership_pct', 'total_invested', 'investment_date',
+            'ownership_pct', 'percentage_stake_fully_diluted',
+            'exceeds_10pct_threshold', 'threshold_breach_date',
+            'total_invested', 'investment_date',
             'currency', 'status', 'status_display',
-            'sector', 'description', 'board_seat',
+            'sector', 'description', 'board_seat', 'is_lead_investor',
+            'write_off_date',
             'tranches',
             'created_by', 'created_at', 'updated_at',
         ]
@@ -70,13 +109,15 @@ class InvestmentCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Investment
         fields = [
-            'company_name', 'portfolio_node_id', 'instrument_type',
-            'ownership_pct', 'total_invested', 'investment_date',
-            'currency', 'status', 'sector', 'description', 'board_seat',
+            'company_name', 'portfolio_company', 'portfolio_node_id',
+            'instrument_type', 'ownership_pct', 'percentage_stake_fully_diluted',
+            'total_invested', 'investment_date',
+            'currency', 'status', 'sector', 'description',
+            'board_seat', 'is_lead_investor', 'write_off_date',
         ]
 
 
-# ── Valuation ────────────────────────────────────────────────
+# ── Valuation ─────────���──────────────────────────────────────
 
 class ValuationSerializer(serializers.ModelSerializer):
     methodology_display = serializers.CharField(
@@ -90,9 +131,12 @@ class ValuationSerializer(serializers.ModelSerializer):
         model = Valuation
         fields = [
             'id', 'investment', 'valuation_date', 'methodology',
-            'methodology_display', 'fair_value', 'cost_basis',
-            'unrealized_gain_loss', 'multiple', 'discount_rate',
-            'comparable_companies', 'assumptions',
+            'methodology_display',
+            'fair_value', 'fair_value_of_holding', 'enterprise_value',
+            'cost_basis', 'unrealized_gain_loss', 'multiple',
+            'fvtpl_movement',
+            'discount_rate', 'comparable_companies', 'assumptions',
+            'valuer_name', 'valuer_reg_number',
             'status', 'status_display',
             'submitted_by', 'approved_by', 'approved_at',
             'created_at', 'updated_at',
@@ -107,13 +151,16 @@ class ValuationCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Valuation
         fields = [
-            'valuation_date', 'methodology', 'fair_value', 'cost_basis',
-            'unrealized_gain_loss', 'multiple', 'discount_rate',
-            'comparable_companies', 'assumptions',
+            'valuation_date', 'methodology',
+            'fair_value', 'fair_value_of_holding', 'enterprise_value',
+            'cost_basis', 'unrealized_gain_loss', 'multiple',
+            'fvtpl_movement',
+            'discount_rate', 'comparable_companies', 'assumptions',
+            'valuer_name', 'valuer_reg_number',
         ]
 
 
-# ── KPI Definition ───────────────────────────────────────────
+# ── KPI Definition ─────��─────────────────────────────────────
 
 class KPIDefinitionSerializer(serializers.ModelSerializer):
     format_display = serializers.CharField(
@@ -142,12 +189,17 @@ class PortfolioKPISerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(
         source='get_status_display', read_only=True,
     )
+    source_display = serializers.CharField(
+        source='get_source_display', read_only=True,
+    )
 
     class Meta:
         model = PortfolioKPI
         fields = [
-            'id', 'investment', 'kpi_definition', 'kpi_name',
-            'period', 'value', 'notes',
+            'id', 'investment', 'portfolio_company',
+            'kpi_definition', 'kpi_name',
+            'period', 'period_end_date', 'value', 'notes',
+            'source', 'source_display',
             'status', 'status_display',
             'submitted_by', 'reviewed_by',
             'submitted_at', 'reviewed_at',
@@ -168,11 +220,14 @@ class KPISubmitSerializer(serializers.Serializer):
     )
 
 
-# ── Exit Event ───────────────────────────────────────────────
+# ── Exit Event ─────────��─────────────────────────────────────
 
 class ExitEventSerializer(serializers.ModelSerializer):
     exit_type_display = serializers.CharField(
         source='get_exit_type_display', read_only=True,
+    )
+    gain_loss_nature_display = serializers.CharField(
+        source='get_gain_loss_nature_display', read_only=True,
     )
 
     class Meta:
@@ -180,7 +235,9 @@ class ExitEventSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'investment', 'exit_type', 'exit_type_display',
             'is_actual', 'exit_date', 'exit_valuation',
-            'proceeds', 'realized_gain_loss', 'moic', 'irr_pct',
+            'proceeds', 'net_exit_proceeds', 'realized_gain_loss',
+            'gain_loss_nature', 'gain_loss_nature_display',
+            'moic', 'exit_multiple', 'irr_pct', 'irr_on_exit',
             'buyer_name', 'assumptions',
             'created_by', 'created_at', 'updated_at',
         ]
@@ -192,12 +249,14 @@ class ExitEventCreateSerializer(serializers.ModelSerializer):
         model = ExitEvent
         fields = [
             'exit_type', 'is_actual', 'exit_date', 'exit_valuation',
-            'proceeds', 'realized_gain_loss', 'moic', 'irr_pct',
+            'proceeds', 'net_exit_proceeds', 'realized_gain_loss',
+            'gain_loss_nature',
+            'moic', 'exit_multiple', 'irr_pct', 'irr_on_exit',
             'buyer_name', 'assumptions',
         ]
 
 
-# ── Board Meeting ────────────────────────────────────────────
+# ── Board Meeting ─────���──────────────────────────────────────
 
 class BoardMeetingSerializer(serializers.ModelSerializer):
     class Meta:

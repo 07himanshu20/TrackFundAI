@@ -13,6 +13,7 @@
 
   <link rel="stylesheet" href="styles.css" />
   <link rel="stylesheet" href="fund-admin.css" />
+  <link rel="stylesheet" href="notification-drawer.css" />
 </head>
 <body>
 
@@ -33,8 +34,11 @@
       <a href="index.html" class="nav-link">Portfolio Dashboard</a>
       <a href="fund-admin.html" class="nav-link">Fund Admin</a>
       <span class="nav-link active">Investments</span>
+      <a href="lp-management.html" class="nav-link">LP Management</a>
+      <a href="fund-accounting.html" class="nav-link">Fund Accounting</a>
+      <a href="compliance.html" class="nav-link">Compliance</a>
       <a href="doc-vault.html" class="nav-link">Doc Vault</a>
-      <a href="lp-portal.html" class="nav-link">LP Portal</a>
+      <a href="data-upload.html" class="nav-link">Data Upload</a>
     </div>
     <div class="nav-actions">
       <span class="notif-badge" id="notif-badge" title="Notifications">0</span>
@@ -154,23 +158,45 @@
 
     <!-- ═══ KPI TAB ═══ -->
     <section class="section hidden" id="tab-kpis">
-      <div class="section-header">
-        <div class="section-tag">KPI Tracking</div>
-        <h2 class="section-title">KPI Submissions</h2>
-        <p class="section-subtitle">Review KPI data submitted by portfolio companies.</p>
+      <!-- KPI sub-tabs -->
+      <div style="display:flex;gap:10px;margin-bottom:24px;">
+        <button class="btn-ghost kpi-sub-tab active" data-kpi-sub="submissions" style="font-size:13px;">Submissions</button>
+        <button class="btn-ghost kpi-sub-tab" data-kpi-sub="definitions" style="font-size:13px;">KPI Definitions</button>
       </div>
-      <div class="toolbar">
-        <div class="toolbar-left">
-          <label>Status:</label>
-          <select id="kpi-status-filter" class="select-dark">
-            <option value="">All</option>
-            <option value="submitted">Submitted (Pending Review)</option>
-            <option value="approved">Approved</option>
-            <option value="rejected">Rejected</option>
-          </select>
+
+      <!-- Submissions -->
+      <div id="kpi-sub-submissions">
+        <div class="section-header">
+          <div class="section-tag">KPI Tracking</div>
+          <h2 class="section-title">KPI Submissions</h2>
+          <p class="section-subtitle">Review KPI data submitted by portfolio companies. Approve or reject.</p>
         </div>
+        <div class="toolbar">
+          <div class="toolbar-left">
+            <label>Status:</label>
+            <select id="kpi-status-filter" class="select-dark">
+              <option value="">All</option>
+              <option value="submitted">Submitted (Pending Review)</option>
+              <option value="approved">Approved</option>
+              <option value="rejected">Rejected</option>
+            </select>
+          </div>
+        </div>
+        <div class="scheme-list" id="kpi-list"></div>
       </div>
-      <div class="scheme-list" id="kpi-list"></div>
+
+      <!-- KPI Definitions -->
+      <div id="kpi-sub-definitions" class="hidden">
+        <div class="section-header">
+          <div class="section-tag">KPI Definitions</div>
+          <h2 class="section-title">KPI Definition Library</h2>
+          <p class="section-subtitle">Manage the master list of KPI metrics. Portfolio companies submit values against these definitions.</p>
+        </div>
+        <div class="toolbar">
+          <button class="btn-primary" id="btn-new-kpi-def">+ New KPI Definition</button>
+        </div>
+        <div class="scheme-list" id="kpi-def-list"></div>
+      </div>
     </section>
 
     <!-- ═══ EXITS TAB ═══ -->
@@ -221,6 +247,7 @@
 
   <script src="theme-switcher.js"></script>
   <script src="auth.js"></script>
+  <script src="notification-drawer.js"></script>
   <script src="investments.js"></script>
 
 </body>

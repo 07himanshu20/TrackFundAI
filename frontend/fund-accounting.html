@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem('tfai_theme')==='light')document.documentElement.setAttribute('data-theme','light');</script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TrackFundAI — Fund Accounting</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='16' fill='%2303030a'/><text y='.9em' font-size='62' x='10' fill='%2300d4ff' font-family='monospace' font-weight='bold'>TF</text></svg>" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="fund-admin.css" />
+  <link rel="stylesheet" href="fund-accounting.css" />
+  <link rel="stylesheet" href="notification-drawer.css" />
+</head>
+<body>
+
+  <div id="bg-canvas" aria-hidden="true">
+    <div class="bg-orb bg-orb-1"></div>
+    <div class="bg-orb bg-orb-2"></div>
+    <div class="bg-orb bg-orb-3"></div>
+    <div class="bg-grid"></div>
+  </div>
+
+  <!-- Top bar -->
+  <nav id="navbar">
+    <div class="nav-brand">
+      <span class="brand-dot"></span>
+      TrackFundAI
+    </div>
+    <div class="nav-links">
+      <a href="index.html" class="nav-link">Portfolio Dashboard</a>
+      <a href="fund-admin.html" class="nav-link">Fund Admin</a>
+      <a href="investments.html" class="nav-link">Investments</a>
+      <a href="lp-management.html" class="nav-link">LP Management</a>
+      <span class="nav-link active">Fund Accounting</span>
+      <a href="compliance.html" class="nav-link">Compliance</a>
+      <a href="doc-vault.html" class="nav-link">Doc Vault</a>
+      <a href="data-upload.html" class="nav-link">Data Upload</a>
+    </div>
+    <div class="nav-actions">
+      <span class="notif-badge" id="notif-badge" title="Notifications">0</span>
+      <span class="user-badge" id="user-badge">—</span>
+      <button class="btn-ghost" id="btn-logout">Logout</button>
+    </div>
+  </nav>
+
+  <main id="main-scroll">
+
+    <!-- Header -->
+    <section class="section section-hero">
+      <div class="hero-content">
+        <div class="hero-eyebrow">MODULE 4 · FUND ACCOUNTING</div>
+        <h1 class="hero-title">
+          <span class="hero-title-main">Fund</span>
+          <span class="hero-title-sub">Accounting</span>
+        </h1>
+        <p class="hero-description" id="org-label">—</p>
+        <div class="hero-stats" id="stats-bar"></div>
+      </div>
+    </section>
+
+    <!-- Tab Navigation -->
+    <section class="section">
+      <div class="inv-tabs" id="acc-tabs">
+        <button class="inv-tab active" data-tab="nav">NAV Records</button>
+        <button class="inv-tab" data-tab="carry">Carried Interest</button>
+        <button class="inv-tab" data-tab="ledger">Fund Ledger</button>
+        <button class="inv-tab" data-tab="fees">Management Fees</button>
+        <button class="inv-tab" data-tab="coa">Chart of Accounts</button>
+        <button class="inv-tab" data-tab="trial-balance">Trial Balance</button>
+        <button class="inv-tab" data-tab="financials">Financial Statements</button>
+        <button class="inv-tab" data-tab="tally">Tally Sync</button>
+      </div>
+    </section>
+
+    <!-- ═══ NAV RECORDS TAB ═══ -->
+    <section class="section" id="tab-nav">
+      <div class="section-header">
+        <div class="section-tag">NAV</div>
+        <h2 class="section-title">NAV Records</h2>
+        <p class="section-subtitle">SEBI-mandated Net Asset Value computation per scheme. Includes CDSL/NSDL depository reconciliation.</p>
+      </div>
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <label>Scheme:</label>
+          <select id="nav-scheme-filter" class="select-dark">
+            <option value="">All Schemes</option>
+          </select>
+          <label style="margin-left:12px;">Reconciled:</label>
+          <select id="nav-reconciled-filter" class="select-dark">
+            <option value="">All</option>
+            <option value="true">Reconciled</option>
+            <option value="false">Unreconciled</option>
+          </select>
+        </div>
+        <button class="btn-primary" id="btn-new-nav">+ Record NAV</button>
+      </div>
+      <div id="nav-list"></div>
+    </section>
+
+    <!-- ═══ CARRIED INTEREST TAB ═══ -->
+    <section class="section hidden" id="tab-carry">
+      <div class="section-header">
+        <div class="section-tag">Carry</div>
+        <h2 class="section-title">Carried Interest Waterfall</h2>
+        <p class="section-subtitle">GP carry calculation with preferred return, catch-up, and carry split. European and American waterfall support.</p>
+      </div>
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <label>Scheme:</label>
+          <select id="carry-scheme-filter" class="select-dark">
+            <option value="">All Schemes</option>
+          </select>
+        </div>
+        <button class="btn-primary" id="btn-new-carry">+ Compute Carry</button>
+      </div>
+      <div id="carry-list"></div>
+    </section>
+
+    <!-- ═══ FUND LEDGER TAB ═══ -->
+    <section class="section hidden" id="tab-ledger">
+      <div class="section-header">
+        <div class="section-tag">Ledger</div>
+        <h2 class="section-title">Fund Ledger</h2>
+        <p class="section-subtitle">Double-entry journal entries. Immutable once posted — entries can only be reversed, not deleted.</p>
+      </div>
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <label>Scheme:</label>
+          <select id="ledger-scheme-filter" class="select-dark">
+            <option value="">All Schemes</option>
+          </select>
+          <label style="margin-left:12px;">Ref Type:</label>
+          <select id="ledger-ref-filter" class="select-dark">
+            <option value="">All Types</option>
+            <option value="capital_call">Capital Call</option>
+            <option value="distribution">Distribution</option>
+            <option value="investment">Investment</option>
+            <option value="valuation">Valuation</option>
+            <option value="management_fee">Management Fee</option>
+            <option value="carried_interest">Carried Interest</option>
+            <option value="other">Other</option>
+          </select>
+        </div>
+        <button class="btn-primary" id="btn-new-entry">+ Post Journal Entry</button>
+      </div>
+      <div class="acc-table-wrap">
+        <table class="acc-table">
+          <thead>
+            <tr>
+              <th>Entry #</th>
+              <th>Date</th>
+              <th>Description</th>
+              <th>Debit Account</th>
+              <th>Credit Account</th>
+              <th>Amount (₹)</th>
+              <th>Ref Type</th>
+              <th>Ref ID</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="ledger-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ═══ MANAGEMENT FEES TAB ═══ -->
+    <section class="section hidden" id="tab-fees">
+      <div class="section-header">
+        <div class="section-tag">Fees</div>
+        <h2 class="section-title">Management Fee Schedule</h2>
+        <p class="section-subtitle">Periodic management fee computation including GST. Tracks invoice numbers and payment status.</p>
+      </div>
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <label>Scheme:</label>
+          <select id="fee-scheme-filter" class="select-dark">
+            <option value="">All Schemes</option>
+          </select>
+        </div>
+        <button class="btn-primary" id="btn-new-fee">+ Add Fee Period</button>
+      </div>
+      <div class="acc-table-wrap">
+        <table class="acc-table">
+          <thead>
+            <tr>
+              <th>Scheme</th>
+              <th>Period</th>
+              <th>Fee Basis</th>
+              <th>Rate</th>
+              <th>Fee Amount</th>
+              <th>GST</th>
+              <th>Total (incl. GST)</th>
+              <th>Invoice #</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="fee-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ═══ CHART OF ACCOUNTS TAB ═══ -->
+    <section class="section hidden" id="tab-coa">
+      <div class="section-header">
+        <div class="section-tag">Chart of Accounts</div>
+        <h2 class="section-title">Chart of Accounts</h2>
+        <p class="section-subtitle">Account hierarchy for double-entry bookkeeping. Assets, liabilities, equity, income, and expenses.</p>
+      </div>
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <label>Type:</label>
+          <select id="coa-type-filter" class="select-dark">
+            <option value="">All Types</option>
+            <option value="asset">Asset</option>
+            <option value="liability">Liability</option>
+            <option value="equity">Equity</option>
+            <option value="income">Income</option>
+            <option value="expense">Expense</option>
+          </select>
+        </div>
+        <button class="btn-primary" id="btn-new-account">+ Add Account</button>
+      </div>
+      <div class="acc-table-wrap">
+        <table class="acc-table">
+          <thead>
+            <tr>
+              <th>Code</th>
+              <th>Account Name</th>
+              <th>Type</th>
+              <th>Parent Account</th>
+              <th>Description</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="coa-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ═══ TRIAL BALANCE TAB ═══ -->
+    <section class="section hidden" id="tab-trial-balance">
+      <div class="section-header">
+        <div class="section-tag">Trial Balance</div>
+        <h2 class="section-title">Trial Balance</h2>
+        <p class="section-subtitle">Aggregated debit and credit balances across all accounts for the selected scheme. Validates that debits = credits.</p>
+      </div>
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <label>Scheme:</label>
+          <select id="tb-scheme-select" class="select-dark">
+            <option value="">Select Scheme</option>
+          </select>
+          <label style="margin-left:12px;">As of Date:</label>
+          <input type="date" id="tb-date" class="select-dark" />
+        </div>
+        <button class="btn-primary" id="btn-generate-tb">Generate Trial Balance</button>
+      </div>
+      <div id="trial-balance-output"></div>
+    </section>
+
+    <!-- ═══ FINANCIAL STATEMENTS TAB ═══ -->
+    <section class="section hidden" id="tab-financials">
+      <div class="section-header">
+        <div class="section-tag">Financials</div>
+        <h2 class="section-title">Financial Statements</h2>
+        <p class="section-subtitle">Balance sheet, income statement, and cash flow statement generated from the fund ledger. Ind AS 109 compliant.</p>
+      </div>
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <label>Scheme:</label>
+          <select id="fin-scheme-select" class="select-dark">
+            <option value="">Select Scheme</option>
+          </select>
+          <label style="margin-left:12px;">Statement:</label>
+          <select id="fin-type" class="select-dark">
+            <option value="bs">Balance Sheet</option>
+            <option value="is">Income Statement</option>
+            <option value="cf">Cash Flow Statement</option>
+          </select>
+        </div>
+        <button class="btn-primary" id="btn-generate-fin">Generate Statement</button>
+        <button class="btn-ghost" id="btn-export-fin">Export PDF</button>
+      </div>
+      <div id="financials-output"></div>
+    </section>
+
+    <!-- ═══ TALLY SYNC TAB ═══ -->
+    <section class="section hidden" id="tab-tally">
+      <div class="section-header">
+        <div class="section-tag">Tally</div>
+        <h2 class="section-title">Tally ERP Sync</h2>
+        <p class="section-subtitle">Import trial balances from Tally ERP or export fund ledger journal entries to Tally. Enables seamless reconciliation with your existing accounting system.</p>
+      </div>
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <label>Scheme:</label>
+          <select id="tally-scheme-select" class="select-dark">
+            <option value="">Select Scheme</option>
+          </select>
+        </div>
+      </div>
+      <div class="tally-actions">
+        <div class="tally-action-card" id="tally-import-card">
+          <div class="tally-action-icon">⬇</div>
+          <div class="tally-action-title">Import from Tally</div>
+          <div class="tally-action-desc">Upload a Tally trial balance XML/CSV export to create journal entries in the fund ledger. Automatically maps Tally accounts to the Chart of Accounts.</div>
+          <div class="tally-upload-area">
+            <input type="file" id="tally-import-file" accept=".xml,.csv,.xlsx" />
+            <label for="tally-import-file" class="tally-file-label">Choose Tally Export File</label>
+            <span id="tally-file-name" class="tally-file-name">No file selected</span>
+          </div>
+          <button class="btn-primary" id="btn-tally-import">Import Trial Balance</button>
+          <div id="tally-import-status"></div>
+        </div>
+        <div class="tally-action-card" id="tally-export-card">
+          <div class="tally-action-icon">⬆</div>
+          <div class="tally-action-title">Export to Tally</div>
+          <div class="tally-action-desc">Export fund ledger journal entries in Tally XML format. Import the output file directly into Tally ERP to keep both systems in sync.</div>
+          <div class="toolbar-left" style="margin-bottom:16px;">
+            <label>Date Range:</label>
+            <input type="date" id="tally-export-from" class="select-dark" />
+            <span style="color:var(--text-muted);">to</span>
+            <input type="date" id="tally-export-to" class="select-dark" />
+          </div>
+          <button class="btn-primary" id="btn-tally-export">Export Journal Entries</button>
+          <div id="tally-export-status"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Modal for forms -->
+    <div class="modal-overlay hidden" id="modal-overlay">
+      <div class="modal-card" id="modal-card">
+        <div class="modal-header">
+          <h3 id="modal-title">—</h3>
+          <button class="modal-close" id="modal-close">&times;</button>
+        </div>
+        <form id="modal-form">
+          <div id="modal-fields"></div>
+          <div class="modal-actions">
+            <button type="button" class="btn-ghost" id="modal-cancel">Cancel</button>
+            <button type="submit" class="btn-primary" id="modal-submit">Save</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+  </main>
+
+  <script src="theme-switcher.js"></script>
+  <script src="auth.js"></script>
+  <script src="notification-drawer.js"></script>
+  <script src="fund-accounting.js"></script>
+
+</body>
+</html>

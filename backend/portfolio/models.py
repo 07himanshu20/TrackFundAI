@@ -22,9 +22,15 @@ class PortfolioSnapshot(models.Model):
     """
     Records a portfolio build event. Each time the builder runs
     (whether from Excel parse or manual rebuild), a new snapshot is created.
-    The latest snapshot is the active one.
+    The latest active snapshot per organization is the one shown to users.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        'accounts.Organization',
+        on_delete=models.CASCADE,
+        related_name='portfolio_snapshots',
+        null=True, blank=True,
+    )
     schema_version = models.CharField(max_length=10, default='2.0')
     base_currency = models.CharField(max_length=3, default='USD')
     fx_as_of = models.CharField(max_length=10, blank=True)

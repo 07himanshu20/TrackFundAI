@@ -1,0 +1,2272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TrackFundAI - System Flowcharts & Data Flow Diagrams</title>
+<style>
+  /* ═══════════════════════════════════════════════════════════
+     GLOBAL RESET & BASE
+     ═══════════════════════════════════════════════════════════ */
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg-dark: #0a0a0f;
+    --bg-card: #12121a;
+    --bg-card-alt: #181825;
+    --bg-node: #1a1a2e;
+    --border: #2a2a40;
+    --border-hover: #4a4a6a;
+    --text-primary: #e0e0f0;
+    --text-secondary: #8888aa;
+    --text-muted: #5a5a7a;
+    --accent-blue: #4a9eff;
+    --accent-purple: #7c5cfc;
+    --accent-teal: #00d4aa;
+    --accent-orange: #ff8a4a;
+    --accent-pink: #ff5c8a;
+    --accent-green: #4aff8a;
+    --accent-red: #ff4a4a;
+    --accent-yellow: #ffd54a;
+    --accent-cyan: #4ae0ff;
+    --accent-lime: #b4ff4a;
+    --gradient-blue: linear-gradient(135deg, #4a9eff, #7c5cfc);
+    --gradient-teal: linear-gradient(135deg, #00d4aa, #4a9eff);
+    --gradient-purple: linear-gradient(135deg, #7c5cfc, #ff5c8a);
+    --gradient-orange: linear-gradient(135deg, #ff8a4a, #ffd54a);
+    --shadow-glow: 0 0 30px rgba(74, 158, 255, 0.1);
+    --radius: 12px;
+    --radius-sm: 8px;
+    --radius-xs: 6px;
+  }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--bg-dark);
+    color: var(--text-primary);
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+     NAVIGATION
+     ═══════════════════════════════════════════════════════════ */
+  .top-nav {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: rgba(10, 10, 15, 0.92);
+    backdrop-filter: blur(20px);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 32px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    overflow-x: auto;
+  }
+  .top-nav .brand {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--accent-blue);
+    white-space: nowrap;
+    letter-spacing: -0.5px;
+  }
+  .top-nav .brand span { color: var(--accent-teal); }
+  .top-nav .sep {
+    width: 1px;
+    height: 24px;
+    background: var(--border);
+    flex-shrink: 0;
+  }
+  .nav-link {
+    font-size: 13px;
+    color: var(--text-secondary);
+    text-decoration: none;
+    padding: 6px 12px;
+    border-radius: var(--radius-xs);
+    white-space: nowrap;
+    transition: all 0.2s;
+  }
+  .nav-link:hover {
+    color: var(--text-primary);
+    background: rgba(74, 158, 255, 0.08);
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+     HERO
+     ═══════════════════════════════════════════════════════════ */
+  .hero {
+    text-align: center;
+    padding: 60px 32px 40px;
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::before {
+    content: '';
+    position: absolute;
+    top: -50%;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 800px;
+    height: 800px;
+    background: radial-gradient(circle, rgba(74,158,255,0.06) 0%, transparent 70%);
+    pointer-events: none;
+  }
+  .hero h1 {
+    font-size: 48px;
+    font-weight: 800;
+    letter-spacing: -2px;
+    background: var(--gradient-blue);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 8px;
+  }
+  .hero .subtitle {
+    font-size: 18px;
+    color: var(--text-secondary);
+    max-width: 700px;
+    margin: 0 auto 24px;
+  }
+  .hero-stats {
+    display: flex;
+    justify-content: center;
+    gap: 32px;
+    flex-wrap: wrap;
+  }
+  .hero-stat {
+    text-align: center;
+  }
+  .hero-stat .num {
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--accent-teal);
+  }
+  .hero-stat .lbl {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-muted);
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+     SECTION LAYOUT
+     ═══════════════════════════════════════════════════════════ */
+  .section {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 40px 32px;
+  }
+  .section-header {
+    margin-bottom: 32px;
+  }
+  .section-tag {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: var(--accent-blue);
+    margin-bottom: 8px;
+  }
+  .section-title {
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: -1px;
+    margin-bottom: 8px;
+  }
+  .section-desc {
+    color: var(--text-secondary);
+    font-size: 15px;
+    max-width: 800px;
+  }
+  .divider {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 0 32px;
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+     FLOWCHART COMMON
+     ═══════════════════════════════════════════════════════════ */
+  .flow-container {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 40px;
+    overflow-x: auto;
+    box-shadow: var(--shadow-glow);
+  }
+
+  /* SVG-free flowchart using CSS Grid and flexbox */
+  .flow-row {
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 0;
+    position: relative;
+  }
+
+  .flow-arrow-down {
+    display: flex;
+    justify-content: center;
+    padding: 8px 0;
+  }
+  .flow-arrow-down .arrow {
+    width: 2px;
+    height: 32px;
+    background: var(--accent-blue);
+    position: relative;
+  }
+  .flow-arrow-down .arrow::after {
+    content: '';
+    position: absolute;
+    bottom: -1px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 0;
+    height: 0;
+    border-left: 6px solid transparent;
+    border-right: 6px solid transparent;
+    border-top: 8px solid var(--accent-blue);
+  }
+
+  /* Connector line that fans out to multiple children */
+  .flow-fan {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 8px 0;
+  }
+  .flow-fan .stem {
+    width: 2px;
+    height: 16px;
+    background: var(--accent-blue);
+  }
+  .flow-fan .bar {
+    height: 2px;
+    background: var(--accent-blue);
+    align-self: stretch;
+    margin: 0 40px;
+  }
+  .flow-fan .drops {
+    display: flex;
+    justify-content: space-around;
+    align-self: stretch;
+    margin: 0 40px;
+  }
+  .flow-fan .drop {
+    width: 2px;
+    height: 16px;
+    background: var(--accent-blue);
+    position: relative;
+  }
+  .flow-fan .drop::after {
+    content: '';
+    position: absolute;
+    bottom: -1px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 0;
+    height: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 6px solid var(--accent-blue);
+  }
+
+  /* NODE BOXES */
+  .node {
+    padding: 12px 20px;
+    border-radius: var(--radius-sm);
+    text-align: center;
+    font-size: 14px;
+    font-weight: 600;
+    min-width: 120px;
+    max-width: 200px;
+    transition: transform 0.2s, box-shadow 0.2s;
+    cursor: default;
+    position: relative;
+  }
+  .node:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+  }
+  .node .node-sub {
+    display: block;
+    font-size: 11px;
+    font-weight: 400;
+    color: rgba(255,255,255,0.6);
+    margin-top: 2px;
+  }
+
+  .node-primary {
+    background: var(--gradient-blue);
+    color: #fff;
+    border: none;
+    font-size: 16px;
+    padding: 16px 28px;
+    min-width: 200px;
+  }
+  .node-secondary {
+    background: var(--bg-node);
+    border: 1px solid var(--accent-blue);
+    color: var(--accent-blue);
+  }
+  .node-module {
+    background: var(--bg-node);
+    border: 2px solid;
+    padding: 14px 18px;
+    min-width: 150px;
+  }
+  .node-module.m1 { border-color: var(--accent-blue); color: var(--accent-blue); }
+  .node-module.m2 { border-color: var(--accent-purple); color: var(--accent-purple); }
+  .node-module.m3 { border-color: var(--accent-teal); color: var(--accent-teal); }
+  .node-module.m4 { border-color: var(--accent-orange); color: var(--accent-orange); }
+  .node-module.m5 { border-color: var(--accent-pink); color: var(--accent-pink); }
+  .node-module.m6 { border-color: var(--accent-green); color: var(--accent-green); }
+  .node-module.m7 { border-color: var(--accent-yellow); color: var(--accent-yellow); }
+  .node-module.m8 { border-color: var(--accent-cyan); color: var(--accent-cyan); }
+
+  .node-leaf {
+    background: var(--bg-card-alt);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 500;
+    padding: 8px 14px;
+    min-width: 100px;
+    max-width: 160px;
+  }
+
+  .node-attr {
+    background: var(--bg-card-alt);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 500;
+    padding: 6px 10px;
+    min-width: 80px;
+    max-width: 140px;
+    border-radius: var(--radius-xs);
+  }
+
+  .node-data {
+    background: transparent;
+    border: 1px dashed var(--border-hover);
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 400;
+    padding: 6px 10px;
+    min-width: 70px;
+    max-width: 130px;
+  }
+
+  /* Number badge on module nodes */
+  .node-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.15);
+    font-size: 11px;
+    font-weight: 700;
+    margin-right: 6px;
+    color: inherit;
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+     DFD DETAIL CARDS
+     ═══════════════════════════════════════════════════════════ */
+  .dfd-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 24px;
+  }
+
+  .dfd-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .dfd-card-header {
+    padding: 20px 28px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .dfd-card-header .dfd-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: var(--radius-sm);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    font-weight: 800;
+    flex-shrink: 0;
+  }
+  .dfd-card-header h3 {
+    font-size: 20px;
+    font-weight: 700;
+  }
+  .dfd-card-header .dfd-sub {
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+  .dfd-card-body {
+    padding: 28px;
+    overflow-x: auto;
+  }
+
+  /* Color themes for DFD cards */
+  .dfd-blue .dfd-icon { background: rgba(74,158,255,0.15); color: var(--accent-blue); }
+  .dfd-blue .dfd-card-header h3 { color: var(--accent-blue); }
+  .dfd-purple .dfd-icon { background: rgba(124,92,252,0.15); color: var(--accent-purple); }
+  .dfd-purple .dfd-card-header h3 { color: var(--accent-purple); }
+  .dfd-teal .dfd-icon { background: rgba(0,212,170,0.15); color: var(--accent-teal); }
+  .dfd-teal .dfd-card-header h3 { color: var(--accent-teal); }
+  .dfd-orange .dfd-icon { background: rgba(255,138,74,0.15); color: var(--accent-orange); }
+  .dfd-orange .dfd-card-header h3 { color: var(--accent-orange); }
+  .dfd-pink .dfd-icon { background: rgba(255,92,138,0.15); color: var(--accent-pink); }
+  .dfd-pink .dfd-card-header h3 { color: var(--accent-pink); }
+  .dfd-green .dfd-icon { background: rgba(74,255,138,0.15); color: var(--accent-green); }
+  .dfd-green .dfd-card-header h3 { color: var(--accent-green); }
+  .dfd-yellow .dfd-icon { background: rgba(255,213,74,0.15); color: var(--accent-yellow); }
+  .dfd-yellow .dfd-card-header h3 { color: var(--accent-yellow); }
+  .dfd-cyan .dfd-icon { background: rgba(74,224,255,0.15); color: var(--accent-cyan); }
+  .dfd-cyan .dfd-card-header h3 { color: var(--accent-cyan); }
+  .dfd-red .dfd-icon { background: rgba(255,74,74,0.15); color: var(--accent-red); }
+  .dfd-red .dfd-card-header h3 { color: var(--accent-red); }
+  .dfd-lime .dfd-icon { background: rgba(180,255,74,0.15); color: var(--accent-lime); }
+  .dfd-lime .dfd-card-header h3 { color: var(--accent-lime); }
+
+  /* ═══════════════════════════════════════════════════════════
+     HIERARCHICAL TREE (for Portfolio DFD)
+     ═══════════════════════════════════════════════════════════ */
+  .tree {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+  }
+  .tree-level {
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    width: 100%;
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+     TABLE-STYLE FIELD LISTS
+     ═══════════════════════════════════════════════════════════ */
+  .field-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: center;
+    margin-top: 12px;
+  }
+  .field-tag {
+    padding: 5px 12px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    background: rgba(74,158,255,0.08);
+    border: 1px solid rgba(74,158,255,0.2);
+    color: var(--accent-blue);
+  }
+  .field-tag.purple {
+    background: rgba(124,92,252,0.08);
+    border-color: rgba(124,92,252,0.2);
+    color: var(--accent-purple);
+  }
+  .field-tag.teal {
+    background: rgba(0,212,170,0.08);
+    border-color: rgba(0,212,170,0.2);
+    color: var(--accent-teal);
+  }
+  .field-tag.orange {
+    background: rgba(255,138,74,0.08);
+    border-color: rgba(255,138,74,0.2);
+    color: var(--accent-orange);
+  }
+  .field-tag.pink {
+    background: rgba(255,92,138,0.08);
+    border-color: rgba(255,92,138,0.2);
+    color: var(--accent-pink);
+  }
+  .field-tag.green {
+    background: rgba(74,255,138,0.08);
+    border-color: rgba(74,255,138,0.2);
+    color: var(--accent-green);
+  }
+  .field-tag.yellow {
+    background: rgba(255,213,74,0.08);
+    border-color: rgba(255,213,74,0.2);
+    color: var(--accent-yellow);
+  }
+  .field-tag.cyan {
+    background: rgba(74,224,255,0.08);
+    border-color: rgba(74,224,255,0.2);
+    color: var(--accent-cyan);
+  }
+  .field-tag.red {
+    background: rgba(255,74,74,0.08);
+    border-color: rgba(255,74,74,0.2);
+    color: var(--accent-red);
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+     HORIZONTAL FLOW (for sub-diagrams)
+     ═══════════════════════════════════════════════════════════ */
+  .h-flow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    flex-wrap: wrap;
+    margin: 16px 0;
+  }
+  .h-arrow {
+    width: 32px;
+    height: 2px;
+    background: var(--accent-blue);
+    position: relative;
+    flex-shrink: 0;
+  }
+  .h-arrow::after {
+    content: '';
+    position: absolute;
+    right: -1px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 0;
+    height: 0;
+    border-top: 5px solid transparent;
+    border-bottom: 5px solid transparent;
+    border-left: 7px solid var(--accent-blue);
+  }
+  .h-arrow.purple { background: var(--accent-purple); }
+  .h-arrow.purple::after { border-left-color: var(--accent-purple); }
+  .h-arrow.teal { background: var(--accent-teal); }
+  .h-arrow.teal::after { border-left-color: var(--accent-teal); }
+  .h-arrow.orange { background: var(--accent-orange); }
+  .h-arrow.orange::after { border-left-color: var(--accent-orange); }
+
+  /* ═══════════════════════════════════════════════════════════
+     BRANCH LAYOUT (parent with vertical children)
+     ═══════════════════════════════════════════════════════════ */
+  .branch {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+  }
+  .branch-children {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  /* Mini arrow for branch connectors */
+  .mini-arrow-down {
+    display: flex;
+    justify-content: center;
+    padding: 4px 0;
+  }
+  .mini-arrow-down .stick {
+    width: 2px;
+    height: 16px;
+    background: var(--border-hover);
+    position: relative;
+  }
+  .mini-arrow-down .stick::after {
+    content: '';
+    position: absolute;
+    bottom: -1px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid var(--border-hover);
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+     COMPARISON PANEL MODES (special layout)
+     ═══════════════════════════════════════════════════════════ */
+  .modes-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+    margin-top: 20px;
+  }
+  .mode-card {
+    background: var(--bg-card-alt);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 20px;
+  }
+  .mode-card h4 {
+    font-size: 15px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .mode-card h4 .mode-num {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 700;
+    color: #fff;
+  }
+  .mode-card .mode-fields {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .mode-card .mode-desc {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+     TABLE SCHEMA VIEW
+     ═══════════════════════════════════════════════════════════ */
+  .schema-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    margin-top: 16px;
+  }
+  .schema-table th {
+    text-align: left;
+    padding: 8px 12px;
+    background: rgba(74,158,255,0.08);
+    border-bottom: 1px solid var(--border);
+    color: var(--accent-blue);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-size: 11px;
+  }
+  .schema-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid rgba(42,42,64,0.5);
+    color: var(--text-secondary);
+  }
+  .schema-table tr:hover td {
+    background: rgba(74,158,255,0.03);
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+     RESPONSIVE
+     ═══════════════════════════════════════════════════════════ */
+  @media (max-width: 768px) {
+    .hero h1 { font-size: 32px; }
+    .section { padding: 24px 16px; }
+    .flow-container { padding: 20px; }
+    .dfd-card-body { padding: 16px; }
+    .top-nav { padding: 8px 16px; }
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+     FOOTER
+     ═══════════════════════════════════════════════════════════ */
+  .footer {
+    text-align: center;
+    padding: 40px 32px;
+    color: var(--text-muted);
+    font-size: 13px;
+    border-top: 1px solid var(--border);
+    margin-top: 40px;
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+     LABEL inside flowchart
+     ═══════════════════════════════════════════════════════════ */
+  .flow-label {
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin: 4px 0;
+  }
+
+  /* Sub-group box */
+  .sub-group {
+    border: 1px dashed var(--border-hover);
+    border-radius: var(--radius-sm);
+    padding: 16px;
+    margin-top: 12px;
+  }
+  .sub-group-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 10px;
+    text-align: center;
+  }
+
+  /* Horizontal row of small attr chips inside a group */
+  .attr-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: center;
+  }
+
+  /* Colored node variants for variety */
+  .node-leaf.blue { border-color: var(--accent-blue); color: var(--accent-blue); }
+  .node-leaf.purple { border-color: var(--accent-purple); color: var(--accent-purple); }
+  .node-leaf.teal { border-color: var(--accent-teal); color: var(--accent-teal); }
+  .node-leaf.orange { border-color: var(--accent-orange); color: var(--accent-orange); }
+  .node-leaf.pink { border-color: var(--accent-pink); color: var(--accent-pink); }
+  .node-leaf.green { border-color: var(--accent-green); color: var(--accent-green); }
+  .node-leaf.yellow { border-color: var(--accent-yellow); color: var(--accent-yellow); }
+  .node-leaf.cyan { border-color: var(--accent-cyan); color: var(--accent-cyan); }
+  .node-leaf.red { border-color: var(--accent-red); color: var(--accent-red); }
+
+  /* Model count badge */
+  .model-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    background: rgba(0,212,170,0.1);
+    color: var(--accent-teal);
+    border: 1px solid rgba(0,212,170,0.2);
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════
+     TOP NAVIGATION
+     ═══════════════════════════════════════════════════════════ -->
+<nav class="top-nav">
+  <div class="brand">Track<span>Fund</span>AI</div>
+  <div class="sep"></div>
+  <a class="nav-link" href="#main-flow">System Flow</a>
+  <a class="nav-link" href="#dfd-portfolio">Portfolio</a>
+  <a class="nav-link" href="#dfd-fund-admin">Fund Admin</a>
+  <a class="nav-link" href="#dfd-investments">Investments</a>
+  <a class="nav-link" href="#dfd-lp">LP Management</a>
+  <a class="nav-link" href="#dfd-accounting">Fund Accounting</a>
+  <a class="nav-link" href="#dfd-compliance">Compliance</a>
+  <a class="nav-link" href="#dfd-docvault">Doc Vault</a>
+  <a class="nav-link" href="#dfd-dataimport">Data Upload</a>
+  <a class="nav-link" href="#dfd-db">DB Schema</a>
+</nav>
+
+<!-- ═══════════════════════════════════════════════════════════
+     HERO
+     ═══════════════════════════════════════════════════════════ -->
+<header class="hero">
+  <h1>TrackFundAI</h1>
+  <p class="subtitle">System Architecture &middot; Data Flow Diagrams &middot; Flowcharts<br>
+  Complete visual blueprint of the AIF Fund Management Platform</p>
+  <div class="hero-stats">
+    <div class="hero-stat"><div class="num">10</div><div class="lbl">Django Apps</div></div>
+    <div class="hero-stat"><div class="num">44</div><div class="lbl">DB Models</div></div>
+    <div class="hero-stat"><div class="num">80+</div><div class="lbl">API Endpoints</div></div>
+    <div class="hero-stat"><div class="num">8</div><div class="lbl">Modules</div></div>
+    <div class="hero-stat"><div class="num">10</div><div class="lbl">Frontend Pages</div></div>
+  </div>
+</header>
+
+<hr class="divider">
+
+<!-- ═══════════════════════════════════════════════════════════
+     MAIN SYSTEM FLOWCHART
+     ═══════════════════════════════════════════════════════════ -->
+<section class="section" id="main-flow">
+  <div class="section-header">
+    <div class="section-tag">Flowchart 1</div>
+    <h2 class="section-title">TrackFundAI System Flow</h2>
+    <p class="section-desc">End-to-end user journey from authentication through data ingestion to all 8 platform modules. Multi-tenant architecture with role-based access control (RBAC).</p>
+  </div>
+
+  <div class="flow-container">
+    <div class="tree">
+      <!-- Level 0: Entry -->
+      <div class="tree-level">
+        <div class="node node-primary">TrackFundAI Platform</div>
+      </div>
+
+      <div class="flow-arrow-down"><div class="arrow"></div></div>
+
+      <!-- Level 1: Auth -->
+      <div class="tree-level">
+        <div class="node node-secondary">
+          Login / JWT Auth
+          <span class="node-sub">Username + Password &rarr; Access + Refresh Tokens</span>
+        </div>
+      </div>
+
+      <div class="flow-arrow-down"><div class="arrow"></div></div>
+
+      <!-- Level 1.5: RBAC -->
+      <div class="tree-level">
+        <div class="node node-leaf" style="max-width: 340px; min-width: 300px;">
+          Role-Based Access Control
+          <span class="node-sub">platform_admin &middot; gp_admin &middot; compliance_officer &middot; operations &middot; lp_user</span>
+        </div>
+      </div>
+
+      <div class="flow-arrow-down"><div class="arrow"></div></div>
+
+      <!-- Level 2: Data Ingestion -->
+      <div class="tree-level">
+        <div class="node node-secondary" style="border-color: var(--accent-teal); color: var(--accent-teal);">
+          Data Ingestion Layer
+          <span class="node-sub">Excel Upload &rarr; Gemini AI Column Mapping &rarr; 44 Model DB Population</span>
+        </div>
+      </div>
+
+      <div class="flow-arrow-down"><div class="arrow"></div></div>
+      <div class="flow-label">8 Platform Modules</div>
+
+      <!-- Level 3: 8 Modules -->
+      <div class="tree-level">
+        <div class="node node-module m1"><span class="node-num">1</span>Portfolio Dashboard</div>
+        <div class="node node-module m2"><span class="node-num">2</span>Fund Admin</div>
+        <div class="node node-module m3"><span class="node-num">3</span>Investments</div>
+        <div class="node node-module m4"><span class="node-num">4</span>LP Management</div>
+        <div class="node node-module m5"><span class="node-num">5</span>Fund Accounting</div>
+        <div class="node node-module m6"><span class="node-num">6</span>Compliance</div>
+        <div class="node node-module m7"><span class="node-num">7</span>Document Vault</div>
+        <div class="node node-module m8"><span class="node-num">8</span>Data Upload</div>
+      </div>
+
+      <div class="flow-arrow-down"><div class="arrow"></div></div>
+
+      <!-- Level 4: Cross-cutting -->
+      <div class="tree-level">
+        <div class="node node-leaf" style="border-color: var(--accent-lime); color: var(--accent-lime);">Gemini AI Chatbot</div>
+        <div class="node node-leaf" style="border-color: var(--accent-yellow); color: var(--accent-yellow);">Notifications Engine</div>
+        <div class="node node-leaf" style="border-color: var(--accent-red); color: var(--accent-red);">Audit Logging (SOC 2)</div>
+        <div class="node node-leaf" style="border-color: var(--accent-cyan); color: var(--accent-cyan);">FundAccess Row-Level Security</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- ═══════════════════════════════════════════════════════════
+     DFD 1: PORTFOLIO DASHBOARD
+     ═══════════════════════════════════════════════════════════ -->
+<section class="section" id="dfd-portfolio">
+  <div class="section-header">
+    <div class="section-tag">DFD 1</div>
+    <h2 class="section-title">Portfolio Dashboard</h2>
+    <p class="section-desc">Hierarchical fund-level analytics with 4 comparison modes. Bottom-up financial aggregation from companies to segments to sectors to funds. Gemini AI analyst chatbot scoped to current hierarchy level.</p>
+  </div>
+
+  <div class="dfd-grid">
+    <!-- Hierarchy Flow -->
+    <div class="dfd-card dfd-blue">
+      <div class="dfd-card-header">
+        <div class="dfd-icon">H</div>
+        <div>
+          <h3>Portfolio Hierarchy & Drill-Down</h3>
+          <div class="dfd-sub">Layered navigation: Portfolio &rarr; Fund &rarr; Sector &rarr; Segment &rarr; Company</div>
+        </div>
+      </div>
+      <div class="dfd-card-body">
+        <div class="tree">
+          <!-- Portfolio Root -->
+          <div class="tree-level">
+            <div class="node node-primary" style="min-width: 260px;">
+              Portfolio Root
+              <span class="node-sub">Aggregated view of all funds &middot; FX-normalized to USD</span>
+            </div>
+          </div>
+
+          <div class="flow-arrow-down"><div class="arrow"></div></div>
+          <div class="flow-label">Fund vs Fund Comparison Level</div>
+
+          <!-- Fund Level -->
+          <div class="tree-level">
+            <div class="node node-module m1" style="min-width:110px;">Fund A</div>
+            <div class="node node-module m1" style="min-width:110px;">Fund B</div>
+            <div class="node node-module m1" style="min-width:110px;">Fund C</div>
+            <div class="node node-module m1" style="min-width:110px;">Fund D</div>
+            <div class="node node-module m1" style="min-width:110px;">Fund E</div>
+          </div>
+
+          <div class="flow-arrow-down"><div class="arrow"></div></div>
+          <div class="flow-label">Inside Each Fund</div>
+
+          <!-- Sector Level -->
+          <div class="tree-level">
+            <div class="node node-leaf blue">Sector: Technology</div>
+            <div class="node node-leaf blue">Sector: Healthcare</div>
+            <div class="node node-leaf blue">Sector: Financial Services</div>
+            <div class="node node-leaf blue">Sector: Consumer</div>
+          </div>
+
+          <div class="flow-arrow-down"><div class="arrow"></div></div>
+
+          <!-- Segment Level -->
+          <div class="tree-level">
+            <div class="node node-leaf purple">Segment: Enterprise SaaS</div>
+            <div class="node node-leaf purple">Segment: Fintech</div>
+            <div class="node node-leaf purple">Segment: D2C Brands</div>
+            <div class="node node-leaf purple">Segment: EdTech</div>
+          </div>
+
+          <div class="flow-arrow-down"><div class="arrow"></div></div>
+
+          <!-- Company Level (Leaf) -->
+          <div class="tree-level">
+            <div class="node node-leaf teal">Company (Leaf)</div>
+            <div class="node node-leaf teal">Company (Leaf)</div>
+            <div class="node node-leaf teal">Company (Leaf)</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Compare Panel Modes -->
+    <div class="dfd-card dfd-purple">
+      <div class="dfd-card-header">
+        <div class="dfd-icon">C</div>
+        <div>
+          <h3>4 Comparison Panel Modes</h3>
+          <div class="dfd-sub">Available at every hierarchy level when 2+ children exist</div>
+        </div>
+      </div>
+      <div class="dfd-card-body">
+        <div class="modes-grid">
+          <!-- Mode 1 -->
+          <div class="mode-card">
+            <h4><span class="mode-num" style="background: var(--accent-blue);">1</span> Budget vs Actual MIS</h4>
+            <div class="mode-desc">Compare actual financial performance against budgeted targets for YTD</div>
+            <div class="mode-fields">
+              <span class="field-tag">Revenue (Actual)</span>
+              <span class="field-tag">Revenue (Budget)</span>
+              <span class="field-tag">EBITDA (Actual)</span>
+              <span class="field-tag">EBITDA (Budget)</span>
+              <span class="field-tag">Gross Profit</span>
+              <span class="field-tag">COGS</span>
+              <span class="field-tag">OpEx</span>
+            </div>
+          </div>
+          <!-- Mode 2 -->
+          <div class="mode-card">
+            <h4><span class="mode-num" style="background: var(--accent-purple);">2</span> Sales & Margin</h4>
+            <div class="mode-desc">Revenue and margin analysis across sibling entities</div>
+            <div class="mode-fields">
+              <span class="field-tag purple">Revenue</span>
+              <span class="field-tag purple">Gross Profit</span>
+              <span class="field-tag purple">GP %</span>
+              <span class="field-tag purple">EBITDA</span>
+              <span class="field-tag purple">EBITDA %</span>
+            </div>
+          </div>
+          <!-- Mode 3 -->
+          <div class="mode-card">
+            <h4><span class="mode-num" style="background: var(--accent-teal);">3</span> Budget Variance</h4>
+            <div class="mode-desc">YTD budget variance with % deviation across children</div>
+            <div class="mode-fields">
+              <span class="field-tag teal">YTD Actual</span>
+              <span class="field-tag teal">YTD Budget</span>
+              <span class="field-tag teal">Variance $</span>
+              <span class="field-tag teal">Variance %</span>
+              <span class="field-tag teal">BVA VAR %</span>
+            </div>
+          </div>
+          <!-- Mode 4 -->
+          <div class="mode-card">
+            <h4><span class="mode-num" style="background: var(--accent-orange);">4</span> KPI Table</h4>
+            <div class="mode-desc">Comprehensive KPI comparison table with MTD, YTD, and derived metrics</div>
+            <div class="mode-fields">
+              <span class="field-tag orange">Revenue MTD</span>
+              <span class="field-tag orange">Revenue YTD</span>
+              <span class="field-tag orange">GP YTD</span>
+              <span class="field-tag orange">GP %</span>
+              <span class="field-tag orange">EBITDA YTD</span>
+              <span class="field-tag orange">EBITDA %</span>
+              <span class="field-tag orange">BvA Var %</span>
+              <span class="field-tag orange">YoY Rev %</span>
+              <span class="field-tag orange">Cost Basis</span>
+              <span class="field-tag orange">Fair Value</span>
+              <span class="field-tag orange">MOIC</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Data Aggregation Flow -->
+    <div class="dfd-card dfd-teal">
+      <div class="dfd-card-header">
+        <div class="dfd-icon">A</div>
+        <div>
+          <h3>Bottom-Up Financial Aggregation</h3>
+          <div class="dfd-sub">Company-level MIS data rolls up through the hierarchy</div>
+        </div>
+      </div>
+      <div class="dfd-card-body">
+        <div class="h-flow">
+          <div class="node node-leaf teal" style="min-width: 130px;">Company P&L<span class="node-sub">Monthly Revenue, COGS, GP, OpEx, EBITDA</span></div>
+          <div class="h-arrow teal"></div>
+          <div class="node node-leaf purple" style="min-width: 130px;">Segment Agg.<span class="node-sub">Sum children by period</span></div>
+          <div class="h-arrow purple"></div>
+          <div class="node node-leaf blue" style="min-width: 130px;">Sector Agg.<span class="node-sub">Sum segments by period</span></div>
+          <div class="h-arrow"></div>
+          <div class="node node-module m1" style="min-width: 130px;">Fund Total<span class="node-sub">GP%, EBITDA% recomputed</span></div>
+          <div class="h-arrow orange"></div>
+          <div class="node node-primary" style="min-width: 130px; padding: 10px 16px; font-size: 13px;">Portfolio<span class="node-sub">All-fund totals</span></div>
+        </div>
+
+        <div class="sub-group" style="margin-top: 20px;">
+          <div class="sub-group-title">Data Structures Aggregated at Each Level</div>
+          <div class="field-grid">
+            <span class="field-tag teal">financials.summary</span>
+            <span class="field-tag teal">financials.monthly_pl[]</span>
+            <span class="field-tag teal">financials.budget_vs_actual[]</span>
+          </div>
+          <div class="field-grid" style="margin-top: 8px;">
+            <span class="field-tag">revenue</span>
+            <span class="field-tag">cogs</span>
+            <span class="field-tag">gross_profit</span>
+            <span class="field-tag">gp_pct</span>
+            <span class="field-tag">opex</span>
+            <span class="field-tag">ebitda</span>
+            <span class="field-tag">ebitda_pct</span>
+            <span class="field-tag">ytd_revenue</span>
+            <span class="field-tag">ytd_ebitda</span>
+            <span class="field-tag">budget_revenue</span>
+            <span class="field-tag">budget_ebitda</span>
+            <span class="field-tag">cost_basis</span>
+            <span class="field-tag">fair_value</span>
+            <span class="field-tag">moic</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Company Deep-Dive -->
+    <div class="dfd-card dfd-orange">
+      <div class="dfd-card-header">
+        <div class="dfd-icon">D</div>
+        <div>
+          <h3>Company Deep-Dive (Leaf Node)</h3>
+          <div class="dfd-sub">Full analytics view when drilling into an individual portfolio company</div>
+        </div>
+      </div>
+      <div class="dfd-card-body">
+        <div class="tree-level" style="gap: 12px;">
+          <div class="node node-leaf orange">KPI Summary Cards</div>
+          <div class="node node-leaf orange">Monthly P&L Chart</div>
+          <div class="node node-leaf orange">Cash Flow Waterfall</div>
+          <div class="node node-leaf orange">Budget vs Actual Bars</div>
+          <div class="node node-leaf orange">Trend Sparklines</div>
+          <div class="node node-leaf orange">AI Analyst Chat</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- ═══════════════════════════════════════════════════════════
+     DFD 2: FUND ADMIN
+     ═══════════════════════════════════════════════════════════ -->
+<section class="section" id="dfd-fund-admin">
+  <div class="section-header">
+    <div class="section-tag">DFD 2</div>
+    <h2 class="section-title">Fund Administration</h2>
+    <p class="section-desc">Master data management for funds, schemes, and key entities. SEBI AIF regulatory compliance from inception. 4 Django models: FundCategory, Entity, Fund, Scheme.</p>
+  </div>
+
+  <div class="dfd-grid">
+    <div class="dfd-card dfd-purple">
+      <div class="dfd-card-header">
+        <div class="dfd-icon">F</div>
+        <div>
+          <h3>Fund Admin Module</h3>
+          <div class="dfd-sub">3 main components: Fund Details, Schemes, Key Entities</div>
+        </div>
+      </div>
+      <div class="dfd-card-body">
+        <div class="tree">
+          <!-- Root -->
+          <div class="tree-level">
+            <div class="node node-module m2" style="min-width: 240px;"><span class="node-num">2</span>Fund Administration <span class="model-badge">4 Models</span></div>
+          </div>
+
+          <div class="flow-arrow-down"><div class="arrow"></div></div>
+
+          <!-- 3 Components -->
+          <div class="tree-level">
+            <div class="node node-leaf purple" style="min-width: 160px;">Fund Details<span class="node-sub">Fund Model</span></div>
+            <div class="node node-leaf purple" style="min-width: 160px;">Schemes<span class="node-sub">Scheme Model</span></div>
+            <div class="node node-leaf purple" style="min-width: 160px;">Key Entities<span class="node-sub">Entity Model</span></div>
+          </div>
+        </div>
+
+        <!-- Fund Details Breakdown -->
+        <div class="sub-group" style="margin-top: 24px;">
+          <div class="sub-group-title">Fund Details &mdash; Attributes</div>
+          <div class="attr-row">
+            <span class="field-tag purple">Status</span>
+            <span class="field-tag purple">Category</span>
+            <span class="field-tag purple">Sub Category</span>
+            <span class="field-tag purple">Structure</span>
+            <span class="field-tag purple">Base Currency</span>
+            <span class="field-tag purple">Target Corpus</span>
+            <span class="field-tag purple">Inception Date</span>
+            <span class="field-tag purple">SEBI Registration</span>
+            <span class="field-tag purple">PAN</span>
+            <span class="field-tag purple">GSTIN</span>
+            <span class="field-tag purple">GIFT City</span>
+          </div>
+          <div class="flow-label" style="margin-top: 12px;">Fund Category (SEBI AIF Classification)</div>
+          <div class="attr-row">
+            <span class="field-tag">SEBI Category Code</span>
+            <span class="field-tag">Category Name</span>
+            <span class="field-tag">Sub Category</span>
+            <span class="field-tag">Leverage Permitted</span>
+          </div>
+        </div>
+
+        <!-- Schemes Breakdown -->
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">Schemes &mdash; Attributes</div>
+          <div class="attr-row">
+            <span class="field-tag purple">Vintage</span>
+            <span class="field-tag purple">Size</span>
+            <span class="field-tag purple">Hurdle Rate</span>
+            <span class="field-tag purple">Carry %</span>
+            <span class="field-tag purple">Carry Type</span>
+            <span class="field-tag purple">Mgmt Fee %</span>
+            <span class="field-tag purple">Mgmt Fee Basis</span>
+            <span class="field-tag purple">First Close</span>
+            <span class="field-tag purple">Final Close</span>
+            <span class="field-tag purple">Tenure Years</span>
+            <span class="field-tag purple">Sponsor Commit %</span>
+            <span class="field-tag purple">Status</span>
+          </div>
+        </div>
+
+        <!-- Key Entities Breakdown -->
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">Key Entities (Roles linked to Fund)</div>
+          <div class="tree">
+            <div class="tree-level" style="gap: 10px;">
+              <div class="node node-attr">Trustee</div>
+              <div class="node node-attr">Investment Manager</div>
+              <div class="node node-attr">Sponsor</div>
+              <div class="node node-attr">Custodian</div>
+              <div class="node node-attr">Statutory Auditor</div>
+            </div>
+          </div>
+          <div class="flow-label" style="margin-top: 12px;">Each Entity has</div>
+          <div class="attr-row">
+            <span class="field-tag">Entity Type</span>
+            <span class="field-tag">Entity Name</span>
+            <span class="field-tag">PAN</span>
+            <span class="field-tag">GSTIN</span>
+            <span class="field-tag">SEBI Registration</span>
+            <span class="field-tag">Contact Person</span>
+            <span class="field-tag">Email</span>
+            <span class="field-tag">Phone</span>
+            <span class="field-tag">Address</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- ═══════════════════════════════════════════════════════════
+     DFD 3: INVESTMENTS
+     ═══════════════════════════════════════════════════════════ -->
+<section class="section" id="dfd-investments">
+  <div class="section-header">
+    <div class="section-tag">DFD 3</div>
+    <h2 class="section-title">Investments</h2>
+    <p class="section-desc">Portfolio monitoring with investments, valuations, KPI tracking, exit scenarios, and board meetings. 9 Django models covering the full investment lifecycle.</p>
+  </div>
+
+  <div class="dfd-grid">
+    <div class="dfd-card dfd-teal">
+      <div class="dfd-card-header">
+        <div class="dfd-icon">I</div>
+        <div>
+          <h3>Investments Module</h3>
+          <div class="dfd-sub">5 Tabs: Investments, Valuations, KPI Tracking, Exit Scenarios, Board Meetings</div>
+        </div>
+      </div>
+      <div class="dfd-card-body">
+        <div class="tree">
+          <div class="tree-level">
+            <div class="node node-module m3" style="min-width: 240px;"><span class="node-num">3</span>Investments <span class="model-badge">9 Models</span></div>
+          </div>
+          <div class="flow-arrow-down"><div class="arrow"></div></div>
+          <div class="tree-level">
+            <div class="node node-leaf teal">Investments</div>
+            <div class="node node-leaf teal">Valuations</div>
+            <div class="node node-leaf teal">KPI Tracking</div>
+            <div class="node node-leaf teal">Exit Scenarios</div>
+            <div class="node node-leaf teal">Board Meetings</div>
+          </div>
+        </div>
+
+        <!-- Investments Detail -->
+        <div class="sub-group" style="margin-top: 24px;">
+          <div class="sub-group-title">Investment &mdash; Attributes (Investment + InvestmentTranche + PortfolioCompany)</div>
+          <div class="attr-row">
+            <span class="field-tag teal">Scheme</span>
+            <span class="field-tag teal">Instrument Type</span>
+            <span class="field-tag teal">Total Invested</span>
+            <span class="field-tag teal">Ownership %</span>
+            <span class="field-tag teal">Investment Date</span>
+            <span class="field-tag teal">Sector</span>
+            <span class="field-tag teal">Board Seat</span>
+            <span class="field-tag teal">Status</span>
+            <span class="field-tag teal">Currency</span>
+            <span class="field-tag teal">Lead Investor</span>
+            <span class="field-tag teal">Exceeds 10% Threshold</span>
+          </div>
+          <div class="flow-label" style="margin-top: 12px;">Tranches (per investment round)</div>
+          <div class="attr-row">
+            <span class="field-tag">Tranche #</span>
+            <span class="field-tag">Amount</span>
+            <span class="field-tag">Date</span>
+            <span class="field-tag">Shares Acquired</span>
+            <span class="field-tag">Price/Share</span>
+            <span class="field-tag">Pre-Money Val</span>
+            <span class="field-tag">Post-Money Val</span>
+            <span class="field-tag">Round Name</span>
+          </div>
+        </div>
+
+        <!-- Valuations -->
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">Valuations &mdash; Approval Workflow</div>
+          <div class="h-flow">
+            <div class="node node-attr">Submitted</div>
+            <div class="h-arrow teal"></div>
+            <div class="node node-leaf yellow">Pending</div>
+            <div class="h-arrow teal"></div>
+            <div class="node node-leaf green">Approved</div>
+          </div>
+          <div class="h-flow" style="margin-top: 4px;">
+            <div style="width: 170px;"></div>
+            <div class="node node-leaf red" style="margin-left: 50px;">Rejected</div>
+          </div>
+          <div class="attr-row" style="margin-top: 12px;">
+            <span class="field-tag yellow">Methodology</span>
+            <span class="field-tag yellow">Fair Value</span>
+            <span class="field-tag yellow">Enterprise Value</span>
+            <span class="field-tag yellow">Cost Basis</span>
+            <span class="field-tag yellow">Unrealized G/L</span>
+            <span class="field-tag yellow">Multiple</span>
+            <span class="field-tag yellow">FVTPL Movement</span>
+            <span class="field-tag yellow">Discount Rate</span>
+            <span class="field-tag yellow">Comparable Companies</span>
+            <span class="field-tag yellow">Valuer Name</span>
+            <span class="field-tag yellow">Valuer Reg #</span>
+          </div>
+        </div>
+
+        <!-- KPI Tracking -->
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">KPI Tracking &mdash; KPIDefinition + PortfolioKPI</div>
+          <div class="tree">
+            <div class="tree-level">
+              <div class="node node-leaf teal" style="min-width: 200px;">KPI Submissions<span class="node-sub">PortfolioKPI records per company per period</span></div>
+              <div class="node node-leaf teal" style="min-width: 200px;">KPI Definition Library<span class="node-sub">Organization-wide KPI catalog</span></div>
+            </div>
+          </div>
+          <div class="flow-label" style="margin-top: 12px;">KPI Definition Library</div>
+          <div class="attr-row">
+            <span class="field-tag green">ARR</span>
+            <span class="field-tag green">Branch Count</span>
+            <span class="field-tag green">EBITDA Margin</span>
+            <span class="field-tag green">GMV</span>
+            <span class="field-tag green">GNPA %</span>
+            <span class="field-tag green">Burn Rate</span>
+            <span class="field-tag green">Grant Revenue</span>
+            <span class="field-tag green">Head Count</span>
+            <span class="field-tag green">Kitchen Count</span>
+            <span class="field-tag green">Lab Count</span>
+            <span class="field-tag green">MRR</span>
+            <span class="field-tag green">MW Installed</span>
+            <span class="field-tag green">Net Interest Income</span>
+            <span class="field-tag green">Revenue</span>
+            <span class="field-tag green">Revenue YoY Growth</span>
+          </div>
+        </div>
+
+        <!-- Exit Scenarios -->
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">Exit Scenarios &mdash; ExitEvent Model</div>
+          <div class="attr-row">
+            <span class="field-tag pink">Exit Type</span>
+            <span class="field-tag pink">Is Actual</span>
+            <span class="field-tag pink">Exit Date</span>
+            <span class="field-tag pink">Exit Valuation</span>
+            <span class="field-tag pink">Proceeds</span>
+            <span class="field-tag pink">Net Exit Proceeds</span>
+            <span class="field-tag pink">Realized G/L</span>
+            <span class="field-tag pink">MOIC</span>
+            <span class="field-tag pink">Exit Multiple</span>
+            <span class="field-tag pink">IRR %</span>
+            <span class="field-tag pink">Buyer Name</span>
+          </div>
+        </div>
+
+        <!-- Board Meetings -->
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">Board Meetings &mdash; BoardMeeting Model</div>
+          <div class="attr-row">
+            <span class="field-tag cyan">Meeting Date</span>
+            <span class="field-tag cyan">Meeting #</span>
+            <span class="field-tag cyan">Agenda</span>
+            <span class="field-tag cyan">Minutes</span>
+            <span class="field-tag cyan">Attendees</span>
+            <span class="field-tag cyan">Resolutions</span>
+            <span class="field-tag cyan">Next Meeting Date</span>
+            <span class="field-tag cyan">Document (FK)</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- ═══════════════════════════════════════════════════════════
+     DFD 4: LP MANAGEMENT
+     ═══════════════════════════════════════════════════════════ -->
+<section class="section" id="dfd-lp">
+  <div class="section-header">
+    <div class="section-tag">DFD 4</div>
+    <h2 class="section-title">LP Management</h2>
+    <p class="section-desc">Full investor lifecycle: registration, commitments, capital calls, distributions, capital accounts, and waterfall simulation. 8 Django models.</p>
+  </div>
+
+  <div class="dfd-grid">
+    <div class="dfd-card dfd-orange">
+      <div class="dfd-card-header">
+        <div class="dfd-icon">L</div>
+        <div>
+          <h3>LP Management Module</h3>
+          <div class="dfd-sub">6 Tabs: Investors, Commitments, Capital Calls, Distributions, LP Capital Accounts, Waterfall Simulator</div>
+        </div>
+      </div>
+      <div class="dfd-card-body">
+        <div class="tree">
+          <div class="tree-level">
+            <div class="node node-module m4" style="min-width: 260px;"><span class="node-num">4</span>LP Management <span class="model-badge">8 Models</span></div>
+          </div>
+          <div class="flow-arrow-down"><div class="arrow"></div></div>
+          <div class="tree-level">
+            <div class="node node-leaf orange">Investors</div>
+            <div class="node node-leaf orange">Commitments</div>
+            <div class="node node-leaf orange">Capital Calls</div>
+            <div class="node node-leaf orange">Distributions</div>
+            <div class="node node-leaf orange">LP Capital Accounts</div>
+            <div class="node node-leaf orange">Waterfall Simulator</div>
+          </div>
+        </div>
+
+        <!-- Investors Detail -->
+        <div class="sub-group" style="margin-top: 24px;">
+          <div class="sub-group-title">Investors &mdash; Investor Registry (Investor + BankAccount models)</div>
+          <div class="tree">
+            <div class="tree-level">
+              <div class="node node-leaf orange" style="min-width: 150px;">Investor Registry<span class="node-sub">List, filter, search investors</span></div>
+              <div class="node node-leaf orange" style="min-width: 150px;">Add Investor<span class="node-sub">Create new investor record</span></div>
+            </div>
+          </div>
+          <div class="flow-label" style="margin-top: 12px;">Investor Registry Attributes</div>
+          <div class="attr-row">
+            <span class="field-tag orange">Type</span>
+            <span class="field-tag orange">PAN</span>
+            <span class="field-tag orange">KYC Status</span>
+            <span class="field-tag orange">FATCA Status</span>
+            <span class="field-tag orange">Flags</span>
+            <span class="field-tag orange">Actions</span>
+            <span class="field-tag orange">Accreditation</span>
+            <span class="field-tag orange">Land Border Country</span>
+            <span class="field-tag orange">Politically Exposed</span>
+          </div>
+        </div>
+
+        <!-- Commitments Detail -->
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">Commitments &mdash; Commitment Model</div>
+          <div class="attr-row">
+            <span class="field-tag orange">Scheme</span>
+            <span class="field-tag orange">Commit Amount</span>
+            <span class="field-tag orange">Close Type</span>
+            <span class="field-tag orange">Units Allocated</span>
+            <span class="field-tag orange">Status</span>
+            <span class="field-tag orange">Side Letter</span>
+            <span class="field-tag orange">Actions</span>
+          </div>
+        </div>
+
+        <!-- Capital Calls Detail -->
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">Capital Calls &mdash; CapitalCall + CapitalCallLineItem</div>
+          <div class="tree">
+            <div class="tree-level">
+              <div class="node node-leaf orange">View Line Items<span class="node-sub">Per-investor call amounts</span></div>
+              <div class="node node-leaf orange">Send Notice<span class="node-sub">Email capital call notices</span></div>
+            </div>
+          </div>
+          <div class="attr-row" style="margin-top: 12px;">
+            <span class="field-tag">Call #</span>
+            <span class="field-tag">Call Date</span>
+            <span class="field-tag">Due Date</span>
+            <span class="field-tag">Call %</span>
+            <span class="field-tag">Total Amount</span>
+            <span class="field-tag">Purpose</span>
+            <span class="field-tag">Status</span>
+          </div>
+          <div class="flow-label" style="margin-top: 8px;">Line Item per Commitment</div>
+          <div class="attr-row">
+            <span class="field-tag">Called Amount</span>
+            <span class="field-tag">Cumulative Called %</span>
+            <span class="field-tag">Payment Status</span>
+            <span class="field-tag">Amount Received</span>
+            <span class="field-tag">UTR Number</span>
+          </div>
+        </div>
+
+        <!-- Distributions -->
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">Distributions &mdash; Distribution + DistributionLineItem</div>
+          <div class="attr-row">
+            <span class="field-tag orange">Distribution #</span>
+            <span class="field-tag orange">Date</span>
+            <span class="field-tag orange">Type</span>
+            <span class="field-tag orange">Gross Amount</span>
+            <span class="field-tag orange">TDS Amount</span>
+            <span class="field-tag orange">Net Amount</span>
+            <span class="field-tag orange">Related Exit Event</span>
+            <span class="field-tag orange">Status</span>
+          </div>
+        </div>
+
+        <!-- LP Capital Accounts -->
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">LP Capital Accounts &mdash; LPCapitalAccount Model</div>
+          <div class="attr-row">
+            <span class="field-tag yellow">Investor</span>
+            <span class="field-tag yellow">Scheme</span>
+            <span class="field-tag yellow">As Of</span>
+            <span class="field-tag yellow">Called Capital</span>
+            <span class="field-tag yellow">Committed</span>
+            <span class="field-tag yellow">Distributed</span>
+            <span class="field-tag yellow">Uncalled</span>
+            <span class="field-tag yellow">Unrealised</span>
+            <span class="field-tag yellow">Total Value</span>
+            <span class="field-tag yellow">IRR</span>
+            <span class="field-tag yellow">TVPI</span>
+            <span class="field-tag yellow">DPI</span>
+            <span class="field-tag yellow">MOIC</span>
+            <span class="field-tag yellow">Actions</span>
+          </div>
+        </div>
+
+        <!-- Waterfall -->
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">Waterfall Simulator</div>
+          <div class="h-flow">
+            <div class="node node-attr">Return of Capital</div>
+            <div class="h-arrow orange"></div>
+            <div class="node node-attr">Preferred Return</div>
+            <div class="h-arrow orange"></div>
+            <div class="node node-attr">GP Catch-Up</div>
+            <div class="h-arrow orange"></div>
+            <div class="node node-attr">Carried Interest</div>
+            <div class="h-arrow orange"></div>
+            <div class="node node-attr">Residual Split</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- ═══════════════════════════════════════════════════════════
+     DFD 5: FUND ACCOUNTING
+     ═══════════════════════════════════════════════════════════ -->
+<section class="section" id="dfd-accounting">
+  <div class="section-header">
+    <div class="section-tag">DFD 5</div>
+    <h2 class="section-title">Fund Accounting</h2>
+    <p class="section-desc">Full fund-level accounting: NAV computation, carried interest, double-entry ledger, management fees, chart of accounts, trial balance, financial statements, and Tally integration. 5 Django models.</p>
+  </div>
+
+  <div class="dfd-grid">
+    <div class="dfd-card dfd-pink">
+      <div class="dfd-card-header">
+        <div class="dfd-icon">$</div>
+        <div>
+          <h3>Fund Accounting Module</h3>
+          <div class="dfd-sub">8 Tabs: NAV Records, Carried Interest, Fund Ledger, Management Fee, Chart of Accounts, Trial Balance, Financial Statements, Tally Sync</div>
+        </div>
+      </div>
+      <div class="dfd-card-body">
+        <div class="tree">
+          <div class="tree-level">
+            <div class="node node-module m5" style="min-width: 270px;"><span class="node-num">5</span>Fund Accounting <span class="model-badge">5 Models</span></div>
+          </div>
+          <div class="flow-arrow-down"><div class="arrow"></div></div>
+          <div class="tree-level">
+            <div class="node node-leaf pink">NAV Records</div>
+            <div class="node node-leaf pink">Carried Interest</div>
+            <div class="node node-leaf pink">Fund Ledger</div>
+            <div class="node node-leaf pink">Mgmt Fee</div>
+            <div class="node node-leaf pink">Chart of Accounts</div>
+            <div class="node node-leaf pink">Trial Balance</div>
+            <div class="node node-leaf pink">Fin. Statements</div>
+            <div class="node node-leaf pink">Tally Sync</div>
+          </div>
+        </div>
+
+        <!-- NAV Records -->
+        <div class="sub-group" style="margin-top: 24px;">
+          <div class="sub-group-title">NAV Records &mdash; NAVRecord Model</div>
+          <div class="attr-row">
+            <span class="field-tag pink">Scheme</span>
+            <span class="field-tag pink">NAV Date</span>
+            <span class="field-tag pink">Total NAV</span>
+            <span class="field-tag pink">Units Outstanding</span>
+            <span class="field-tag pink">NAV/Unit</span>
+            <span class="field-tag pink">Investments at FV</span>
+            <span class="field-tag pink">Cash & Equivalents</span>
+            <span class="field-tag pink">Receivables</span>
+            <span class="field-tag pink">Mgmt Fee Payable</span>
+            <span class="field-tag pink">Other Liabilities</span>
+            <span class="field-tag pink">Depository Type</span>
+            <span class="field-tag pink">Reconciled</span>
+            <span class="field-tag pink">Variance Amount</span>
+          </div>
+        </div>
+
+        <!-- Fund Ledger -->
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">Fund Ledger &mdash; Double-Entry Journal (FundLedger Model)</div>
+          <table class="schema-table">
+            <thead><tr><th>Field</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td>Entry #</td><td>Auto-generated journal entry number</td></tr>
+              <tr><td>Date</td><td>Entry date</td></tr>
+              <tr><td>Description</td><td>Transaction description</td></tr>
+              <tr><td>Debit Account</td><td>FK to ChartOfAccounts</td></tr>
+              <tr><td>Credit Account</td><td>FK to ChartOfAccounts</td></tr>
+              <tr><td>Amount</td><td>Transaction amount in INR</td></tr>
+              <tr><td>Ref Type</td><td>capital_call / distribution / fee / other</td></tr>
+              <tr><td>Ref ID</td><td>UUID of related record</td></tr>
+              <tr><td>Status</td><td>posted / reversed</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Management Fee -->
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">Management Fee &mdash; ManagementFeeSchedule Model</div>
+          <table class="schema-table">
+            <thead><tr><th>Field</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td>Scheme</td><td>FK to Scheme</td></tr>
+              <tr><td>Period</td><td>Start and end date</td></tr>
+              <tr><td>Fee Basis Amount</td><td>Committed / drawn capital basis</td></tr>
+              <tr><td>Rate</td><td>Annual fee rate %</td></tr>
+              <tr><td>Fee Amount</td><td>Computed fee</td></tr>
+              <tr><td>GST</td><td>18% GST on fee</td></tr>
+              <tr><td>Total (incl. GST)</td><td>Fee + GST</td></tr>
+              <tr><td>Invoice #</td><td>Generated invoice number</td></tr>
+              <tr><td>Status</td><td>draft / invoiced / paid</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Chart of Accounts -->
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">Chart of Accounts &mdash; ChartOfAccounts Model</div>
+          <table class="schema-table">
+            <thead><tr><th>Field</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td>Code</td><td>Account code (hierarchical numbering)</td></tr>
+              <tr><td>Account Name</td><td>Descriptive name</td></tr>
+              <tr><td>Type</td><td>asset / liability / equity / revenue / expense</td></tr>
+              <tr><td>Parent Account</td><td>Self-FK for hierarchy</td></tr>
+              <tr><td>Description</td><td>Purpose description</td></tr>
+              <tr><td>Status</td><td>Active / Inactive</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Tally Sync -->
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">Tally Sync &mdash; Integration</div>
+          <div class="tree">
+            <div class="tree-level">
+              <div class="node node-leaf pink" style="min-width: 180px;">Import from Tally<span class="node-sub">XML import of chart of accounts & vouchers</span></div>
+              <div class="node node-leaf pink" style="min-width: 180px;">Export to Tally<span class="node-sub">XML export of ledger entries</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- ═══════════════════════════════════════════════════════════
+     DFD 6: COMPLIANCE
+     ═══════════════════════════════════════════════════════════ -->
+<section class="section" id="dfd-compliance">
+  <div class="section-header">
+    <div class="section-tag">DFD 6</div>
+    <h2 class="section-title">Compliance (SEBI)</h2>
+    <p class="section-desc">SEBI AIF compliance management: regulatory reports, AML/KYC due diligence, compliance testing, equity threshold alerts, calendar, PPM amendments, and SEBI circular tracking with AI parsing. 9 Django models.</p>
+  </div>
+
+  <div class="dfd-grid">
+    <div class="dfd-card dfd-green">
+      <div class="dfd-card-header">
+        <div class="dfd-icon">S</div>
+        <div>
+          <h3>Compliance Module</h3>
+          <div class="dfd-sub">7 Sections: SEBI Reports, AML/KYC, CTR, Equity Alerts, Calendar, PPM Amendments, SEBI Circulars</div>
+        </div>
+      </div>
+      <div class="dfd-card-body">
+        <div class="tree">
+          <div class="tree-level">
+            <div class="node node-module m6" style="min-width: 260px;"><span class="node-num">6</span>Compliance <span class="model-badge">9 Models</span></div>
+          </div>
+          <div class="flow-arrow-down"><div class="arrow"></div></div>
+          <div class="tree-level">
+            <div class="node node-leaf green">SEBI Reports</div>
+            <div class="node node-leaf green">AML / KYC</div>
+            <div class="node node-leaf green">CTR</div>
+            <div class="node node-leaf green">Equity Alerts</div>
+            <div class="node node-leaf green">Calendar</div>
+            <div class="node node-leaf green">PPM Amendments</div>
+            <div class="node node-leaf green">SEBI Circulars</div>
+          </div>
+        </div>
+
+        <!-- SEBI Reports -->
+        <div class="sub-group" style="margin-top: 24px;">
+          <div class="sub-group-title">SEBI Reports &mdash; SEBIReport Model</div>
+          <div class="attr-row">
+            <span class="field-tag green">Report Type (QAR / AAR / PPM)</span>
+            <span class="field-tag green">Reporting Period</span>
+            <span class="field-tag green">Due Date</span>
+            <span class="field-tag green">Filing Status</span>
+            <span class="field-tag green">Filed Date</span>
+            <span class="field-tag green">SI Portal Ref #</span>
+            <span class="field-tag green">IVCA Format Version</span>
+            <span class="field-tag green">NAV Reconciled w/ Depository</span>
+          </div>
+        </div>
+
+        <!-- AML / KYC -->
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">AML / KYC Due Diligence &mdash; AMLDueDiligence Model</div>
+          <div class="attr-row">
+            <span class="field-tag green">Land Border Country Investor</span>
+            <span class="field-tag green">Exceeds 50% Threshold</span>
+            <span class="field-tag green">Beneficial Owner Details</span>
+            <span class="field-tag green">Risk Rating</span>
+            <span class="field-tag green">Risk Assessment Date</span>
+            <span class="field-tag green">Custodian Reported</span>
+            <span class="field-tag green">STR Filed</span>
+            <span class="field-tag green">STR Reference</span>
+          </div>
+        </div>
+
+        <!-- CTR -->
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">Compliance Test Report (CTR) &mdash; ComplianceTestReport + CTRChecklistItem</div>
+          <div class="attr-row">
+            <span class="field-tag green">Financial Year</span>
+            <span class="field-tag green">Overall Status</span>
+            <span class="field-tag green">Report Status</span>
+            <span class="field-tag green">Submitted to Trustee</span>
+            <span class="field-tag green">Observations</span>
+            <span class="field-tag green">Remediation Plan</span>
+          </div>
+          <div class="flow-label" style="margin-top: 8px;">Checklist Items</div>
+          <div class="attr-row">
+            <span class="field-tag">Check #</span>
+            <span class="field-tag">Regulation Ref</span>
+            <span class="field-tag">Description</span>
+            <span class="field-tag">Compliance Status</span>
+            <span class="field-tag">Evidence</span>
+            <span class="field-tag">Remarks</span>
+          </div>
+        </div>
+
+        <!-- Equity Threshold Alerts -->
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">Equity Threshold Alerts &mdash; EquityThresholdAlert Model</div>
+          <div class="attr-row">
+            <span class="field-tag red">Investment</span>
+            <span class="field-tag red">Threshold Breached</span>
+            <span class="field-tag red">Breach Date</span>
+            <span class="field-tag red">Stake %</span>
+            <span class="field-tag red">Custodian Notification Deadline</span>
+            <span class="field-tag red">Custodian Notified</span>
+            <span class="field-tag red">Custodian Ref</span>
+            <span class="field-tag red">Resolved</span>
+          </div>
+        </div>
+
+        <!-- Calendar -->
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">Compliance Calendar &mdash; ComplianceCalendar Model</div>
+          <div class="attr-row">
+            <span class="field-tag green">Compliance Type</span>
+            <span class="field-tag green">Title</span>
+            <span class="field-tag green">Due Date</span>
+            <span class="field-tag green">Recurrence</span>
+            <span class="field-tag green">Advance Reminder Days</span>
+            <span class="field-tag green">Status</span>
+            <span class="field-tag green">Assigned To</span>
+          </div>
+        </div>
+
+        <!-- PPM Amendments -->
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">PPM Amendments &mdash; PPMAmendment Model</div>
+          <div class="attr-row">
+            <span class="field-tag yellow">Amendment #</span>
+            <span class="field-tag yellow">Amendment Type</span>
+            <span class="field-tag yellow">Title</span>
+            <span class="field-tag yellow">Board Approval Date</span>
+            <span class="field-tag yellow">Trustee Approval Date</span>
+            <span class="field-tag yellow">SEBI Filing Date</span>
+            <span class="field-tag yellow">Investor Notification Date</span>
+            <span class="field-tag yellow">Effective Date</span>
+            <span class="field-tag yellow">Investor Exit Window Days</span>
+            <span class="field-tag yellow">Approval Status</span>
+            <span class="field-tag yellow">SEBI Ack #</span>
+          </div>
+        </div>
+
+        <!-- SEBI Circulars -->
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">SEBI Circulars &mdash; SEBICircular + CircularAction</div>
+          <div class="attr-row">
+            <span class="field-tag cyan">Circular #</span>
+            <span class="field-tag cyan">Circular Date</span>
+            <span class="field-tag cyan">Title</span>
+            <span class="field-tag cyan">Summary</span>
+            <span class="field-tag cyan">Applicability</span>
+            <span class="field-tag cyan">Impact Level</span>
+            <span class="field-tag cyan">Compliance Deadline</span>
+            <span class="field-tag cyan">AI Parsed</span>
+            <span class="field-tag cyan">Is Superseded</span>
+          </div>
+          <div class="flow-label" style="margin-top: 8px;">Circular Actions (per fund)</div>
+          <div class="attr-row">
+            <span class="field-tag">Action Title</span>
+            <span class="field-tag">Priority</span>
+            <span class="field-tag">Due Date</span>
+            <span class="field-tag">Status</span>
+            <span class="field-tag">Assigned To</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- ═══════════════════════════════════════════════════════════
+     DFD 7: DOCUMENT VAULT
+     ═══════════════════════════════════════════════════════════ -->
+<section class="section" id="dfd-docvault">
+  <div class="section-header">
+    <div class="section-tag">DFD 7</div>
+    <h2 class="section-title">Document Vault</h2>
+    <p class="section-desc">Secure document management with access logging, LP visibility controls, watermarking, and version tracking. 2 Django models.</p>
+  </div>
+
+  <div class="dfd-grid">
+    <div class="dfd-card dfd-yellow">
+      <div class="dfd-card-header">
+        <div class="dfd-icon">D</div>
+        <div>
+          <h3>Document Vault Module</h3>
+          <div class="dfd-sub">Upload, categorize, share, and audit fund documents</div>
+        </div>
+      </div>
+      <div class="dfd-card-body">
+        <div class="tree">
+          <div class="tree-level">
+            <div class="node node-module m7" style="min-width: 250px;"><span class="node-num">7</span>Document Vault <span class="model-badge">2 Models</span></div>
+          </div>
+          <div class="flow-arrow-down"><div class="arrow"></div></div>
+          <div class="tree-level">
+            <div class="node node-leaf yellow">Document Registry<span class="node-sub">Document Model</span></div>
+            <div class="node node-leaf yellow">Access Log<span class="node-sub">DocumentAccessLog Model</span></div>
+          </div>
+        </div>
+
+        <div class="sub-group" style="margin-top: 24px;">
+          <div class="sub-group-title">Document &mdash; Attributes</div>
+          <div class="attr-row">
+            <span class="field-tag yellow">Fund</span>
+            <span class="field-tag yellow">Scheme</span>
+            <span class="field-tag yellow">Title</span>
+            <span class="field-tag yellow">Category</span>
+            <span class="field-tag yellow">Visibility</span>
+            <span class="field-tag yellow">File</span>
+            <span class="field-tag yellow">File Size</span>
+            <span class="field-tag yellow">MIME Type</span>
+            <span class="field-tag yellow">SHA-256 Checksum</span>
+            <span class="field-tag yellow">Watermark LP Access</span>
+            <span class="field-tag yellow">Version</span>
+            <span class="field-tag yellow">Tags</span>
+          </div>
+          <div class="flow-label" style="margin-top: 12px;">Document Categories</div>
+          <div class="attr-row">
+            <span class="field-tag">PPM</span>
+            <span class="field-tag">Contribution Agreement</span>
+            <span class="field-tag">Compliance Report</span>
+            <span class="field-tag">Valuation Report</span>
+            <span class="field-tag">Financial Statement</span>
+            <span class="field-tag">Board Minutes</span>
+            <span class="field-tag">Tax Document</span>
+            <span class="field-tag">Other</span>
+          </div>
+        </div>
+
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">Access Log &mdash; Audit Trail</div>
+          <div class="attr-row">
+            <span class="field-tag">Document</span>
+            <span class="field-tag">User</span>
+            <span class="field-tag">Action (view / download / upload / delete)</span>
+            <span class="field-tag">IP Address</span>
+            <span class="field-tag">Timestamp</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- ═══════════════════════════════════════════════════════════
+     DFD 8: DATA UPLOAD
+     ═══════════════════════════════════════════════════════════ -->
+<section class="section" id="dfd-dataimport">
+  <div class="section-header">
+    <div class="section-tag">DFD 8</div>
+    <h2 class="section-title">Data Upload</h2>
+    <p class="section-desc">Drag-and-drop Excel upload pipeline with Gemini AI column mapping. Real-time SSE progress streaming. 2 Django models.</p>
+  </div>
+
+  <div class="dfd-grid">
+    <div class="dfd-card dfd-cyan">
+      <div class="dfd-card-header">
+        <div class="dfd-icon">U</div>
+        <div>
+          <h3>Data Upload Pipeline</h3>
+          <div class="dfd-sub">Excel files &rarr; Gemini AI Mapping &rarr; 44 Models Populated &rarr; Portfolio Snapshot</div>
+        </div>
+      </div>
+      <div class="dfd-card-body">
+        <!-- Pipeline Flow -->
+        <div class="h-flow" style="flex-wrap: nowrap; overflow-x: auto;">
+          <div class="node node-leaf cyan" style="min-width: 120px;">Drag & Drop<span class="node-sub">Multiple .xlsx files</span></div>
+          <div class="h-arrow" style="background: var(--accent-cyan);"></div>
+          <div class="node node-leaf cyan" style="min-width: 120px;">Upload to Server<span class="node-sub">ImportJob created</span></div>
+          <div class="h-arrow" style="background: var(--accent-cyan);"></div>
+          <div class="node node-leaf cyan" style="min-width: 140px;">Gemini Pass 1<span class="node-sub">Sheet Classification</span></div>
+          <div class="h-arrow" style="background: var(--accent-cyan);"></div>
+          <div class="node node-leaf cyan" style="min-width: 140px;">Gemini Pass 2<span class="node-sub">Column Mapping</span></div>
+          <div class="h-arrow" style="background: var(--accent-cyan);"></div>
+          <div class="node node-leaf cyan" style="min-width: 120px;">Import Service<span class="node-sub">Row-by-row import</span></div>
+          <div class="h-arrow" style="background: var(--accent-cyan);"></div>
+          <div class="node node-leaf green" style="min-width: 120px;">44 Models<span class="node-sub">DB populated</span></div>
+        </div>
+
+        <div class="sub-group" style="margin-top: 24px;">
+          <div class="sub-group-title">ImportJob &mdash; Session Tracking</div>
+          <div class="attr-row">
+            <span class="field-tag cyan">Organization</span>
+            <span class="field-tag cyan">Uploaded By</span>
+            <span class="field-tag cyan">Status</span>
+            <span class="field-tag cyan">Progress %</span>
+            <span class="field-tag cyan">Progress Message</span>
+            <span class="field-tag cyan">Total Files</span>
+            <span class="field-tag cyan">Completed Files</span>
+            <span class="field-tag cyan">Error Log (JSON)</span>
+            <span class="field-tag cyan">Result Summary (JSON)</span>
+          </div>
+        </div>
+
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">ImportFile &mdash; Per-File Tracking</div>
+          <div class="attr-row">
+            <span class="field-tag cyan">File</span>
+            <span class="field-tag cyan">Original Filename</span>
+            <span class="field-tag cyan">File Size</span>
+            <span class="field-tag cyan">Status</span>
+            <span class="field-tag cyan">Column Mapping (JSON)</span>
+            <span class="field-tag cyan">Gemini Confidence</span>
+            <span class="field-tag cyan">Sheet Names (JSON)</span>
+            <span class="field-tag cyan">Error Detail</span>
+          </div>
+        </div>
+
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">Real-Time Progress &mdash; SSE Streaming</div>
+          <div class="h-flow">
+            <div class="node node-attr">SSE EventSource</div>
+            <div class="h-arrow" style="background: var(--accent-cyan);"></div>
+            <div class="node node-attr">Progress Events<span class="node-sub">{pct, msg, file}</span></div>
+            <div class="h-arrow" style="background: var(--accent-cyan);"></div>
+            <div class="node node-attr">File Complete</div>
+            <div class="h-arrow" style="background: var(--accent-cyan);"></div>
+            <div class="node node-attr">Job Complete</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- ═══════════════════════════════════════════════════════════
+     ADDITIONAL: NOTIFICATIONS + AUDIT + AUTH
+     ═══════════════════════════════════════════════════════════ -->
+<section class="section" id="dfd-cross">
+  <div class="section-header">
+    <div class="section-tag">Cross-Cutting Concerns</div>
+    <h2 class="section-title">Notifications, Audit & Auth</h2>
+    <p class="section-desc">Platform-wide infrastructure: notification engine, SOC 2 audit logging, JWT authentication, and multi-tenant isolation.</p>
+  </div>
+
+  <div class="dfd-grid">
+    <!-- Notifications -->
+    <div class="dfd-card dfd-lime">
+      <div class="dfd-card-header">
+        <div class="dfd-icon">N</div>
+        <div>
+          <h3>Notifications Engine</h3>
+          <div class="dfd-sub">In-app, email, WhatsApp, and SMS notification channels</div>
+        </div>
+      </div>
+      <div class="dfd-card-body">
+        <div class="attr-row">
+          <span class="field-tag green">Recipient</span>
+          <span class="field-tag green">Title</span>
+          <span class="field-tag green">Message</span>
+          <span class="field-tag green">Category</span>
+          <span class="field-tag green">Priority</span>
+          <span class="field-tag green">Resource Type</span>
+          <span class="field-tag green">Resource ID</span>
+          <span class="field-tag green">Is Read</span>
+          <span class="field-tag green">Sent via Email</span>
+          <span class="field-tag green">Sent via WhatsApp</span>
+          <span class="field-tag green">Sent via SMS</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Audit Log -->
+    <div class="dfd-card dfd-red">
+      <div class="dfd-card-header">
+        <div class="dfd-icon">A</div>
+        <div>
+          <h3>Audit Log (SOC 2 Compliance)</h3>
+          <div class="dfd-sub">Complete audit trail for every create/update/delete across all modules</div>
+        </div>
+      </div>
+      <div class="dfd-card-body">
+        <div class="attr-row">
+          <span class="field-tag red">User</span>
+          <span class="field-tag red">Organization</span>
+          <span class="field-tag red">Action</span>
+          <span class="field-tag red">Resource Type</span>
+          <span class="field-tag red">Resource ID</span>
+          <span class="field-tag red">Old Values (JSON)</span>
+          <span class="field-tag red">New Values (JSON)</span>
+          <span class="field-tag red">Details</span>
+          <span class="field-tag red">IP Address</span>
+          <span class="field-tag red">Timestamp</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Auth & RBAC -->
+    <div class="dfd-card dfd-blue">
+      <div class="dfd-card-header">
+        <div class="dfd-icon">K</div>
+        <div>
+          <h3>Authentication & Access Control</h3>
+          <div class="dfd-sub">JWT auth, role-based access, fund-level row security, scheme-level access</div>
+        </div>
+      </div>
+      <div class="dfd-card-body">
+        <div class="tree">
+          <div class="tree-level">
+            <div class="node node-secondary" style="min-width: 200px;">JWT Authentication<span class="node-sub">Access + Refresh tokens</span></div>
+          </div>
+          <div class="flow-arrow-down"><div class="arrow"></div></div>
+          <div class="tree-level">
+            <div class="node node-leaf blue">User Roles<span class="node-sub">platform_admin, gp_admin, compliance_officer, operations, lp_user</span></div>
+          </div>
+          <div class="flow-arrow-down"><div class="arrow"></div></div>
+          <div class="tree-level">
+            <div class="node node-leaf blue">FundAccess<span class="node-sub">Per-user, per-fund row-level security</span></div>
+            <div class="node node-leaf blue">SchemeAccess<span class="node-sub">Per-user, per-scheme access control</span></div>
+          </div>
+        </div>
+        <div class="sub-group" style="margin-top: 16px;">
+          <div class="sub-group-title">Organization Model &mdash; Multi-Tenant Isolation</div>
+          <div class="attr-row">
+            <span class="field-tag">Organization Name</span>
+            <span class="field-tag">Slug</span>
+            <span class="field-tag">Subscription Tier</span>
+            <span class="field-tag">Is Active</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- ═══════════════════════════════════════════════════════════
+     FULL DATABASE SCHEMA OVERVIEW
+     ═══════════════════════════════════════════════════════════ -->
+<section class="section" id="dfd-db">
+  <div class="section-header">
+    <div class="section-tag">Database Schema</div>
+    <h2 class="section-title">Complete Model Inventory</h2>
+    <p class="section-desc">All 44 Django models across 10 apps. PostgreSQL database with UUID primary keys, multi-tenant organization scoping, and full audit trail.</p>
+  </div>
+
+  <div class="dfd-grid">
+    <div class="dfd-card dfd-blue">
+      <div class="dfd-card-header">
+        <div class="dfd-icon">DB</div>
+        <div>
+          <h3>44 Models &middot; 10 Django Apps</h3>
+          <div class="dfd-sub">Click any section above for detailed field breakdowns</div>
+        </div>
+      </div>
+      <div class="dfd-card-body">
+        <table class="schema-table">
+          <thead>
+            <tr><th>App</th><th>Models</th><th>Count</th><th>Key Relationships</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="color: var(--accent-blue); font-weight: 600;">accounts</td>
+              <td>Organization, User, FundAccess, SchemeAccess, AuditLog</td>
+              <td>5</td>
+              <td>User &rarr; Organization, FundAccess &rarr; User + Fund</td>
+            </tr>
+            <tr>
+              <td style="color: var(--accent-purple); font-weight: 600;">funds</td>
+              <td>FundCategory, Entity, Fund, Scheme</td>
+              <td>4</td>
+              <td>Fund &rarr; Org + Category + 5 Entities, Scheme &rarr; Fund</td>
+            </tr>
+            <tr>
+              <td style="color: var(--accent-teal); font-weight: 600;">portfolio</td>
+              <td>PortfolioSnapshot, PortfolioNode</td>
+              <td>2</td>
+              <td>Node &rarr; Snapshot, Node &rarr; Parent Node (self-ref)</td>
+            </tr>
+            <tr>
+              <td style="color: var(--accent-orange); font-weight: 600;">lp</td>
+              <td>BankAccount, Investor, Commitment, CapitalCall, CapitalCallLineItem, Distribution, DistributionLineItem, LPCapitalAccount</td>
+              <td>8</td>
+              <td>Commitment &rarr; Investor + Scheme, CapCallLine &rarr; CapCall + Commitment</td>
+            </tr>
+            <tr>
+              <td style="color: var(--accent-teal); font-weight: 600;">investments</td>
+              <td>PortfolioCompany, Investment, InvestmentTranche, Valuation, KPIDefinition, PortfolioKPI, ExitEvent, BoardMeeting</td>
+              <td>8 <span style="font-size:10px; color:var(--text-muted);">(+1 in code)</span></td>
+              <td>Investment &rarr; Scheme + Company, Valuation &rarr; Investment, KPI &rarr; Company</td>
+            </tr>
+            <tr>
+              <td style="color: var(--accent-pink); font-weight: 600;">accounting</td>
+              <td>ChartOfAccounts, NAVRecord, CarriedInterest, FundLedger, ManagementFeeSchedule</td>
+              <td>5</td>
+              <td>Ledger &rarr; 2x CoA (debit + credit), NAV &rarr; Scheme</td>
+            </tr>
+            <tr>
+              <td style="color: var(--accent-green); font-weight: 600;">compliance</td>
+              <td>SEBIReport, AMLDueDiligence, ComplianceTestReport, CTRChecklistItem, EquityThresholdAlert, ComplianceCalendar, PPMAmendment, SEBICircular, CircularAction</td>
+              <td>9</td>
+              <td>SEBIReport &rarr; Fund + Scheme, Alert &rarr; Investment, Circular &rarr; Actions per Fund</td>
+            </tr>
+            <tr>
+              <td style="color: var(--accent-yellow); font-weight: 600;">documents</td>
+              <td>Document, DocumentAccessLog</td>
+              <td>2</td>
+              <td>Document &rarr; Org + Fund + Scheme, AccessLog &rarr; Doc + User</td>
+            </tr>
+            <tr>
+              <td style="color: var(--accent-cyan); font-weight: 600;">dataimport</td>
+              <td>ImportJob, ImportFile</td>
+              <td>2</td>
+              <td>ImportFile &rarr; ImportJob, Job &rarr; Org + User</td>
+            </tr>
+            <tr>
+              <td style="color: var(--accent-lime); font-weight: 600;">notifications</td>
+              <td>Notification</td>
+              <td>1</td>
+              <td>Notification &rarr; Org + Recipient User</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- Entity Relationship Visual -->
+        <div class="sub-group" style="margin-top: 24px;">
+          <div class="sub-group-title">Core Entity Relationships</div>
+          <div class="tree">
+            <div class="tree-level">
+              <div class="node node-primary" style="padding: 10px 16px; font-size: 13px; min-width: 130px;">Organization<span class="node-sub">Multi-tenant root</span></div>
+            </div>
+            <div class="flow-arrow-down"><div class="arrow"></div></div>
+            <div class="tree-level">
+              <div class="node node-leaf blue">User</div>
+              <div class="node node-leaf purple">Fund</div>
+              <div class="node node-leaf teal">PortfolioSnapshot</div>
+              <div class="node node-leaf yellow">Document</div>
+              <div class="node node-leaf green">ComplianceCalendar</div>
+            </div>
+            <div class="flow-arrow-down"><div class="arrow"></div></div>
+            <div class="tree-level">
+              <div class="node node-attr">FundAccess</div>
+              <div class="node node-attr">Scheme</div>
+              <div class="node node-attr">PortfolioNode</div>
+              <div class="node node-attr">Entity</div>
+              <div class="node node-attr">SEBIReport</div>
+            </div>
+            <div class="flow-arrow-down"><div class="arrow"></div></div>
+            <div class="tree-level">
+              <div class="node node-data">Commitment</div>
+              <div class="node node-data">Investment</div>
+              <div class="node node-data">NAVRecord</div>
+              <div class="node node-data">CapitalCall</div>
+              <div class="node node-data">FundLedger</div>
+            </div>
+            <div class="flow-arrow-down"><div class="arrow"></div></div>
+            <div class="tree-level">
+              <div class="node node-data">CapCallLineItem</div>
+              <div class="node node-data">Tranche</div>
+              <div class="node node-data">Valuation</div>
+              <div class="node node-data">PortfolioKPI</div>
+              <div class="node node-data">Distribution</div>
+              <div class="node node-data">LPCapitalAccount</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- ═══════════════════════════════════════════════════════════
+     LP PORTAL (Bonus DFD)
+     ═══════════════════════════════════════════════════════════ -->
+<section class="section" id="dfd-lp-portal">
+  <div class="section-header">
+    <div class="section-tag">Bonus DFD</div>
+    <h2 class="section-title">LP Portal (Investor View)</h2>
+    <p class="section-desc">Dedicated investor-facing dashboard with capital account summary, fund overview, documents, and notifications. Accessible by lp_user role.</p>
+  </div>
+
+  <div class="dfd-grid">
+    <div class="dfd-card dfd-orange">
+      <div class="dfd-card-header">
+        <div class="dfd-icon">LP</div>
+        <div>
+          <h3>LP Portal</h3>
+          <div class="dfd-sub">Investor's self-service dashboard</div>
+        </div>
+      </div>
+      <div class="dfd-card-body">
+        <div class="tree">
+          <div class="tree-level">
+            <div class="node node-secondary" style="border-color: var(--accent-orange); color: var(--accent-orange); min-width: 220px;">LP Portal Dashboard</div>
+          </div>
+          <div class="flow-arrow-down"><div class="arrow"></div></div>
+          <div class="tree-level">
+            <div class="node node-leaf orange">Capital Account Summary<span class="node-sub">IRR, TVPI, DPI, RVPI, MOIC</span></div>
+            <div class="node node-leaf orange">Fund Overview Cards<span class="node-sub">Per-fund commitment status</span></div>
+            <div class="node node-leaf orange">LP-Visible Documents<span class="node-sub">Watermarked downloads</span></div>
+            <div class="node node-leaf orange">Notifications<span class="node-sub">Capital calls, distributions</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════
+     FOOTER
+     ═══════════════════════════════════════════════════════════ -->
+<footer class="footer">
+  <p>TrackFundAI &mdash; System Architecture &amp; Data Flow Diagrams</p>
+  <p style="margin-top: 4px; color: var(--text-muted);">10 Django Apps &middot; 44 Models &middot; 80+ API Endpoints &middot; 10 Frontend Pages</p>
+  <p style="margin-top: 4px; color: var(--text-muted);">Generated April 2026</p>
+</footer>
+
+</body>
+</html>

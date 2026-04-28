@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem('tfai_theme')==='light')document.documentElement.setAttribute('data-theme','light');</script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TrackFundAI — Compliance</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='16' fill='%2303030a'/><text y='.9em' font-size='62' x='10' fill='%2300d4ff' font-family='monospace' font-weight='bold'>TF</text></svg>" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="fund-admin.css" />
+  <link rel="stylesheet" href="compliance.css" />
+  <link rel="stylesheet" href="notification-drawer.css" />
+</head>
+<body>
+
+  <div id="bg-canvas" aria-hidden="true">
+    <div class="bg-orb bg-orb-1"></div>
+    <div class="bg-orb bg-orb-2"></div>
+    <div class="bg-orb bg-orb-3"></div>
+    <div class="bg-grid"></div>
+  </div>
+
+  <!-- Top bar -->
+  <nav id="navbar">
+    <div class="nav-brand">
+      <span class="brand-dot"></span>
+      TrackFundAI
+    </div>
+    <div class="nav-links">
+      <a href="index.html" class="nav-link">Portfolio Dashboard</a>
+      <a href="fund-admin.html" class="nav-link">Fund Admin</a>
+      <a href="investments.html" class="nav-link">Investments</a>
+      <a href="lp-management.html" class="nav-link">LP Management</a>
+      <a href="fund-accounting.html" class="nav-link">Fund Accounting</a>
+      <span class="nav-link active">Compliance</span>
+      <a href="doc-vault.html" class="nav-link">Doc Vault</a>
+      <a href="data-upload.html" class="nav-link">Data Upload</a>
+    </div>
+    <div class="nav-actions">
+      <span class="notif-badge" id="notif-badge" title="Notifications">0</span>
+      <span class="user-badge" id="user-badge">—</span>
+      <button class="btn-ghost" id="btn-logout">Logout</button>
+    </div>
+  </nav>
+
+  <main id="main-scroll">
+
+    <!-- Header -->
+    <section class="section section-hero">
+      <div class="hero-content">
+        <div class="hero-eyebrow">MODULE 5 · SEBI COMPLIANCE</div>
+        <h1 class="hero-title">
+          <span class="hero-title-main">SEBI</span>
+          <span class="hero-title-sub">Compliance</span>
+        </h1>
+        <p class="hero-description" id="org-label">—</p>
+        <div class="hero-stats" id="stats-bar"></div>
+      </div>
+    </section>
+
+    <!-- Tab Navigation -->
+    <section class="section">
+      <div class="inv-tabs" id="comp-tabs">
+        <button class="inv-tab active" data-tab="reports">SEBI Reports</button>
+        <button class="inv-tab" data-tab="aml">AML / KYC</button>
+        <button class="inv-tab" data-tab="ctr">Compliance Test (CTR)</button>
+        <button class="inv-tab" data-tab="alerts">Equity Threshold Alerts</button>
+        <button class="inv-tab" data-tab="calendar">Compliance Calendar</button>
+        <button class="inv-tab" data-tab="ppm">PPM Amendments</button>
+        <button class="inv-tab" data-tab="circulars">SEBI Circulars</button>
+      </div>
+    </section>
+
+    <!-- ═══ SEBI REPORTS TAB ═══ -->
+    <section class="section" id="tab-reports">
+      <div class="section-header">
+        <div class="section-tag">SEBI Reports</div>
+        <h2 class="section-title">Regulatory Filings (QAR / AAR)</h2>
+        <p class="section-subtitle">SEBI-mandated Quarterly Activity Reports and Annual Activity Reports for AIF compliance. Track filing status against due dates.</p>
+      </div>
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <label>Fund:</label>
+          <select id="report-fund-filter" class="select-dark">
+            <option value="">All Funds</option>
+          </select>
+          <label style="margin-left:12px;">Status:</label>
+          <select id="report-status-filter" class="select-dark">
+            <option value="">All</option>
+            <option value="draft">Draft</option>
+            <option value="prepared">Prepared</option>
+            <option value="submitted">Submitted</option>
+            <option value="accepted">Accepted</option>
+            <option value="rejected">Rejected</option>
+          </select>
+        </div>
+        <button class="btn-primary" id="btn-new-report">+ Create Report</button>
+      </div>
+      <div id="reports-list"></div>
+    </section>
+
+    <!-- ═══ AML TAB ═══ -->
+    <section class="section hidden" id="tab-aml">
+      <div class="section-header">
+        <div class="section-tag">AML</div>
+        <h2 class="section-title">AML Due Diligence</h2>
+        <p class="section-subtitle">Anti-Money Laundering assessments per investor. Tracks PEP status, beneficial ownership, risk rating, custodian reporting, and STR filings.</p>
+      </div>
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <label>Risk Rating:</label>
+          <select id="aml-risk-filter" class="select-dark">
+            <option value="">All Ratings</option>
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+            <option value="very_high">Very High</option>
+          </select>
+        </div>
+        <button class="btn-primary" id="btn-new-aml">+ New AML Assessment</button>
+      </div>
+      <div class="comp-table-wrap">
+        <table class="comp-table">
+          <thead>
+            <tr>
+              <th>Investor</th>
+              <th>Risk Rating</th>
+              <th>Land Border</th>
+              <th>&gt;50% Threshold</th>
+              <th>Beneficial Owner</th>
+              <th>Risk Date</th>
+              <th>Custodian Reported</th>
+              <th>STR Filed</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="aml-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ═══ CTR TAB ═══ -->
+    <section class="section hidden" id="tab-ctr">
+      <div class="section-header">
+        <div class="section-tag">CTR</div>
+        <h2 class="section-title">Compliance Test Reports</h2>
+        <p class="section-subtitle">Annual compliance test reports submitted to the trustee. Each report contains a regulatory checklist of pass/fail items.</p>
+      </div>
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <label>Scheme:</label>
+          <select id="ctr-scheme-filter" class="select-dark">
+            <option value="">All Schemes</option>
+          </select>
+        </div>
+        <button class="btn-primary" id="btn-new-ctr">+ New CTR</button>
+      </div>
+      <div id="ctr-list"></div>
+    </section>
+
+    <!-- ═══ ALERTS TAB ═══ -->
+    <section class="section hidden" id="tab-alerts">
+      <div class="section-header">
+        <div class="section-tag">Alerts</div>
+        <h2 class="section-title">Equity Threshold Alerts</h2>
+        <p class="section-subtitle">SEBI regulation requires custodian notification when equity stake exceeds thresholds. Track breach, notification, and resolution.</p>
+      </div>
+      <div class="toolbar">
+        <button class="btn-primary" id="btn-new-alert">+ Log Alert</button>
+      </div>
+      <div class="comp-table-wrap">
+        <table class="comp-table">
+          <thead>
+            <tr>
+              <th>Company</th>
+              <th>Threshold %</th>
+              <th>Stake %</th>
+              <th>Breach Date</th>
+              <th>Custodian Deadline</th>
+              <th>Custodian Notified</th>
+              <th>Custodian Ref</th>
+              <th>Resolved</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="alerts-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ═══ CALENDAR TAB ═══ -->
+    <section class="section hidden" id="tab-calendar">
+      <div class="section-header">
+        <div class="section-tag">Calendar</div>
+        <h2 class="section-title">Compliance Calendar</h2>
+        <p class="section-subtitle">All regulatory filing deadlines, recurring compliance tasks, and ad-hoc obligations in one place.</p>
+      </div>
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <label>Status:</label>
+          <select id="cal-status-filter" class="select-dark">
+            <option value="">All</option>
+            <option value="pending">Pending</option>
+            <option value="in_progress">In Progress</option>
+            <option value="completed">Completed</option>
+            <option value="overdue">Overdue</option>
+          </select>
+        </div>
+        <button class="btn-primary" id="btn-new-event">+ Add Event</button>
+      </div>
+      <div id="calendar-list"></div>
+    </section>
+
+    <!-- ═══ PPM AMENDMENTS TAB ═══ -->
+    <section class="section hidden" id="tab-ppm">
+      <div class="section-header">
+        <div class="section-tag">PPM</div>
+        <h2 class="section-title">PPM Amendments</h2>
+        <p class="section-subtitle">Track all amendments to the Private Placement Memorandum. SEBI requires filing within 21 days of approval and investor notification with an exit window.</p>
+      </div>
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <label>Fund:</label>
+          <select id="ppm-fund-filter" class="select-dark">
+            <option value="">All Funds</option>
+          </select>
+          <label style="margin-left:12px;">Status:</label>
+          <select id="ppm-status-filter" class="select-dark">
+            <option value="">All</option>
+            <option value="draft">Draft</option>
+            <option value="under_review">Under Review</option>
+            <option value="trustee_approved">Trustee Approved</option>
+            <option value="sebi_filed">Filed with SEBI</option>
+            <option value="investor_notified">Investors Notified</option>
+            <option value="effective">Effective</option>
+          </select>
+        </div>
+        <button class="btn-primary" id="btn-new-ppm">+ New Amendment</button>
+      </div>
+      <div id="ppm-list"></div>
+    </section>
+
+    <!-- ═══ SEBI CIRCULARS TAB ═══ -->
+    <section class="section hidden" id="tab-circulars">
+      <div class="section-header">
+        <div class="section-tag">Circulars</div>
+        <h2 class="section-title">SEBI Circulars</h2>
+        <p class="section-subtitle">Track SEBI circulars and their fund-specific action items. Each circular generates compliance actions that must be tracked to completion.</p>
+      </div>
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <label>Impact:</label>
+          <select id="circular-impact-filter" class="select-dark">
+            <option value="">All</option>
+            <option value="critical">Critical</option>
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+          </select>
+        </div>
+        <button class="btn-primary" id="btn-new-circular">+ Add Circular</button>
+      </div>
+      <div id="circulars-list"></div>
+    </section>
+
+    <!-- Modal for forms -->
+    <div class="modal-overlay hidden" id="modal-overlay">
+      <div class="modal-card" id="modal-card">
+        <div class="modal-header">
+          <h3 id="modal-title">—</h3>
+          <button class="modal-close" id="modal-close">&times;</button>
+        </div>
+        <form id="modal-form">
+          <div id="modal-fields"></div>
+          <div class="modal-actions">
+            <button type="button" class="btn-ghost" id="modal-cancel">Cancel</button>
+            <button type="submit" class="btn-primary" id="modal-submit">Save</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+  </main>
+
+  <script src="theme-switcher.js"></script>
+  <script src="auth.js"></script>
+  <script src="notification-drawer.js"></script>
+  <script src="compliance.js"></script>
+
+</body>
+</html>

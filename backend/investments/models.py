@@ -1,9 +1,8 @@
 """
-Investments app models — Phase 2 of TrackFundAI.
+Investments app models — aligned with FundOS India Module 3: Portfolio Monitoring.
 
-Tracks investments from schemes into portfolio companies, tranches,
-IPEV-standard valuations, KPI definitions & submissions, exit events,
-and board meetings.
+Tables: PortfolioCompany, Investment, InvestmentTranche, Valuation,
+KPIDefinition, PortfolioKPI, ExitEvent, BoardMeeting.
 """
 
 import uuid
@@ -11,18 +10,77 @@ from django.conf import settings
 from django.db import models
 
 
+class PortfolioCompany(models.Model):
+    """
+    First-class portfolio company record.
+    Maps to FundOS: portfolio_companies table.
+
+    Decoupled from the dashboard hierarchy (PortfolioNode) — this is the
+    master record for a company that investments reference.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        'accounts.Organization',
+        on_delete=models.CASCADE,
+        related_name='portfolio_companies',
+    )
+    name = models.CharField(max_length=255)
+    cin = models.CharField(
+        max_length=21, blank=True,
+        help_text='Corporate Identity Number (MCA India)',
+    )
+    pan = models.CharField(
+        max_length=10, blank=True,
+        help_text='PAN of the portfolio company',
+    )
+    sector = models.CharField(max_length=100, blank=True)
+    sub_sector = models.CharField(max_length=100, blank=True)
+    incorporation_date = models.DateField(null=True, blank=True)
+    headquarters_city = models.CharField(max_length=100, blank=True)
+    headquarters_country = models.CharField(max_length=100, default='India')
+    website = models.URLField(max_length=500, blank=True)
+    founder_names = models.JSONField(
+        default=list, blank=True,
+        help_text='List of founder names',
+    )
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+
+    # Link to dashboard hierarchy node (optional — for dashboard rendering)
+    portfolio_node_id = models.CharField(
+        max_length=500, blank=True,
+        help_text='Links to PortfolioNode.node_id in the dashboard hierarchy',
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+        unique_together = ('organization', 'name')
+        verbose_name_plural = 'portfolio companies'
+
+    def __str__(self):
+        return self.name
+
+
 class Investment(models.Model):
     """
     An investment from a scheme into a portfolio company.
-    Tracks instrument type, ownership %, and links to Fund Admin scheme.
+    Maps to FundOS: investments table.
+
+    Added: portfolio_company FK, SEBI 10% threshold fields,
+    is_lead_investor, write_off_date.
     """
     INSTRUMENT_CHOICES = [
         ('equity', 'Equity'),
         ('ccps', 'CCPS (Compulsorily Convertible Preference Shares)'),
         ('ccd', 'CCD (Compulsorily Convertible Debentures)'),
         ('ncd', 'NCD (Non-Convertible Debentures)'),
+        ('odi', 'ODI (Optionally Convertible Debentures)'),
         ('safe', 'SAFE'),
         ('convertible_note', 'Convertible Note'),
+        ('term_loan', 'Term Loan'),
     ]
     STATUS_CHOICES = [
         ('active', 'Active'),
@@ -37,16 +95,43 @@ class Investment(models.Model):
         on_delete=models.CASCADE,
         related_name='investments',
     )
-    company_name = models.CharField(max_length=255)
+    portfolio_company = models.ForeignKey(
+        PortfolioCompany,
+        on_delete=models.CASCADE,
+        related_name='investments',
+        null=True, blank=True,
+        help_text='Link to master portfolio company record',
+    )
+    company_name = models.CharField(
+        max_length=255,
+        help_text='Denormalized company name for quick access',
+    )
     portfolio_node_id = models.CharField(
         max_length=500, blank=True,
         help_text='Links to PortfolioNode.node_id in the dashboard hierarchy',
     )
     instrument_type = models.CharField(max_length=20, choices=INSTRUMENT_CHOICES, default='equity')
+
+    # Ownership
     ownership_pct = models.DecimalField(
         max_digits=7, decimal_places=4, null=True, blank=True,
         help_text='Ownership percentage (e.g., 15.5000)',
     )
+    percentage_stake_fully_diluted = models.DecimalField(
+        max_digits=8, decimal_places=4, null=True, blank=True,
+        help_text='Ownership % on fully diluted basis',
+    )
+
+    # SEBI 10% equity threshold (auto-trigger in FundOS)
+    exceeds_10pct_threshold = models.BooleanField(
+        default=False, db_index=True,
+        help_text='SEBI: Auto-set when ownership >= 10% — requires custodian notification',
+    )
+    threshold_breach_date = models.DateField(
+        null=True, blank=True,
+        help_text='SEBI: Date when 10% threshold was breached — T+30 = custodian notification deadline',
+    )
+
     total_invested = models.DecimalField(
         max_digits=18, decimal_places=2, default=0,
         help_text='Total amount invested (sum of tranches) in scheme currency',
@@ -56,9 +141,21 @@ class Investment(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
     sector = models.CharField(max_length=100, blank=True)
     description = models.TextField(blank=True)
+
+    # Governance
     board_seat = models.BooleanField(
         default=False,
         help_text='Whether the fund has a board seat',
+    )
+    is_lead_investor = models.BooleanField(
+        default=False,
+        help_text='Whether this fund is the lead investor in this round',
+    )
+
+    # Write-off tracking
+    write_off_date = models.DateField(
+        null=True, blank=True,
+        help_text='Date investment was written off (if applicable)',
     )
 
     created_by = models.ForeignKey(
@@ -77,11 +174,21 @@ class Investment(models.Model):
     def __str__(self):
         return f'{self.company_name} ({self.get_instrument_type_display()}) — {self.scheme}'
 
+    def save(self, *args, **kwargs):
+        # Auto-set 10% threshold flag
+        pct = self.percentage_stake_fully_diluted or self.ownership_pct
+        if pct and pct >= 10 and not self.exceeds_10pct_threshold:
+            self.exceeds_10pct_threshold = True
+            if not self.threshold_breach_date:
+                from django.utils import timezone
+                self.threshold_breach_date = timezone.now().date()
+        super().save(*args, **kwargs)
+
 
 class InvestmentTranche(models.Model):
     """
     A single tranche (drawdown) within an investment.
-    Multiple tranches can exist per investment over time.
+    Maps to FundOS: investment_tranches table.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     investment = models.ForeignKey(
@@ -122,8 +229,11 @@ class InvestmentTranche(models.Model):
 
 class Valuation(models.Model):
     """
-    IPEV-standard fair value assessment for an investment.
-    Supports multiple methodologies and approval workflow.
+    IPEV / Ind AS 109 fair value assessment for an investment.
+    Maps to FundOS: valuations table.
+
+    Added: fvtpl_movement (Ind AS 109), valuer_reg_number (IBBI),
+    fair_value_of_holding, enterprise_value.
     """
     METHOD_CHOICES = [
         ('dcf', 'Discounted Cash Flow'),
@@ -131,6 +241,7 @@ class Valuation(models.Model):
         ('recent_transaction', 'Recent Transaction'),
         ('net_assets', 'Net Assets'),
         ('cost', 'Cost (at cost)'),
+        ('option_pricing', 'Option Pricing Model'),
     ]
     STATUS_CHOICES = [
         ('draft', 'Draft'),
@@ -145,11 +256,23 @@ class Valuation(models.Model):
         on_delete=models.CASCADE,
         related_name='valuations',
     )
-    valuation_date = models.DateField()
+    valuation_date = models.DateField(
+        help_text='SEBI: Quarterly valuation required',
+    )
     methodology = models.CharField(max_length=20, choices=METHOD_CHOICES)
+
+    # Value fields
     fair_value = models.DecimalField(
         max_digits=18, decimal_places=2,
         help_text='Fair value of the investment in scheme currency',
+    )
+    fair_value_of_holding = models.DecimalField(
+        max_digits=18, decimal_places=2, null=True, blank=True,
+        help_text='FMV of fund\'s stake — drives NAV calculation',
+    )
+    enterprise_value = models.DecimalField(
+        max_digits=18, decimal_places=2, null=True, blank=True,
+        help_text='Enterprise value of the portfolio company',
     )
     cost_basis = models.DecimalField(
         max_digits=18, decimal_places=2, null=True, blank=True,
@@ -162,6 +285,14 @@ class Valuation(models.Model):
         max_digits=8, decimal_places=2, null=True, blank=True,
         help_text='MOIC — fair_value / cost_basis',
     )
+
+    # Ind AS 109 compliance
+    fvtpl_movement = models.DecimalField(
+        max_digits=18, decimal_places=2, null=True, blank=True,
+        help_text='SEBI: Ind AS 109 FVTPL (Fair Value Through Profit & Loss) movement',
+    )
+
+    # DCF-specific
     discount_rate = models.DecimalField(
         max_digits=5, decimal_places=2, null=True, blank=True,
         help_text='Discount rate used for DCF (%)',
@@ -171,8 +302,19 @@ class Valuation(models.Model):
         help_text='List of comparable company names/multiples',
     )
     assumptions = models.TextField(blank=True, help_text='Valuation assumptions and notes')
-    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='draft')
 
+    # IBBI Registered Valuer
+    valuer_name = models.CharField(
+        max_length=255, blank=True,
+        help_text='Name of the IBBI Registered Valuer',
+    )
+    valuer_reg_number = models.CharField(
+        max_length=50, blank=True,
+        help_text='IBBI Registered Valuer registration number',
+    )
+
+    # Workflow
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='draft')
     submitted_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -201,7 +343,7 @@ class Valuation(models.Model):
 class KPIDefinition(models.Model):
     """
     Defines a KPI that portfolio companies report on.
-    These are org-level definitions; actual values are in PortfolioKPI.
+    Maps to FundOS: kpi_definitions table.
     """
     FORMAT_CHOICES = [
         ('number', 'Number'),
@@ -244,13 +386,21 @@ class KPIDefinition(models.Model):
 class PortfolioKPI(models.Model):
     """
     A KPI value submitted by a founder for a specific investment & period.
-    GP reviews/approves these.
+    Maps to FundOS: portfolio_kpis table.
+
+    Added: source field, period_end_date, portfolio_company FK.
     """
     STATUS_CHOICES = [
         ('draft', 'Draft'),
         ('submitted', 'Submitted'),
         ('approved', 'Approved'),
         ('rejected', 'Rejected'),
+    ]
+    SOURCE_CHOICES = [
+        ('manual', 'Manual Entry'),
+        ('tally_import', 'Tally Import'),
+        ('api_integration', 'API Integration'),
+        ('excel_upload', 'Excel Upload'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -259,14 +409,30 @@ class PortfolioKPI(models.Model):
         on_delete=models.CASCADE,
         related_name='kpis',
     )
+    portfolio_company = models.ForeignKey(
+        PortfolioCompany,
+        on_delete=models.CASCADE,
+        related_name='kpis',
+        null=True, blank=True,
+        help_text='Direct link to portfolio company (denormalized for queries)',
+    )
     kpi_definition = models.ForeignKey(
         KPIDefinition,
         on_delete=models.CASCADE,
         related_name='values',
     )
     period = models.DateField(help_text='First day of the reporting period (e.g., 2025-04-01)')
-    value = models.DecimalField(max_digits=18, decimal_places=4)
+    period_end_date = models.DateField(
+        null=True, blank=True,
+        help_text='Last day of the reporting period',
+    )
+    value = models.DecimalField(max_digits=22, decimal_places=4,
+                                help_text='High precision for ratios and large INR values')
     notes = models.TextField(blank=True)
+    source = models.CharField(
+        max_length=20, choices=SOURCE_CHOICES, default='manual',
+        help_text='How this KPI value was captured',
+    )
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='draft')
 
     submitted_by = models.ForeignKey(
@@ -297,7 +463,11 @@ class PortfolioKPI(models.Model):
 
 class ExitEvent(models.Model):
     """
-    Models exit scenarios (IPO, M&A, secondary sale, write-off) per investment.
+    Models exit scenarios and actual exits.
+    Maps to FundOS: exit_events table.
+
+    Added: gain_loss_nature (SEBI: LTCG/STCG classification),
+    net_exit_proceeds, exit_multiple, irr_on_exit.
     """
     EXIT_TYPE_CHOICES = [
         ('ipo', 'IPO'),
@@ -305,6 +475,13 @@ class ExitEvent(models.Model):
         ('secondary_sale', 'Secondary Sale'),
         ('buyback', 'Buyback'),
         ('write_off', 'Write-Off'),
+    ]
+    GAIN_LOSS_NATURE_CHOICES = [
+        ('ltcg', 'Long Term Capital Gain'),
+        ('stcg', 'Short Term Capital Gain'),
+        ('short_term_loss', 'Short Term Loss'),
+        ('long_term_loss', 'Long Term Loss'),
+        ('na', 'Not Applicable'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -325,19 +502,41 @@ class ExitEvent(models.Model):
     )
     proceeds = models.DecimalField(
         max_digits=18, decimal_places=2, null=True, blank=True,
-        help_text='Proceeds to the fund from this exit',
+        help_text='Gross proceeds to the fund from this exit',
+    )
+    net_exit_proceeds = models.DecimalField(
+        max_digits=18, decimal_places=2, null=True, blank=True,
+        help_text='Net proceeds after transaction costs',
     )
     realized_gain_loss = models.DecimalField(
         max_digits=18, decimal_places=2, null=True, blank=True,
     )
+
+    # SEBI capital gains classification
+    gain_loss_nature = models.CharField(
+        max_length=20, choices=GAIN_LOSS_NATURE_CHOICES,
+        default='na',
+        help_text='SEBI: Capital gains classification — LTCG/STCG determines TDS rate',
+    )
+
+    # Multiples and returns
     moic = models.DecimalField(
         max_digits=8, decimal_places=2, null=True, blank=True,
         help_text='Multiple on invested capital',
+    )
+    exit_multiple = models.DecimalField(
+        max_digits=8, decimal_places=4, null=True, blank=True,
+        help_text='MoIC on this specific exit event',
     )
     irr_pct = models.DecimalField(
         max_digits=8, decimal_places=2, null=True, blank=True,
         help_text='Gross IRR %',
     )
+    irr_on_exit = models.DecimalField(
+        max_digits=8, decimal_places=4, null=True, blank=True,
+        help_text='IRR realised at exit',
+    )
+
     buyer_name = models.CharField(max_length=255, blank=True, help_text='Acquirer/buyer (for M&A/secondary)')
     assumptions = models.TextField(blank=True, help_text='Scenario assumptions')
 
@@ -361,6 +560,7 @@ class ExitEvent(models.Model):
 class BoardMeeting(models.Model):
     """
     Tracks board meetings for portfolio companies.
+    Maps to FundOS: board_meetings table.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     investment = models.ForeignKey(

@@ -2,16 +2,16 @@
 portfolio_views.py
 REST endpoints for the hierarchical portfolio dashboard.
 
+All endpoints are org-scoped: each user sees only their organization's
+portfolio data. Authentication is required via JWT (IsGPUser permission).
+
 Endpoints:
   GET  /api/portfolio/                        -> top-level (funds + meta)
   GET  /api/portfolio/node/<node_id>/         -> single node + immediate children
   GET  /api/portfolio/ancestors/<node_id>/    -> breadcrumb trail
   GET  /api/portfolio/compare/                -> ?ids=a,b,c&mode=X&metric=Y
-                                                 optional for mode=kpi_table:
-                                                   &as_of=YYYY-MM  OR
-                                                   &range_from=YYYY-MM&range_to=YYYY-MM
   POST /api/portfolio/chat/                   -> hierarchy-scoped Gemini chat
-  POST /api/portfolio/reload/                 -> force-reload portfolio.json
+  POST /api/portfolio/reload/                 -> force-reload portfolio data
 """
 
 import json
@@ -19,14 +19,22 @@ import logging
 
 from rest_framework.decorators import api_view, parser_classes, permission_classes
 from rest_framework.parsers import JSONParser
-from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework import status
 
+from accounts.permissions import IsGPUser
 from api.portfolio import service as portfolio_service
 from api.portfolio import compare as compare_module
 
 logger = logging.getLogger(__name__)
+
+
+def _get_org_id(request):
+    """Extract org id from the authenticated request."""
+    org = request.organization
+    if not org:
+        return None
+    return org.id
 
 
 # ---------------------------------------------------------------------------
@@ -34,14 +42,25 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsGPUser])
 def portfolio_root(request):
+    org_id = _get_org_id(request)
+    if not org_id:
+        return Response({"error": "No organization."}, status=status.HTTP_403_FORBIDDEN)
+
     try:
-        doc = portfolio_service.get_document()
+        doc = portfolio_service.get_document(org_id)
     except FileNotFoundError as e:
         return Response({"error": str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
-    funds = portfolio_service.list_funds()
+    funds = portfolio_service.list_funds(org_id, user=request.user)
+
+    if not funds:
+        return Response(
+            {"error": "No portfolio data found for this organization. "
+             "Upload fund Excel files via Data Upload to populate the portfolio dashboard."},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
 
     return Response({
         "schema_version": doc.get("schema_version"),
@@ -59,17 +78,19 @@ def portfolio_root(request):
 # ---------------------------------------------------------------------------
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsGPUser])
 def portfolio_node(request, node_id: str):
-    node = portfolio_service.get_node(node_id)
+    org_id = _get_org_id(request)
+    if not org_id:
+        return Response({"error": "No organization."}, status=status.HTTP_403_FORBIDDEN)
+
+    node = portfolio_service.get_node(org_id, node_id, user=request.user)
     if not node:
         return Response({"error": f"node not found: {node_id}"},
                         status=status.HTTP_404_NOT_FOUND)
 
-    # Return the full node with its immediate children's financials so
-    # the frontend can render the comparison view without a second round-trip.
-    children = portfolio_service.get_children(node_id)
-    ancestors = portfolio_service.get_ancestors(node_id)
+    children = portfolio_service.get_children(org_id, node_id)
+    ancestors = portfolio_service.get_ancestors(org_id, node_id)
 
     return Response({
         "id": node.get("id"),
@@ -80,8 +101,8 @@ def portfolio_node(request, node_id: str):
         "is_real": node.get("is_real", False),
         "description": node.get("description"),
         "financials": node.get("financials", {}),
-        "children": children,          # direct children with financials
-        "ancestors": ancestors,        # breadcrumb
+        "children": children,
+        "ancestors": ancestors,
     })
 
 
@@ -90,9 +111,13 @@ def portfolio_node(request, node_id: str):
 # ---------------------------------------------------------------------------
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsGPUser])
 def portfolio_ancestors(request, node_id: str):
-    trail = portfolio_service.get_ancestors(node_id)
+    org_id = _get_org_id(request)
+    if not org_id:
+        return Response({"error": "No organization."}, status=status.HTTP_403_FORBIDDEN)
+
+    trail = portfolio_service.get_ancestors(org_id, node_id)
     if not trail:
         return Response({"error": "node not found"}, status=status.HTTP_404_NOT_FOUND)
     return Response({"ancestors": trail})
@@ -103,8 +128,12 @@ def portfolio_ancestors(request, node_id: str):
 # ---------------------------------------------------------------------------
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsGPUser])
 def portfolio_compare(request):
+    org_id = _get_org_id(request)
+    if not org_id:
+        return Response({"error": "No organization."}, status=status.HTTP_403_FORBIDDEN)
+
     ids_param = request.query_params.get("ids", "").strip()
     mode = request.query_params.get("mode", "actual").strip()
     metric = request.query_params.get("metric", "revenue").strip()
@@ -117,7 +146,7 @@ def portfolio_compare(request):
                         status=status.HTTP_400_BAD_REQUEST)
 
     ids = [i.strip() for i in ids_param.split(",") if i.strip()]
-    nodes = portfolio_service.find_nodes(ids)
+    nodes = portfolio_service.find_nodes(org_id, ids, user=request.user)
 
     if len(nodes) < 1:
         return Response({"error": "no nodes matched the provided ids", "ids": ids},
@@ -132,7 +161,7 @@ def portfolio_compare(request):
         range_to=range_to,
     )
     payload["requested_ids"] = ids
-    payload["missing_ids"] = [i for i in ids if not portfolio_service.get_node(i)]
+    payload["missing_ids"] = [i for i in ids if not portfolio_service.get_node(org_id, i)]
     return Response(payload)
 
 
@@ -142,7 +171,7 @@ def portfolio_compare(request):
 
 @api_view(["POST"])
 @parser_classes([JSONParser])
-@permission_classes([AllowAny])
+@permission_classes([IsGPUser])
 def portfolio_chat(request):
     """
     POST body:
@@ -154,6 +183,10 @@ def portfolio_chat(request):
     """
     from api import gemini_service
 
+    org_id = _get_org_id(request)
+    if not org_id:
+        return Response({"error": "No organization."}, status=status.HTTP_403_FORBIDDEN)
+
     message = (request.data.get("message") or "").strip()
     history = request.data.get("history") or []
     scope_id = request.data.get("scope_id") or None
@@ -164,12 +197,12 @@ def portfolio_chat(request):
 
     # Build scoped context
     try:
-        doc = portfolio_service.get_document()
+        doc = portfolio_service.get_document(org_id)
     except FileNotFoundError as e:
         return Response({"error": str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
     if scope_id:
-        node = portfolio_service.get_node(scope_id)
+        node = portfolio_service.get_node(org_id, scope_id, user=request.user)
         if not node:
             return Response({"error": f"scope_id not found: {scope_id}"},
                             status=status.HTTP_404_NOT_FOUND)
@@ -180,14 +213,13 @@ def portfolio_chat(request):
                 "level": node.get("level"),
                 "currency": node.get("currency"),
                 "is_real": node.get("is_real", False),
-                "ancestors": portfolio_service.get_ancestors(scope_id)[:-1],
+                "ancestors": portfolio_service.get_ancestors(org_id, scope_id)[:-1],
             },
             "node": node,
             "base_currency": doc.get("base_currency"),
             "fx_as_of": doc.get("fx_as_of"),
         }
     else:
-        # Top-level: give only the funds' top summaries, no deep children
         context = {
             "scope": {"level": "portfolio", "name": "Full portfolio"},
             "base_currency": doc.get("base_currency"),
@@ -200,9 +232,9 @@ def portfolio_chat(request):
                     "name": f.get("name"),
                     "is_real": f.get("is_real", False),
                     "summary": (f.get("financials", {}) or {}).get("summary", {}),
-                    "sector_count": len(f.get("children", []) or []),
+                    "sector_count": f.get("child_count", 0),
                 }
-                for f in doc.get("funds", [])
+                for f in portfolio_service.list_funds(org_id, user=request.user)
             ],
         }
 
@@ -303,14 +335,18 @@ Guidelines:
 # ---------------------------------------------------------------------------
 
 @api_view(["POST"])
-@permission_classes([AllowAny])
+@permission_classes([IsGPUser])
 def portfolio_reload(request):
-    """Force-reload portfolio data from database (or JSON fallback)."""
+    """Force-reload portfolio data for the current user's organization."""
+    org_id = _get_org_id(request)
+    if not org_id:
+        return Response({"error": "No organization."}, status=status.HTTP_403_FORBIDDEN)
+
     try:
-        portfolio_service.reload()
+        portfolio_service.reload(org_id)
     except FileNotFoundError as e:
         return Response({"error": str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-    doc = portfolio_service.get_document()
+    doc = portfolio_service.get_document(org_id)
     return Response({
         "ok": True,
         "fund_count": len(doc.get("funds", [])),

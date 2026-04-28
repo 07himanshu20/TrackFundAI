@@ -13,7 +13,13 @@ def document_upload_path(instance, filename):
 
 
 class Document(models.Model):
-    """Fund document stored in the vault."""
+    """
+    Fund document stored in the vault.
+    Maps to FundOS: documents table.
+
+    Added: checksum_sha256 (file integrity), watermark_lp_access (LP watermarking),
+    document_type expansion to cover SEBI filing types.
+    """
 
     CATEGORY_CHOICES = [
         ('ppm', 'Private Placement Memorandum'),
@@ -28,6 +34,10 @@ class Document(models.Model):
         ('legal', 'Legal Document'),
         ('board', 'Board Resolution / Minutes'),
         ('kyc', 'KYC Document'),
+        ('nav_statement', 'NAV Statement'),
+        ('sebi_filing', 'SEBI Filing'),
+        ('ctr', 'Compliance Test Report'),
+        ('tax', 'Tax Document'),
         ('other', 'Other'),
     ]
 
@@ -66,6 +76,18 @@ class Document(models.Model):
     file_name = models.CharField(max_length=255)
     file_size = models.PositiveIntegerField(help_text='File size in bytes')
     mime_type = models.CharField(max_length=100, blank=True)
+
+    # File integrity
+    checksum_sha256 = models.CharField(
+        max_length=64, blank=True,
+        help_text='SHA-256 checksum for file integrity verification — detect tampering',
+    )
+
+    # LP access watermarking
+    watermark_lp_access = models.BooleanField(
+        default=False,
+        help_text='Watermark with LP name when accessed — for LP-visible documents',
+    )
 
     version = models.PositiveIntegerField(default=1)
     tags = models.JSONField(default=list, blank=True)

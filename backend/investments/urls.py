@@ -60,6 +60,24 @@ urlpatterns = [
     path('investments/<uuid:investment_id>/exit-scenarios/',
          views.exit_scenario_list, name='exit-scenario-list'),
 
+    # ── Portfolio Companies ──────────────────────────────────
+    # GET/POST /api/portfolio-companies/
+    path('portfolio-companies/',
+         views.portfolio_company_list, name='portfolio-company-list'),
+
+    # GET/PUT/DELETE /api/portfolio-companies/{id}/
+    path('portfolio-companies/<uuid:company_id>/',
+         views.portfolio_company_detail, name='portfolio-company-detail'),
+
+    # ── KPI Definitions ──────────────────────────────────────
+    # GET/POST /api/kpi-definitions/
+    path('kpi-definitions/',
+         views.kpi_definition_list, name='kpi-definition-list'),
+
+    # GET/PUT/DELETE /api/kpi-definitions/{id}/
+    path('kpi-definitions/<uuid:kpi_def_id>/',
+         views.kpi_definition_detail, name='kpi-definition-detail'),
+
     # ── Board Pack ────────────────────────────────────────────
     # POST /api/schemes/{id}/board-pack/generate/
     path('schemes/<uuid:scheme_id>/board-pack/generate/',
