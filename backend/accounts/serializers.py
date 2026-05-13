@@ -67,14 +67,16 @@ class SchemeAccessSerializer(serializers.ModelSerializer):
 class AuditLogSerializer(serializers.ModelSerializer):
     user_name = serializers.SerializerMethodField()
     action_display = serializers.CharField(source='get_action_display', read_only=True)
+    module = serializers.CharField(source='resource_type', read_only=True)
 
     class Meta:
         model = AuditLog
         fields = [
             'id', 'user', 'user_name', 'action', 'action_display',
-            'resource_type', 'resource_id',
+            'resource_type', 'module', 'resource_id',
             'old_values', 'new_values', 'details',
             'ip_address', 'timestamp',
+            'record_hash', 'prev_hash',
         ]
 
     def get_user_name(self, obj):

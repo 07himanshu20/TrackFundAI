@@ -65,11 +65,100 @@ def _parse_json_response(text):
         raise
 
 
+def _build_cross_sheet_value_cache(filepath):
+    """
+    Load workbook twice (data_only and formula) to resolve cross-sheet cell references.
+
+    Many fund Excel files use formulas like ='Portfolio Companies'!B10 or =Sheet2!C5
+    to pull values from other sheets. openpyxl with data_only=True reads cached
+    formula results; when the cache is empty (None), we parse the formula string
+    and fetch the value from the referenced sheet instead.
+
+    Returns a dict: {(sheet_name, row, col): resolved_value}
+    where row and col are 1-based integers.
+    """
+    # Regex for single-cell cross-sheet reference: ='Sheet Name'!A1 or =Sheet!B2
+    XREF_RE = re.compile(
+        r"^=\s*'?([^'!\r\n]+?)'?\s*!\s*([A-Z]+)(\d+)\s*$", re.IGNORECASE
+    )
+
+    cache = {}
+    try:
+        # Load with data_only first (gets cached formula values)
+        wb_data = openpyxl.load_workbook(filepath, data_only=True)
+        # Load without data_only to get formula strings for cells with no cache
+        wb_formula = openpyxl.load_workbook(filepath, data_only=False)
+    except Exception as e:
+        logger.warning(f'Cross-sheet cache build failed: {e}')
+        return cache
+
+    try:
+        from openpyxl.utils import column_index_from_string
+
+        for sname in wb_data.sheetnames:
+            ws_data = wb_data[sname]
+            ws_formula = wb_formula[sname] if sname in wb_formula.sheetnames else None
+
+            for row in ws_data.iter_rows():
+                for cell in row:
+                    val = cell.value
+                    if val is not None:
+                        cache[(sname, cell.row, cell.column)] = val
+                        continue
+
+                    # Cell has no cached value — check for cross-sheet formula
+                    if ws_formula is None:
+                        continue
+                    formula_cell = ws_formula.cell(row=cell.row, column=cell.column)
+                    formula = formula_cell.value
+                    if not formula or not isinstance(formula, str):
+                        continue
+                    formula = formula.strip()
+                    if not formula.startswith('='):
+                        continue
+
+                    m = XREF_RE.match(formula)
+                    if not m:
+                        continue
+
+                    ref_sheet = m.group(1).strip()
+                    ref_col = column_index_from_string(m.group(2))
+                    ref_row = int(m.group(3))
+
+                    if ref_sheet not in wb_data.sheetnames:
+                        continue
+
+                    # Read from the referenced sheet's data-only version
+                    ref_ws = wb_data[ref_sheet]
+                    ref_val = ref_ws.cell(row=ref_row, column=ref_col).value
+                    if ref_val is not None:
+                        cache[(sname, cell.row, cell.column)] = ref_val
+
+    except Exception as e:
+        logger.warning(f'Cross-sheet resolution error: {e}')
+    finally:
+        try:
+            wb_data.close()
+            wb_formula.close()
+        except Exception:
+            pass
+
+    return cache
+
+
 def _extract_sheet_previews(filepath):
     """
     Read an Excel file and extract sheet names + first 5 rows of each sheet.
+
+    Uses data_only=True to get cached formula values, then resolves any cells
+    that have cross-sheet formula references (e.g. ='Portfolio'!B10) so that
+    Gemini sees the actual values rather than blanks.
+
     Returns {sheet_name: [[row1_values], [row2_values], ...]}
     """
+    # Build cross-sheet value cache first (resolves =SheetX!CellRef formulas)
+    xsheet_cache = _build_cross_sheet_value_cache(filepath)
+
     wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
     previews = {}
     sheet_names = wb.sheetnames
@@ -77,9 +166,13 @@ def _extract_sheet_previews(filepath):
     for sheet_name in sheet_names:
         ws = wb[sheet_name]
         rows = []
-        for i, row in enumerate(ws.iter_rows(max_row=6, values_only=True)):
-            # Convert all values to strings for JSON serialization
-            rows.append([str(v) if v is not None else '' for v in row])
+        for i, row in enumerate(ws.iter_rows(max_row=6)):
+            row_vals = []
+            for cell in row:
+                # Prefer cached cross-sheet resolved value; fall back to cell value
+                val = xsheet_cache.get((sheet_name, cell.row, cell.column), cell.value)
+                row_vals.append(str(val) if val is not None else '')
+            rows.append(row_vals)
             if i >= 5:
                 break
         if rows:
@@ -93,7 +186,9 @@ def _extract_sheet_previews(filepath):
 # Pass 1: Sheet Classification
 # ---------------------------------------------------------------------------
 
-PASS1_PROMPT = """You are an expert fund management data analyst. Given the sheet names and first few rows of an AIF (Alternative Investment Fund) Excel workbook, classify each sheet into exactly one data domain.
+PASS1_PROMPT = """You are an AI engineer with 20+ years of experience in automating the finances of companies. You hold 20+ years of experience working with Python, and specialization in extraction, displaying and calculating data and accessing it from Excel/CSV/PDF sheets of multiple formats. You hold 15+ years of hands-on experience in software debugging and creating production-ready softwares and dashboards. You have robust knowledge of a CFO/CA to perform calculations on finance data.
+
+Given the sheet names and first few rows of an AIF (Alternative Investment Fund) Excel workbook, classify each sheet into exactly one data domain.
 
 Available domains and their descriptions:
 {domains}
@@ -106,6 +201,52 @@ For each sheet, examine:
 A single sheet may contain MULTIPLE sections (e.g., "Organization & Users" sheet has both organization master and user list). In that case, classify by the PRIMARY domain or list multiple domains.
 
 IMPORTANT: Some sheets contain multiple sections separated by section headers (all-caps text like "FUND MASTER DATA", "SCHEMES", "PORTFOLIO COMPANIES"). Identify these multi-section sheets.
+
+CROSS-SHEET LINKING — CRITICAL UNDERSTANDING:
+Excel workbooks used by fund managers frequently contain cross-sheet cell references. A cell in one sheet may reference data from another sheet using formulas like:
+  - =Sheet2!B5  (simple reference)
+  - ='Portfolio Companies'!C10  (sheet name with spaces)
+  - =VLOOKUP(A2,'Fund Data'!A:D,2,0)  (lookup from another sheet)
+
+When you see cells showing empty values or '#REF!' or formula text, the ACTUAL value may exist in another sheet. The system has already resolved cross-sheet references before sending you this preview, so values shown reflect the true data. If you encounter empty cells in what appears to be a data area, assume those cells may be linked and classified accordingly.
+
+CRITICAL RULES — NEVER VIOLATE:
+
+1. COVER/SUMMARY SHEETS ARE NEVER DATA SHEETS.
+   Sheets named "Cover", "Summary", "Index", "Contents", "Dashboard", "Overview",
+   "Front Page", "Title", "Home", "Intro", "README" etc. are display pages.
+   They contain KEY-VALUE metadata pairs (e.g., "Fund Name: ABC Fund",
+   "Portfolio Companies: 110", "Total FV: ₹1,234 Cr") that are COMPUTED
+   AGGREGATES — not raw transactional records.
+
+   These sheets MUST ONLY be classified as "fund_scheme_master" (for basic
+   fund identity) or "unknown". NEVER classify them as:
+   - portfolio_investments (even if they show a company count)
+   - investors_aml (even if they show an LP count)
+   - capital_calls, nav_accounting, compliance, or any other data domain
+
+   The numbers on cover sheets are often inaccurate, out of date, or
+   filled in by hand. The source of truth for all counts and values is
+   ALWAYS the dedicated data sheets (e.g., "Portfolio Investments" sheet
+   for company/investment data).
+
+2. DERIVE COUNTS FROM DATA SHEETS, NOT COVER SHEETS.
+   If a Cover sheet says "Portfolio Companies: 13" but the "Portfolio
+   Investments" sheet has 110 rows — the correct count is 110.
+   Always trust the data sheet row count over any aggregate shown on
+   a cover or summary page.
+
+3. A sheet that has a two-column key-value layout (col A = label, col B = value)
+   where labels are things like "Fund Name", "Short Code", "Vintage Year",
+   "Management Fee", "Hurdle Rate", "Carried Interest", "Domicile" etc.
+   is a METADATA sheet, not a data/transaction sheet.
+
+4. FINANCIAL STATEMENT SHEETS (P&L, Budget vs Actual, Balance Sheet):
+   Sheets with names like "Monthly P&L", "P&L", "Profit Loss", "Income Statement",
+   "Budget vs Actual", "BvA", "Financial Statements", "Company Financials",
+   "Balance Sheet", "Cash Flow" belong to the "financials_pl_bva" domain.
+   These sheets contain company-level financial data (Revenue, EBITDA, PAT etc.)
+   for portfolio companies — either one row per company or time-series pivot format.
 
 Sheet data:
 {sheet_data}
@@ -174,7 +315,9 @@ def classify_sheets(filepath, progress_cb=None):
 # Pass 2: Column Mapping per Sheet
 # ---------------------------------------------------------------------------
 
-PASS2_PROMPT = """You are mapping Excel columns to canonical fund management database fields.
+PASS2_PROMPT = """You are an AI engineer with 20+ years of experience in automating the finances of companies. You hold 20+ years of experience working with Python, and specialization in extraction, displaying and calculating data and accessing it from Excel/CSV/PDF sheets of multiple formats. You hold 15+ years of hands-on experience in software debugging and creating production-ready softwares and dashboards. You have robust knowledge of a CFO/CA to perform calculations on finance data.
+
+You are mapping Excel columns to canonical fund management database fields.
 
 This sheet belongs to the domain: {domain}
 Domain description: {domain_desc}
@@ -188,12 +331,98 @@ Excel data (first rows including headers):
 Canonical fields for this domain (field_name: description):
 {canonical_fields}
 
+CROSS-SHEET LINKING — IMPORTANT:
+This Excel workbook may use cross-sheet cell references. The system has already resolved
+cross-sheet formula references (e.g. ='Portfolio'!B10, =Sheet2!C5) so you see the actual
+resolved values in the preview above. However:
+- Some columns that appear blank may still contain formula-linked data in data rows
+- A column header like "Revenue" may pull data from a linked worksheet
+- Time-series columns (Apr-24, May-24, Q1 FY25) often reference formula-computed values from other sheets
+- When you see a column with only one or two sample values and the rest blank, assume the remaining
+  rows contain formula-linked data — still map those columns to canonical fields
+
+FINANCIAL STATEMENT LAYOUT VARIANTS — CRITICAL FOR financials_pl_bva DOMAIN:
+Financial P&L sheets can appear in two layouts:
+1. HORIZONTAL (rows = companies, columns = P&L line items):
+   | Company | Period | Revenue | COGS | EBITDA | PAT |
+   | CompA   | Apr-24 | 100     | 50   | 30     | 20  |
+
+2. VERTICAL / PIVOT (rows = line items, columns = time periods):
+   | Particulars  | Apr-24 | May-24 | Jun-24 |
+   | Revenue      | 100    | 120    | 130    |
+   | COGS         | 50     | 60     | 65     |
+   | EBITDA       | 30     | 40     | 45     |
+   In this layout: map the label column to "line_item" and each period column to "period"
+
+3. BUDGET vs ACTUAL (rows = companies × line items, columns = Budget | Actual):
+   | Company | Line Item | Budget | Actual | Variance |
+   | CompA   | Revenue   | 100    | 95     | -5       |
+
+Identify which layout applies and map accordingly.
+
+GLOBAL SEMANTIC EQUIVALENCE — CRITICAL:
+Fund managers worldwide use wildly different column names and currency notations for
+the SAME underlying data field. You MUST recognize all of them as semantically identical:
+
+CURRENCY UNIT VARIATIONS (all mean the same underlying amount):
+  "Cost(Cr)"  =  "Cost(Lakhs)"  =  "Cost in Crore"  =  "Cost (₹Cr)"  =  "Cost (INR Mn)"
+  =  "Cost(₹)"  =  "Cost (000s)"  =  "Cost [Cr]"  =  "Investment Cost (Crore)"
+  — The unit suffix NEVER changes the semantic meaning of the column; strip it and map to cost_basis.
+
+  "Revenue(₹Cr)"  =  "Revenue (Lakhs)"  =  "Revenue in Crore"  =  "Net Sales (Cr)"
+  =  "Operating Revenue (₹)"  =  "Revenue [INR Mn]"  =  "Top Line (Cr)"  → revenue
+
+INVESTMENT COST / BASIS:
+  "Cost(Cr)"  "Cost(₹Cr)"  "Cost in Crore"  "Cost(Lakhs)"  "Invested(Cr)"  "Total Invested"
+  "Investment Amount"  "Amount Invested"  "Capital Deployed"  "Amount(Cr)"  "Inv. Amount"
+  → cost_basis / total_invested
+
+FAIR VALUE / CURRENT VALUE:
+  "FV(Cr)"  "FV(₹Cr)"  "FV Holding"  "Fair Value (Cr)"  "Current Value"  "Market Value(Cr)"
+  "NAV(Cr)"  "Equity Val"  "Holding Value"  "Portfolio Value"  → fair_value
+
+MOIC / MULTIPLE:
+  "MOIC"  "MoIC"  "Multiple"  "Money Multiple"  "Return Multiple"  "Investment Multiple"
+  "Return on Investment"  "2.5x"  → moic
+
+IRR VARIANTS:
+  "Gross IRR"  "IRR%"  "IRR (Gross)"  "Gross Return %"  "IRR%p.a."  "XIRR"  → irr_pct (gross)
+  "Net IRR"  "IRR (Net)"  "Net Return"  "LP IRR"  → net_irr_pct
+
+PERIOD / DATE NOTATION:
+  "Apr-24"  "Apr-2024"  "April 2024"  "04/2024"  "2024-04"  → monthly period (Apr 2024)
+  "Q1 FY25"  "Q1FY2025"  "Q1-FY25"  "1QFY25"  → quarterly period (Apr-Jun FY25)
+  "FY2025"  "FY25"  "2024-25"  → annual period (FY2025)
+
+HOLDING % / OWNERSHIP:
+  "Hold%"  "Holding %"  "Ownership %"  "% Stake"  "FD%"  "Equity Stake"
+  "% Shareholding"  "Investment %"  → ownership_pct
+
+BUDGET / PLAN:
+  "Budget"  "Budget YTD"  "AOP"  "Annual Operating Plan"  "Plan"  "Target"
+  "Budgeted"  "Forecast"  "Budget Amount"  → budget
+
+ACTUAL / ACHIEVED:
+  "Actual"  "Actual YTD"  "YTD Actual"  "Actuals"  "Achieved"  "Reported"
+  "Actual Amount"  → actual
+
+LINE ITEM (row label in pivot layouts):
+  "Particulars"  "Line Item"  "Description"  "Account"  "P&L Item"  "Category"  → line_item
+
 For EACH section in the sheet, map the Excel column headers to canonical field names.
 Consider semantic meaning, not just exact text match. For example:
   - "LP Name" or "Investor" → investor_name
-  - "Committed Amount" or "Commitment (Cr)" → commitment_amount
+  - "Committed Amount" or "Commitment (Cr)" or "Commitment(₹Cr)" → commitment_amount
   - "SEBI Reg No" or "Registration Number" → sebi_registration_number
-  - "P&L" or "Profit and Loss" or "Profit Analysis" → same semantic concept
+  - "Net Sales" or "Top Line" or "Operating Revenue" or "Revenue(₹Cr)" → revenue
+  - "Profit After Tax" or "Net Profit" or "Bottom Line" or "PAT(₹Cr)" → pat
+  - "Shareholders Funds" or "Total Equity" or "Net Worth (Cr)" → net_worth
+  - "AOP" or "Plan" or "Target" or "Budget YTD" → budget
+  - "YTD Actual" or "Actuals" or "Achieved" or "Actual YTD" → actual
+  - "Realized(₹Cr)" or "Exit Proceeds(Cr)" or "Gross Proceeds" → proceeds
+  - "D&A(₹Cr)" or "Depreciation & Amortisation" → depreciation
+  - "Op Ex(₹Cr)" or "Total Opex" or "Operating Expenses" → total_opex
+  - "Gross Profit(₹Cr)" or "GP" or "Contribution Margin" → gross_profit
 
 Output JSON:
 {{
@@ -202,12 +431,15 @@ Output JSON:
       "section_name": "SECTION HEADER or sheet_name if no sections",
       "header_row": 1,
       "data_start_row": 2,
+      "layout": "horizontal OR vertical_pivot OR budget_vs_actual",
       "mappings": [
         {{
           "excel_column": "exact Excel header text",
           "column_index": 1,
           "canonical_field": "canonical_field_name",
-          "confidence": 0.95
+          "confidence": 0.95,
+          "is_period_column": false,
+          "cross_sheet_linked": false
         }}
       ],
       "unmapped_columns": ["column that has no canonical match"],
@@ -224,6 +456,8 @@ Rules:
 - List missing_fields for canonical fields that should exist but weren't found
 - If a sheet has multiple sections (separated by all-caps headers), map each section separately
 - Be thorough — map every column you can identify
+- Set is_period_column=true for time-period columns like "Apr-24", "Q1 FY25", "2024-04"
+- Set cross_sheet_linked=true for columns where values appear to be pulled from another sheet
 """
 
 
@@ -231,15 +465,26 @@ def map_columns_for_sheet(filepath, sheet_name, domains, sections, progress_cb=N
     """
     Pass 2: For a classified sheet, map its columns to canonical fields.
 
+    Uses the cross-sheet value cache so that formula-linked cells (e.g.
+    ='Portfolio'!B10) are resolved to their actual values before sending
+    to Gemini — preventing blank cells from confusing the AI column mapper.
+
     Returns: dict with section-level column mappings
     """
+    # Build cross-sheet cache for this file (resolves =SheetX!CellRef formulas)
+    xsheet_cache = _build_cross_sheet_value_cache(filepath)
+
     wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
     ws = wb[sheet_name]
 
-    # Read more rows for mapping (up to 20 for context)
+    # Read more rows for mapping (up to 20 for context), resolving cross-sheet refs
     rows = []
-    for i, row in enumerate(ws.iter_rows(max_row=20, values_only=True)):
-        rows.append([str(v) if v is not None else '' for v in row])
+    for i, row in enumerate(ws.iter_rows(max_row=20)):
+        row_vals = []
+        for cell in row:
+            val = xsheet_cache.get((sheet_name, cell.row, cell.column), cell.value)
+            row_vals.append(str(val) if val is not None else '')
+        rows.append(row_vals)
         if i >= 19:
             break
     wb.close()

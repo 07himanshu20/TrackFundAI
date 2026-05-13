@@ -26,9 +26,9 @@
     if (!v && v !== 0) return '—';
     const n = parseFloat(v);
     if (isNaN(n)) return '—';
-    if (Math.abs(n) >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
-    if (Math.abs(n) >= 1e7) return `${(n / 1e7).toFixed(1)}Cr`;
-    if (Math.abs(n) >= 1e5) return `${(n / 1e5).toFixed(1)}L`;
+    if (Math.abs(n) >= 1e9) return `${(n / 1e9).toFixed(2)} B`;
+    if (Math.abs(n) >= 1e7) return `${(n / 1e7).toFixed(1)} Cr`;
+    if (Math.abs(n) >= 1e5) return `${(n / 1e5).toFixed(1)} L`;
     return n.toLocaleString('en-IN');
   };
 
@@ -733,7 +733,14 @@
   async function loadCapitalAccounts() {
     try {
       const schemeId = document.getElementById('acc-scheme-filter').value;
-      const url = schemeId ? `/lp/capital-accounts/?scheme=${schemeId}` : '/lp/capital-accounts/';
+      let url;
+      if (schemeId) {
+        url = `/lp/capital-accounts/?scheme=${schemeId}`;
+      } else {
+        // If a fund is specified in the URL query string, scope to that fund
+        const urlFundId = new URLSearchParams(window.location.search).get('fund');
+        url = urlFundId ? `/lp/capital-accounts/?fund=${urlFundId}` : '/lp/capital-accounts/';
+      }
       capitalAccounts = await Auth.apiGet(url);
       renderCapitalAccounts();
     } catch (e) { console.error('Failed to load capital accounts:', e); }
@@ -964,10 +971,10 @@
     const lpMoic     = calledCap > 0 ? lpTotal / calledCap : 0;
 
     const fmtCr = (v) => {
-      if (v >= 1e9) return `₹${(v/1e9).toFixed(2)}B`;
+      if (v >= 1e9) return `₹${(v/1e9).toFixed(2)} B`;
       if (v >= 1e7) return `₹${(v/1e7).toFixed(1)} Cr`;
       if (v >= 1e5) return `₹${(v/1e5).toFixed(1)} L`;
-      return `₹${v.toLocaleString('en-IN')}`;
+      return `₹${v.toLocaleString('en-IN')} Cr`;
     };
 
     const pct = (v) => totalDist > 0 ? Math.round((v / totalDist) * 100) : 0;

@@ -88,6 +88,19 @@ class ImportFile(models.Model):
     gemini_confidence = models.FloatField(default=0.0)
     sheet_names = models.JSONField(default=list, blank=True)
 
+    # Track which fund was created/updated by this file (for cascading delete)
+    fund = models.ForeignKey(
+        'funds.Fund',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='import_files',
+        help_text='The fund created or updated by importing this file',
+    )
+    fund_name = models.CharField(
+        max_length=255, blank=True,
+        help_text='Fund name extracted during import (for display even if fund is deleted)',
+    )
+
     error_detail = models.TextField(blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)

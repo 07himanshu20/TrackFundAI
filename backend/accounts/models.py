@@ -1,3 +1,4 @@
+import hashlib
 import uuid
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser
@@ -38,15 +39,14 @@ class User(AbstractUser):
     mfa_totp_secret.
     """
 
+    # v5: Exactly 6 roles
     ROLE_CHOICES = [
-        ('platform_admin', 'Platform Admin'),
-        ('gp_admin', 'GP Admin'),
-        ('gp_user', 'GP User'),
+        ('platform_admin', 'Super Admin'),
+        ('gp_admin', 'GP Partner'),
+        ('fund_accountant', 'CFO'),
+        ('analyst', 'Investment Analyst'),
         ('compliance_officer', 'Compliance Officer'),
-        ('fund_accountant', 'Fund Accountant'),
-        ('lp_user', 'LP User'),
-        ('founder_user', 'Founder User'),
-        ('external_auditor', 'External Auditor'),
+        ('lp_user', 'LP'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -56,23 +56,34 @@ class User(AbstractUser):
         related_name='users',
         null=True, blank=True,
     )
-    role = models.CharField(max_length=30, choices=ROLE_CHOICES, default='gp_user')
+    role = models.CharField(max_length=30, choices=ROLE_CHOICES, default='analyst')
     phone = models.CharField(max_length=20, blank=True)
+
+    # MFA — TOTP (Google Authenticator / pyotp)
     mfa_enabled = models.BooleanField(default=False)
+    mfa_totp_secret = models.CharField(
+        max_length=64, blank=True, default='',
+        help_text='Base32 TOTP secret (AES-256 encrypted at rest in prod)',
+    )
 
-    # Security — account lockout (SOC 2 compliance)
-    failed_login_count = models.PositiveIntegerField(
+    # MFA — SMS OTP (MSG91/Fast2SMS)
+    mfa_sms_enabled = models.BooleanField(default=False)
+    mfa_sms_otp = models.CharField(max_length=10, blank=True, default='')
+    mfa_sms_otp_expires = models.DateTimeField(null=True, blank=True)
+
+    # Security — account lockout (v5: 3 attempts → 24h lockout)
+    login_attempts = models.PositiveIntegerField(
         default=0,
-        help_text='Account lockout after 5 failures',
+        help_text='Failed login count — resets on successful login',
     )
-    account_locked_until = models.DateTimeField(
+    lockout_until = models.DateTimeField(
         null=True, blank=True,
-        help_text='Account locked until this timestamp after too many failed logins',
+        help_text='Account locked until this timestamp (24h after 3rd failed attempt)',
     )
 
-    # LP user linkage — set when user_type is lp_user
-    # This FK will be added when LP app is created (Phase 3)
-    # investor_id will link to lp.Investor once that model exists
+    # Legacy fields kept for backward compatibility
+    failed_login_count = models.PositiveIntegerField(default=0)
+    account_locked_until = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['username']
@@ -82,8 +93,8 @@ class User(AbstractUser):
 
     @property
     def is_gp(self):
-        return self.role in ('platform_admin', 'gp_admin', 'gp_user',
-                             'compliance_officer', 'fund_accountant')
+        return self.role in ('platform_admin', 'gp_admin', 'fund_accountant',
+                             'analyst', 'compliance_officer')
 
     @property
     def is_admin(self):
@@ -91,10 +102,33 @@ class User(AbstractUser):
 
     @property
     def is_locked(self):
-        if self.account_locked_until:
-            from django.utils import timezone
-            return timezone.now() < self.account_locked_until
+        from django.utils import timezone
+        if self.lockout_until and timezone.now() < self.lockout_until:
+            return True
+        if self.account_locked_until and timezone.now() < self.account_locked_until:
+            return True
         return False
+
+    def record_failed_login(self):
+        """Increment attempt counter; lock after 3 attempts for 24h."""
+        from django.utils import timezone
+        from datetime import timedelta
+        self.login_attempts += 1
+        self.failed_login_count = self.login_attempts
+        if self.login_attempts >= 3:
+            self.lockout_until = timezone.now() + timedelta(hours=24)
+            self.account_locked_until = self.lockout_until
+        self.save(update_fields=['login_attempts', 'failed_login_count',
+                                 'lockout_until', 'account_locked_until'])
+
+    def reset_login_attempts(self):
+        """Called on successful login."""
+        self.login_attempts = 0
+        self.failed_login_count = 0
+        self.lockout_until = None
+        self.account_locked_until = None
+        self.save(update_fields=['login_attempts', 'failed_login_count',
+                                 'lockout_until', 'account_locked_until'])
 
 
 class FundAccess(models.Model):
@@ -246,6 +280,16 @@ class AuditLog(models.Model):
     ip_address = models.GenericIPAddressField(null=True, blank=True)
     timestamp = models.DateTimeField(auto_now_add=True, db_index=True)
 
+    # SHA-256 hash chain — tamper-proof audit trail (v5 requirement)
+    prev_hash = models.CharField(
+        max_length=64, blank=True, default='',
+        help_text='SHA-256 hash of the previous AuditLog entry (genesis = empty string)',
+    )
+    record_hash = models.CharField(
+        max_length=64, blank=True, default='',
+        help_text='SHA-256(prev_hash + action + resource_type + resource_id + timestamp_iso)',
+    )
+
     class Meta:
         ordering = ['-timestamp']
         indexes = [
@@ -256,3 +300,19 @@ class AuditLog(models.Model):
 
     def __str__(self):
         return f'{self.action} {self.resource_type} by {self.user} at {self.timestamp}'
+
+    def compute_hash(self, prev_hash: str, timestamp_iso: str) -> str:
+        """Compute SHA-256(prev_hash + action + resource_type + resource_id + timestamp_iso)."""
+        payload = f'{prev_hash}{self.action}{self.resource_type}{self.resource_id}{timestamp_iso}'
+        return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+    def save(self, *args, **kwargs):
+        """On every new insert: fetch last record's hash, compute this record's hash."""
+        if not self.pk:  # Only on creation — AuditLog is append-only
+            last = AuditLog.objects.order_by('-timestamp').first()
+            self.prev_hash = last.record_hash if last else ''
+            # timestamp is auto_now_add — use current time for hash input
+            from django.utils import timezone
+            ts = timezone.now().isoformat()
+            self.record_hash = self.compute_hash(self.prev_hash, ts)
+        super().save(*args, **kwargs)

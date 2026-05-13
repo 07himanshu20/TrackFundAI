@@ -32,4 +32,34 @@ urlpatterns = [
 
     # Existing portfolio + legacy endpoints (preserved as-is)
     path('api/', include('api.urls')),
+
+    # Email MIS Ingestion
+    path('api/email-ingestion/', include('emailingestion.urls')),
+
+    # Market Data Feeds (BSE/NSE/Bloomberg prices, FX rates)
+    path('api/market-data/', include('marketdata.urls')),
+
+    # Reporting module (LP letters, valuation certs, NAV statements, FATCA/CRS)
+    path('api/reporting/', include('reporting.urls')),
+
+    # ML Risk Scoring
+    path('api/risk-scores/', include('riskscore.urls')),
+
+    # IC Workflow (deal pipeline → IC presentation → vote → decision)
+    path('api/ic/', include('ic_workflow.urls')),
+
+    # Fund Close (fund lifecycle close + clawback + SEBI deregistration)
+    path('api/fund-close/', include('fundclose.urls')),
+
+    # TDS (withholding tax + Form 26Q)
+    path('api/tds/', include('tds.urls')),
+
+    # MIS Consolidation (Budget vs Actual, consolidated MIS, anomaly detection)
+    path('api/mis/', include('mis_consolidation.urls')),
+
+    # Market Research / Market Explorer (142 opportunities, AI studies)
+    path('api/market/', include('marketresearch.urls')),
+
+    # NL Chatbot (intent classification + SQL builder + Gemini response)
+    path('api/chatbot/', include('chatbot.urls')),
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

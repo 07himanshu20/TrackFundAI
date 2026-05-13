@@ -1,0 +1,177 @@
+"""
+MIS Reporting models — Reporting calendar, LP letter generation, compliance reports.
+
+v5 Reporting Calendar SLAs:
+  - Monthly MIS P&L + BS: T+5 working days (internal)
+  - SEBI AIF Monthly Report: 7th of following month
+  - Quarterly LP Letter: 15th of following quarter (auto-generated)
+  - Valuation Certificate (IPEV): 15th of following quarter (semi-auto)
+  - NAV Statement: 15th of following quarter (auto-generated)
+  - Annual Accounts: 30-Jun (FY+3 months)
+  - FATCA/CRS Report: 31-May
+  - Form 64A / LP Tax: 30-Jun
+"""
+
+import uuid
+from django.conf import settings
+from django.db import models
+
+
+class ReportingCalendar(models.Model):
+    """
+    A scheduled reporting obligation with SLA deadline tracking.
+    One record per obligation per period per fund/scheme.
+    """
+    REPORT_TYPE_CHOICES = [
+        ('monthly_mis',       'Monthly MIS (P&L + BS + CF)'),
+        ('sebi_monthly',      'SEBI AIF Monthly Report'),
+        ('quarterly_lp',      'Quarterly LP Letter'),
+        ('valuation_cert',    'Valuation Certificate (IPEV)'),
+        ('nav_statement',     'NAV Statement'),
+        ('annual_accounts',   'Annual Accounts'),
+        ('fatca_crs',         'FATCA/CRS Report'),
+        ('form_64a',          'Form 64A / LP Tax'),
+        ('sebi_qar',          'SEBI Quarterly Activity Report'),
+        ('sebi_aar',          'SEBI Annual Activity Report'),
+    ]
+    STATUS_CHOICES = [
+        ('upcoming',  'Upcoming'),
+        ('due',       'Due'),
+        ('overdue',   'Overdue'),
+        ('submitted', 'Submitted'),
+        ('filed',     'Filed'),
+        ('waived',    'Waived'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        'accounts.Organization',
+        on_delete=models.CASCADE,
+        related_name='reporting_calendar',
+    )
+    fund = models.ForeignKey(
+        'funds.Fund',
+        on_delete=models.CASCADE,
+        related_name='reporting_obligations',
+        null=True, blank=True,
+    )
+    scheme = models.ForeignKey(
+        'funds.Scheme',
+        on_delete=models.CASCADE,
+        related_name='reporting_obligations',
+        null=True, blank=True,
+    )
+
+    report_type = models.CharField(max_length=20, choices=REPORT_TYPE_CHOICES)
+    period_label = models.CharField(
+        max_length=50,
+        help_text='Human-readable period e.g. "Q1 FY25 (Apr–Jun 2024)"',
+    )
+    period_start = models.DateField()
+    period_end   = models.DateField()
+    deadline     = models.DateField(help_text='SLA deadline per v5 reporting calendar')
+    status       = models.CharField(max_length=10, choices=STATUS_CHOICES, default='upcoming')
+
+    # Generated report document
+    report_document = models.ForeignKey(
+        'documents.Document',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='reporting_obligations',
+    )
+    report_generated_at = models.DateTimeField(null=True, blank=True)
+
+    # Submission tracking
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    submitted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='+',
+    )
+    notes = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['deadline', 'report_type']
+        unique_together = ('organization', 'fund', 'scheme', 'report_type', 'period_start')
+
+    def __str__(self):
+        fund_name = self.fund.name if self.fund else 'All'
+        return f'{self.get_report_type_display()} — {fund_name} — {self.period_label} ({self.status})'
+
+
+class ReportingReminder(models.Model):
+    """
+    Automated reminder sent to fund team when MIS is due or overdue.
+    T+3: First reminder, T+5: Escalation reminder.
+    """
+    REMINDER_TYPE_CHOICES = [
+        ('t3_reminder',   'T+3 First Reminder'),
+        ('t5_escalation', 'T+5 Escalation'),
+        ('manual',        'Manual Reminder'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    obligation = models.ForeignKey(
+        ReportingCalendar,
+        on_delete=models.CASCADE,
+        related_name='reminders',
+    )
+    reminder_type = models.CharField(max_length=15, choices=REMINDER_TYPE_CHOICES)
+    sent_at       = models.DateTimeField(auto_now_add=True)
+    sent_to       = models.EmailField(blank=True, help_text='Recipient email address')
+    subject       = models.CharField(max_length=200, blank=True)
+    body          = models.TextField(blank=True)
+    success       = models.BooleanField(default=True)
+    error_message = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ['-sent_at']
+
+    def __str__(self):
+        return f'{self.get_reminder_type_display()} — {self.obligation} — {self.sent_at:%Y-%m-%d}'
+
+
+class GeneratedReport(models.Model):
+    """
+    A PDF/Excel report generated by the reporting engine.
+    Linked to a ReportingCalendar obligation.
+    """
+    REPORT_FORMAT_CHOICES = [
+        ('pdf',   'PDF'),
+        ('excel', 'Excel'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    obligation = models.ForeignKey(
+        ReportingCalendar,
+        on_delete=models.CASCADE,
+        related_name='generated_reports',
+        null=True, blank=True,
+    )
+    organization = models.ForeignKey(
+        'accounts.Organization',
+        on_delete=models.CASCADE,
+        related_name='generated_reports',
+    )
+    report_type = models.CharField(max_length=30)
+    report_format = models.CharField(max_length=5, choices=REPORT_FORMAT_CHOICES, default='pdf')
+    file = models.FileField(upload_to='reports/%Y/%m/')
+    file_size = models.IntegerField(default=0)
+
+    generated_at = models.DateTimeField(auto_now_add=True)
+    generated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='+',
+    )
+
+    class Meta:
+        ordering = ['-generated_at']
+
+    def __str__(self):
+        return f'{self.report_type} — {self.generated_at:%Y-%m-%d}'

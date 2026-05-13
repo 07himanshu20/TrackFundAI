@@ -9,6 +9,7 @@ from .models import (
     SEBIReport, AMLDueDiligence, ComplianceTestReport,
     CTRChecklistItem, EquityThresholdAlert, ComplianceCalendar,
     PPMAmendment, SEBICircular, CircularAction,
+    EscalationLog, FundComplianceScore,
 )
 from .serializers import (
     SEBIReportListSerializer, SEBIReportDetailSerializer,
@@ -255,7 +256,7 @@ def ctr_checklist_detail(request, item_id):
 
 # -- Equity Threshold Alert --
 
-@api_view(['GET'])
+@api_view(['GET', 'POST'])
 @permission_classes([IsGPUser])
 def threshold_alert_list(request):
     org = request.organization
@@ -267,10 +268,22 @@ def threshold_alert_list(request):
         investment__scheme__fund__organization=org,
         investment__scheme__fund__id__in=fund_ids,
     ).select_related('investment')
-    unresolved = request.query_params.get('unresolved')
-    if unresolved is not None and unresolved.lower() == 'true':
-        qs = qs.filter(resolved=False)
-    return Response(EquityThresholdAlertSerializer(qs, many=True).data)
+    if request.method == 'GET':
+        unresolved = request.query_params.get('unresolved')
+        if unresolved is not None and unresolved.lower() == 'true':
+            qs = qs.filter(resolved=False)
+        return Response(EquityThresholdAlertSerializer(qs, many=True).data)
+
+    # POST: manually create a threshold alert (e.g., when flagging a new investment)
+    ser = EquityThresholdAlertSerializer(data=request.data)
+    ser.is_valid(raise_exception=True)
+    alert = ser.save()
+    log_audit(request, 'create', 'equity_threshold_alert', alert.id, {
+        'investment': str(alert.investment_id),
+        'stake_pct': str(alert.stake_percentage),
+        'breach_date': str(alert.breach_date),
+    })
+    return Response(ser.data, status=status.HTTP_201_CREATED)
 
 
 @api_view(['GET', 'PUT'])
@@ -530,3 +543,278 @@ def circular_action_detail(request, action_id):
         'fields': list(request.data.keys()),
     })
     return Response(CircularActionSerializer(action).data)
+
+
+# ═══════════════════════════════════════════════════════════════
+# Compliance 2.0 — Portfolio Company-Level Obligations (v5)
+# ═══════════════════════════════════════════════════════════════
+
+@api_view(['GET'])
+@permission_classes([IsGPUser])
+def portfolio_compliance_heatmap(request):
+    """
+    RAG heatmap: for each accessible portfolio company, returns
+    obligation breakdown by RAG status + composite compliance score.
+
+    Query params: ?fund_id=<uuid>
+    """
+    from .models import PortfolioCompanyCompliance, PortfolioComplianceScore
+    from investments.models import PortfolioCompany
+
+    org = request.organization
+    if not org:
+        return Response({'detail': 'No organization.'}, status=403)
+
+    fund_ids = get_accessible_fund_ids(request.user)
+    fund_filter = request.query_params.get('fund_id')
+
+    companies = PortfolioCompany.objects.filter(
+        organization=org,
+        investments__scheme__fund__id__in=fund_ids,
+        is_active=True,
+    ).distinct()
+
+    if fund_filter:
+        companies = companies.filter(investments__scheme__fund__id=fund_filter)
+
+    result = []
+    for company in companies:
+        obligations = PortfolioCompanyCompliance.objects.filter(portfolio_company=company)
+        total = obligations.count()
+        green  = obligations.filter(rag_status='green').count()
+        amber  = obligations.filter(rag_status='amber').count()
+        red    = obligations.filter(rag_status='red').count()
+        overdue = obligations.filter(status='overdue').count()
+
+        # Composite compliance score
+        if total > 0:
+            score = round((green / total) * 100, 1)
+        else:
+            score = None  # No data
+
+        latest_score = PortfolioComplianceScore.objects.filter(
+            portfolio_company=company
+        ).order_by('-score_date').first()
+
+        result.append({
+            'company_id': str(company.id),
+            'company_name': company.name,
+            'sector': company.sector,
+            'total_obligations': total,
+            'green': green,
+            'amber': amber,
+            'red': red,
+            'overdue_count': overdue,
+            'compliance_score': float(latest_score.compliance_score) if latest_score else score,
+            'rag': 'red' if red > 0 else ('amber' if amber > 0 else 'green'),
+        })
+
+    # Sort by risk: red first
+    result.sort(key=lambda x: (
+        0 if x['rag'] == 'red' else (1 if x['rag'] == 'amber' else 2),
+        -x['overdue_count'],
+    ))
+    return Response(result)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsGPUser])
+def portfolio_obligation_list(request, company_id):
+    """List or create compliance obligations for a portfolio company."""
+    from .models import PortfolioCompanyCompliance
+    from investments.models import PortfolioCompany
+
+    org = request.organization
+    try:
+        company = PortfolioCompany.objects.get(pk=company_id, organization=org)
+    except PortfolioCompany.DoesNotExist:
+        return Response({'detail': 'Company not found.'}, status=404)
+
+    if request.method == 'GET':
+        qs = PortfolioCompanyCompliance.objects.filter(
+            portfolio_company=company
+        ).order_by('deadline')
+
+        data = [
+            {
+                'id': str(ob.id),
+                'obligation_type': ob.obligation_type,
+                'obligation_name': ob.obligation_name,
+                'deadline': str(ob.deadline),
+                'status': ob.status,
+                'rag_status': ob.rag_status,
+                'filed_at': str(ob.filed_at) if ob.filed_at else None,
+                'penalty_amount': float(ob.penalty_amount),
+                'notes': ob.notes,
+            }
+            for ob in qs
+        ]
+        return Response(data)
+
+    # POST: create obligation
+    import datetime
+    ob = PortfolioCompanyCompliance.objects.create(
+        portfolio_company=company,
+        obligation_type=request.data.get('obligation_type', 'other'),
+        obligation_name=request.data.get('obligation_name', ''),
+        deadline=request.data.get('deadline', datetime.date.today()),
+        period_start=request.data.get('period_start'),
+        period_end=request.data.get('period_end'),
+        status=request.data.get('status', 'due'),
+        notes=request.data.get('notes', ''),
+    )
+    log_audit(request, 'create', 'portfolio_obligation', ob.id, {
+        'company': company.name, 'type': ob.obligation_type,
+    })
+    return Response({'id': str(ob.id)}, status=status.HTTP_201_CREATED)
+
+
+@api_view(['PUT'])
+@permission_classes([IsGPUser])
+def portfolio_obligation_update(request, obligation_id):
+    """Update a compliance obligation (e.g., mark as filed)."""
+    from .models import PortfolioCompanyCompliance
+    import datetime
+
+    org = request.organization
+    try:
+        ob = PortfolioCompanyCompliance.objects.select_related(
+            'portfolio_company'
+        ).get(pk=obligation_id, portfolio_company__organization=org)
+    except PortfolioCompanyCompliance.DoesNotExist:
+        return Response({'detail': 'Obligation not found.'}, status=404)
+
+    for field in ['status', 'filed_at', 'challan_no', 'reference_no', 'penalty_amount', 'notes']:
+        if field in request.data:
+            setattr(ob, field, request.data[field])
+    ob.save()
+    log_audit(request, 'update', 'portfolio_obligation', ob.id, {
+        'fields': list(request.data.keys()),
+    })
+    return Response({'detail': 'Updated.', 'rag_status': ob.rag_status})
+
+
+# ═══════════════════════════════════════════════════════════════
+# Escalation Log + Combined Score (v5)
+# ═══════════════════════════════════════════════════════════════
+
+@api_view(['GET'])
+@permission_classes([IsGPUser])
+def escalation_log_list(request):
+    """
+    List escalation log entries for this organization.
+    Query params: ?resolved=false, ?escalation_type=equity_threshold_breach
+    """
+    org = request.organization
+    if not org:
+        return Response({'detail': 'No organization.'}, status=403)
+
+    qs = EscalationLog.objects.filter(organization=org).select_related(
+        'equity_alert__investment', 'sebi_report__fund',
+        'circular_action__circular', 'escalated_by',
+    )
+    if request.query_params.get('resolved') == 'false':
+        qs = qs.filter(resolved=False)
+    esc_type = request.query_params.get('escalation_type')
+    if esc_type:
+        qs = qs.filter(escalation_type=esc_type)
+
+    data = [
+        {
+            'id': str(e.id),
+            'escalation_type': e.escalation_type,
+            'escalation_type_display': e.get_escalation_type_display(),
+            'level': e.level,
+            'escalated_to_role': e.escalated_to_role,
+            'message': e.message,
+            'resolved': e.resolved,
+            'resolved_at': e.resolved_at,
+            'created_at': e.created_at,
+        }
+        for e in qs[:100]
+    ]
+    return Response({'count': len(data), 'results': data})
+
+
+@api_view(['POST'])
+@permission_classes([IsGPUser])
+def resolve_escalation(request, escalation_id):
+    """Mark an escalation as resolved."""
+    org = request.organization
+    try:
+        log = EscalationLog.objects.get(pk=escalation_id, organization=org)
+    except EscalationLog.DoesNotExist:
+        return Response({'detail': 'Escalation not found.'}, status=404)
+
+    from django.utils import timezone
+    log.resolved = True
+    log.resolved_at = timezone.now()
+    log.resolution_notes = request.data.get('resolution_notes', '')
+    log.save(update_fields=['resolved', 'resolved_at', 'resolution_notes'])
+    return Response({'detail': 'Escalation resolved.'})
+
+
+@api_view(['POST'])
+@permission_classes([IsGPUser])
+def run_escalation_scan(request):
+    """
+    Trigger a full compliance scan for a fund — auto-escalates any new breaches.
+    Body: { "fund_id": "<uuid>" }
+    """
+    from .escalation import ComplianceEscalationService
+    from funds.models import Fund
+
+    org = request.organization
+    fund_id = request.data.get('fund_id')
+    if not fund_id:
+        return Response({'detail': 'fund_id required.'}, status=400)
+
+    try:
+        fund = Fund.objects.get(pk=fund_id, organization=org)
+    except Fund.DoesNotExist:
+        return Response({'detail': 'Fund not found.'}, status=404)
+
+    svc = ComplianceEscalationService(org)
+    svc.run_all(fund)
+    return Response({'detail': 'Compliance scan complete.'})
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsGPUser])
+def fund_compliance_score(request, fund_id):
+    """
+    GET: Latest combined compliance score for a fund.
+    POST: Recompute and save the score now.
+    """
+    from .escalation import FundComplianceScorer
+    from funds.models import Fund
+
+    org = request.organization
+    try:
+        fund = Fund.objects.get(pk=fund_id, organization=org)
+    except Fund.DoesNotExist:
+        return Response({'detail': 'Fund not found.'}, status=404)
+
+    if request.method == 'POST':
+        scorer = FundComplianceScorer(fund, org)
+        score = scorer.compute_and_save()
+    else:
+        score = FundComplianceScore.objects.filter(fund=fund).order_by('-score_date').first()
+        if not score:
+            return Response({'detail': 'No score computed yet. POST to compute.'}, status=404)
+
+    return Response({
+        'fund_id': str(fund.id),
+        'fund_name': fund.name,
+        'score_date': score.score_date,
+        'combined_score': float(score.combined_score),
+        'sub_scores': {
+            'sebi_filings': float(score.sebi_filing_score),
+            'aml': float(score.aml_score),
+            'equity_threshold': float(score.equity_threshold_score),
+            'portfolio_companies': float(score.portfolio_company_score),
+            'circular_actions': float(score.circular_action_score),
+        },
+        'detail': score.score_detail,
+        'computed_at': score.computed_at,
+    })

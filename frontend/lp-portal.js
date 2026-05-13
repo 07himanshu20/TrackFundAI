@@ -20,10 +20,10 @@
   const fmtCurrency = (v) => {
     if (!v) return '—';
     const n = parseFloat(v);
-    if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
-    if (n >= 1e7) return `${(n / 1e7).toFixed(1)}Cr`;
-    if (n >= 1e5) return `${(n / 1e5).toFixed(1)}L`;
-    return n.toLocaleString('en-IN');
+    if (n >= 1e9) return `${(n / 1e9).toFixed(1)} B`;
+    if (n >= 1e7) return `${(n / 1e7).toFixed(1)} Cr`;
+    if (n >= 1e5) return `${(n / 1e5).toFixed(1)} L`;
+    return n.toLocaleString('en-IN') + ' Cr';
   };
 
   const fmtSize = (bytes) => {
@@ -120,10 +120,10 @@
     const fmtM = (v) => {
       const n = parseFloat(v);
       if (isNaN(n)) return '—';
-      if (Math.abs(n) >= 1e9) return `₹${(n / 1e9).toFixed(2)}B`;
-      if (Math.abs(n) >= 1e7) return `₹${(n / 1e7).toFixed(1)}Cr`;
-      if (Math.abs(n) >= 1e5) return `₹${(n / 1e5).toFixed(1)}L`;
-      return '₹' + n.toLocaleString('en-IN');
+      if (Math.abs(n) >= 1e9) return `₹${(n / 1e9).toFixed(2)} B`;
+      if (Math.abs(n) >= 1e7) return `₹${(n / 1e7).toFixed(1)} Cr`;
+      if (Math.abs(n) >= 1e5) return `₹${(n / 1e5).toFixed(1)} L`;
+      return '₹' + n.toLocaleString('en-IN') + ' Cr';
     };
     const fmtX = (v) => v !== null && v !== undefined ? parseFloat(v).toFixed(2) + 'x' : '—';
     const fmtPctVal = (v) => v !== null && v !== undefined ? (parseFloat(v) * 100).toFixed(1) + '%' : '—';

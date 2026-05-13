@@ -43,6 +43,10 @@ def investor_list(request):
             organization=org,
             commitments__scheme__fund__id__in=fund_ids,
         ).distinct()
+        # Narrow to a specific fund when requested (prevents cross-fund bleed)
+        fund_id = request.query_params.get('fund')
+        if fund_id:
+            qs = qs.filter(commitments__scheme__fund__id=fund_id).distinct()
         investor_type = request.query_params.get('investor_type')
         if investor_type:
             qs = qs.filter(investor_type=investor_type)
@@ -153,6 +157,9 @@ def commitment_list(request):
             investor__organization=org,
             scheme__fund__id__in=fund_ids,
         ).select_related('investor', 'scheme')
+        fund_id = request.query_params.get('fund')
+        if fund_id:
+            qs = qs.filter(scheme__fund_id=fund_id)
         scheme_id = request.query_params.get('scheme')
         if scheme_id:
             qs = qs.filter(scheme_id=scheme_id)
@@ -218,6 +225,9 @@ def capital_call_list(request):
             scheme__fund__organization=org,
             scheme__fund__id__in=fund_ids,
         ).select_related('scheme')
+        fund_id = request.query_params.get('fund')
+        if fund_id:
+            qs = qs.filter(scheme__fund_id=fund_id)
         scheme_id = request.query_params.get('scheme')
         if scheme_id:
             qs = qs.filter(scheme_id=scheme_id)
@@ -309,6 +319,9 @@ def distribution_list(request):
             scheme__fund__organization=org,
             scheme__fund__id__in=fund_ids,
         ).select_related('scheme')
+        fund_id = request.query_params.get('fund')
+        if fund_id:
+            qs = qs.filter(scheme__fund_id=fund_id)
         scheme_id = request.query_params.get('scheme')
         if scheme_id:
             qs = qs.filter(scheme_id=scheme_id)
@@ -403,6 +416,9 @@ def lp_capital_account_list(request):
         commitment_id = request.query_params.get('commitment')
         if commitment_id:
             qs = qs.filter(commitment_id=commitment_id)
+        fund_id = request.query_params.get('fund')
+        if fund_id:
+            qs = qs.filter(commitment__scheme__fund_id=fund_id)
         scheme_id = request.query_params.get('scheme')
         if scheme_id:
             qs = qs.filter(commitment__scheme_id=scheme_id)

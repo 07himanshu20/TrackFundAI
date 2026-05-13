@@ -131,6 +131,16 @@ class NAVRecord(models.Model):
         help_text='Difference if any — must be zero for clean AAR',
     )
 
+    # Gains (imported from NAV/Accounting sheet)
+    unrealized_gains = models.DecimalField(
+        max_digits=18, decimal_places=2, default=0,
+        help_text='Unrealized gains from portfolio revaluation',
+    )
+    realized_gains = models.DecimalField(
+        max_digits=18, decimal_places=2, default=0,
+        help_text='Realized gains from exits/distributions',
+    )
+
     # Approval
     approved_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,

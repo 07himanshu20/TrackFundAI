@@ -19,7 +19,7 @@ def get_accessible_fund_ids(user):
     - platform_admin: sees all funds in their org (no FundAccess filter)
     - Everyone else: only funds with active FundAccess records
     """
-    if user.role == 'platform_admin':
+    if user.role in ('platform_admin', 'gp_admin'):
         from funds.models import Fund
         return set(
             Fund.objects.filter(organization=user.organization)
@@ -50,7 +50,7 @@ def filter_funds_for_user(queryset, user):
 
     qs = queryset.filter(organization=org)
 
-    if user.role == 'platform_admin':
+    if user.role in ('platform_admin', 'gp_admin'):
         return qs
 
     fund_ids = get_accessible_fund_ids(user)
@@ -74,7 +74,7 @@ def filter_by_fund_access(queryset, user, fund_field='fund'):
     if not org:
         return queryset.none()
 
-    if user.role == 'platform_admin':
+    if user.role in ('platform_admin', 'gp_admin'):
         return queryset
 
     fund_ids = get_accessible_fund_ids(user)
@@ -84,7 +84,7 @@ def filter_by_fund_access(queryset, user, fund_field='fund'):
 
 def user_has_fund_access(user, fund):
     """Check if a specific user has active access to a specific fund."""
-    if user.role == 'platform_admin' and user.organization == fund.organization:
+    if user.role in ('platform_admin', 'gp_admin') and user.organization == fund.organization:
         return True
 
     now = timezone.now()

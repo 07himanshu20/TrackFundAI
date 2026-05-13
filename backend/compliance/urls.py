@@ -33,4 +33,15 @@ urlpatterns = [
     path('circulars/<uuid:circular_id>/', views.circular_detail, name='sebi-circular-detail'),
     path('circulars/<uuid:circular_id>/actions/', views.circular_action_list, name='circular-action-list'),
     path('circular-actions/<uuid:action_id>/', views.circular_action_detail, name='circular-action-detail'),
+
+    # Compliance 2.0 — Portfolio Company-Level
+    path('portfolio-heatmap/', views.portfolio_compliance_heatmap, name='portfolio-compliance-heatmap'),
+    path('portfolio/<uuid:company_id>/obligations/', views.portfolio_obligation_list, name='portfolio-obligation-list'),
+    path('portfolio/obligations/<uuid:obligation_id>/', views.portfolio_obligation_update, name='portfolio-obligation-update'),
+
+    # v5 — Escalation tree + combined score
+    path('escalations/', views.escalation_log_list, name='escalation-list'),
+    path('escalations/<uuid:escalation_id>/resolve/', views.resolve_escalation, name='escalation-resolve'),
+    path('escalations/scan/', views.run_escalation_scan, name='escalation-scan'),
+    path('funds/<uuid:fund_id>/score/', views.fund_compliance_score, name='fund-compliance-score'),
 ]

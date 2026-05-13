@@ -349,6 +349,22 @@ class EquityThresholdAlert(models.Model):
         help_text='Reference number of custodian notification',
     )
 
+    SEVERITY_CHOICES = [
+        ('urgent', 'URGENT — Breach >25%, immediate action required'),
+        ('high',   'HIGH — Breach >10%, action within 7 days'),
+        ('medium', 'MEDIUM — Approaching breach, monitor closely'),
+    ]
+    severity = models.CharField(
+        max_length=8,
+        choices=SEVERITY_CHOICES,
+        default='high',
+        help_text='Auto-classified by stake_percentage at breach time',
+    )
+    is_escalated = models.BooleanField(
+        default=False,
+        help_text='Whether this breach has been escalated up the chain',
+    )
+
     resolved = models.BooleanField(
         default=False,
         help_text='Whether the threshold has been resolved (e.g., stake reduced below 10%)',
@@ -364,8 +380,19 @@ class EquityThresholdAlert(models.Model):
             models.Index(fields=['custodian_notified']),
         ]
 
+    def save(self, *args, **kwargs):
+        # Auto-classify severity from stake_percentage
+        if self.stake_percentage is not None:
+            if self.stake_percentage > 25:
+                self.severity = 'urgent'
+            elif self.stake_percentage > 10:
+                self.severity = 'high'
+            else:
+                self.severity = 'medium'
+        super().save(*args, **kwargs)
+
     def __str__(self):
-        return f'{self.investment.company_name} — {self.stake_percentage}% ({self.breach_date})'
+        return f'{self.investment.company_name} — {self.stake_percentage}% ({self.breach_date}) [{self.severity.upper()}]'
 
 
 class ComplianceCalendar(models.Model):
@@ -753,3 +780,299 @@ class CircularAction(models.Model):
 
     def __str__(self):
         return f'{self.circular.circular_number} — {self.action_title}'
+
+
+# ═══════════════════════════════════════════════════════════════
+# Compliance 2.0 — Portfolio Company-Level Obligations (v5)
+# ═══════════════════════════════════════════════════════════════
+
+class PortfolioCompanyCompliance(models.Model):
+    """
+    Tracks a single compliance obligation for a specific portfolio company.
+
+    Covers: ROC/MCA, GST, Labour laws (PF/ESI/Factories Act), EPF deposits,
+    Board meetings, Statutory audit, Income tax (TDS/advance tax),
+    RERA, and sector-specific compliance.
+
+    Each obligation has a period, deadline, status (RAG), and composite score input.
+    """
+    OBLIGATION_TYPE_CHOICES = [
+        ('roc_annual_return',   'ROC/MCA Annual Return'),
+        ('gst_gstr3b',          'GST GSTR-3B Monthly'),
+        ('labour_pf_esi',       'Labour Laws — PF/ESI'),
+        ('labour_factories_act','Labour Laws — Factories Act'),
+        ('epf_monthly',         'EPF Monthly Deposit'),
+        ('board_meeting',       'Board Meeting Compliance'),
+        ('statutory_audit',     'Statutory Audit'),
+        ('income_tax_tds',      'Income Tax — TDS'),
+        ('income_tax_advance',  'Income Tax — Advance Tax'),
+        ('rera',                'RERA (Real Estate)'),
+        ('sector_specific',     'Sector-Specific Obligation'),
+        ('other',               'Other'),
+    ]
+    STATUS_CHOICES = [
+        ('compliant',  'Compliant'),
+        ('due',        'Due Soon'),
+        ('overdue',    'Overdue'),
+        ('filed',      'Filed'),
+        ('not_applicable', 'N/A'),
+    ]
+    # RAG status for heatmap
+    RAG_CHOICES = [
+        ('green',  'Green — Compliant'),
+        ('amber',  'Amber — Due/Minor Issues'),
+        ('red',    'Red — Overdue/Non-Compliant'),
+        ('grey',   'Grey — N/A'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    portfolio_company = models.ForeignKey(
+        'investments.PortfolioCompany',
+        on_delete=models.CASCADE,
+        related_name='compliance_obligations',
+    )
+    obligation_type = models.CharField(max_length=25, choices=OBLIGATION_TYPE_CHOICES)
+    obligation_name = models.CharField(
+        max_length=200,
+        help_text='e.g., "GST GSTR-3B — April 2025", "EPF Deposit — March 2025"',
+    )
+
+    # Period
+    period_start = models.DateField(null=True, blank=True)
+    period_end   = models.DateField(null=True, blank=True)
+    deadline     = models.DateField(help_text='Filing/deposit deadline')
+
+    # Status
+    status = models.CharField(max_length=15, choices=STATUS_CHOICES, default='due')
+    rag_status = models.CharField(max_length=6, choices=RAG_CHOICES, default='amber')
+
+    # Filing details
+    filed_at    = models.DateField(null=True, blank=True)
+    challan_no  = models.CharField(max_length=100, blank=True)
+    reference_no = models.CharField(max_length=100, blank=True)
+    penalty_amount = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0,
+        help_text='Penalty imposed for late filing (if any)',
+    )
+
+    # Tracking
+    notes = models.TextField(blank=True)
+    document = models.ForeignKey(
+        'documents.Document',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='compliance_obligations',
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['portfolio_company', 'deadline']
+        indexes = [
+            models.Index(fields=['portfolio_company', 'rag_status']),
+            models.Index(fields=['deadline', 'status']),
+        ]
+
+    def save(self, *args, **kwargs):
+        # Auto-compute RAG from status
+        if self.status == 'compliant' or self.status == 'filed':
+            self.rag_status = 'green'
+        elif self.status == 'overdue':
+            self.rag_status = 'red'
+        elif self.status == 'not_applicable':
+            self.rag_status = 'grey'
+        else:
+            self.rag_status = 'amber'
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f'{self.portfolio_company.name} — {self.obligation_name} ({self.rag_status.upper()})'
+
+
+class PortfolioComplianceScore(models.Model):
+    """
+    Composite compliance score (0-100) for a portfolio company as of a given date.
+    Computed from PortfolioCompanyCompliance obligations.
+
+    Score = (compliant_obligations / total_obligations) × 100
+    Capped by penalty amounts and overdue duration.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    portfolio_company = models.ForeignKey(
+        'investments.PortfolioCompany',
+        on_delete=models.CASCADE,
+        related_name='compliance_scores',
+    )
+    score_date = models.DateField()
+    compliance_score = models.DecimalField(
+        max_digits=5, decimal_places=2,
+        help_text='0 = fully non-compliant, 100 = fully compliant',
+    )
+    total_obligations = models.IntegerField(default=0)
+    compliant_count   = models.IntegerField(default=0)
+    overdue_count     = models.IntegerField(default=0)
+    amber_count       = models.IntegerField(default=0)
+
+    computed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-score_date']
+        unique_together = ('portfolio_company', 'score_date')
+
+    def __str__(self):
+        return f'{self.portfolio_company.name} — Compliance {self.compliance_score} @ {self.score_date}'
+
+
+class EscalationLog(models.Model):
+    """
+    Tracks each step in the compliance escalation chain:
+    Level 1 → GP Partner, Level 2 → CFO/Fund Accountant, Level 3 → Compliance Officer.
+    Auto-created by ComplianceEscalationService when a breach is detected.
+    """
+    ESCALATION_TYPE_CHOICES = [
+        ('equity_threshold_breach', 'Equity Threshold Breach'),
+        ('sebi_deadline_breach',    'SEBI Deadline Breach'),
+        ('ctr_overdue',             'CTR Overdue'),
+        ('aml_high_risk',           'AML High Risk Investor'),
+        ('fema_overdue',            'FEMA Filing Overdue'),
+        ('portfolio_non_compliant', 'Portfolio Company Non-Compliant'),
+        ('circular_action_overdue', 'Circular Action Overdue'),
+    ]
+    ROLE_CHOICES = [
+        ('gp_admin',           'GP Partner'),
+        ('fund_accountant',    'CFO / Fund Accountant'),
+        ('compliance_officer', 'Compliance Officer'),
+        ('platform_admin',     'Platform Admin'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        'accounts.Organization',
+        on_delete=models.CASCADE,
+        related_name='escalation_logs',
+    )
+    escalation_type = models.CharField(max_length=30, choices=ESCALATION_TYPE_CHOICES, default='equity_threshold_breach')
+    level = models.PositiveSmallIntegerField(help_text='1=GP Partner, 2=CFO, 3=Compliance Officer')
+    escalated_to_role = models.CharField(max_length=30, choices=ROLE_CHOICES)
+    message = models.TextField()
+    resolved = models.BooleanField(default=False)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolution_notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    # Links to trigger objects (at most one will be non-null)
+    equity_alert = models.ForeignKey(
+        EquityThresholdAlert,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='escalations',
+    )
+    sebi_report = models.ForeignKey(
+        SEBIReport,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='escalations',
+    )
+    circular_action = models.ForeignKey(
+        CircularAction,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='escalations',
+    )
+    escalated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='escalations_triggered',
+    )
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['organization', '-created_at'], name='esclog_org_created_idx'),
+            models.Index(fields=['resolved', 'escalation_type'], name='esclog_resolved_type_idx'),
+        ]
+
+    def __str__(self):
+        return f'L{self.level} {self.escalation_type} → {self.escalated_to_role} ({self.created_at:%Y-%m-%d})'
+
+
+class FundComplianceScore(models.Model):
+    """
+    Combined fund-level compliance score (0-100).
+    Weighted composite:
+      SEBI Filings   30% — QAR/AAR/CTR filing status
+      AML            20% — High/very-high risk investors, STRs
+      Equity Alerts  20% — Unresolved threshold breaches
+      Portfolio Cos  20% — Avg PortfolioComplianceScore across portfolio
+      Circulars      10% — Overdue circular action items
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    fund = models.ForeignKey(
+        'funds.Fund',
+        on_delete=models.CASCADE,
+        related_name='compliance_scores',
+    )
+    score_date = models.DateField()
+    sebi_filing_score       = models.DecimalField(max_digits=5, decimal_places=2, default=100)
+    aml_score               = models.DecimalField(max_digits=5, decimal_places=2, default=100)
+    equity_threshold_score  = models.DecimalField(max_digits=5, decimal_places=2, default=100)
+    portfolio_company_score = models.DecimalField(max_digits=5, decimal_places=2, default=100)
+    circular_action_score   = models.DecimalField(max_digits=5, decimal_places=2, default=100)
+    combined_score = models.DecimalField(
+        max_digits=5, decimal_places=2, default=100,
+        help_text='Weighted composite 0-100',
+    )
+    score_detail = models.JSONField(default=dict)
+    computed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-score_date']
+        unique_together = ('fund', 'score_date')
+
+    def __str__(self):
+        return f'{self.fund.name} — Compliance {self.combined_score} @ {self.score_date}'
+
+
+class FEMACompliance(models.Model):
+    """
+    FEMA / RBI compliance tracking for cross-border investments.
+    FC-GPR filings, APR (Annual Performance Report) submissions.
+    """
+    FORM_TYPE_CHOICES = [
+        ('fc_gpr',  'FC-GPR (Foreign Currency — Gross Provisional Return)'),
+        ('apr',     'APR (Annual Performance Report)'),
+        ('fc_trs',  'FC-TRS (Transfer of Shares)'),
+        ('llp_i',   'LLP-I (FDI in LLP)'),
+        ('llp_ii',  'LLP-II (Disinvestment from LLP)'),
+    ]
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('filed',   'Filed'),
+        ('accepted','Accepted'),
+        ('rejected','Rejected'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    investment = models.ForeignKey(
+        'investments.Investment',
+        on_delete=models.CASCADE,
+        related_name='fema_compliance',
+    )
+    form_type    = models.CharField(max_length=10, choices=FORM_TYPE_CHOICES)
+    filing_date  = models.DateField(null=True, blank=True)
+    due_date     = models.DateField(null=True, blank=True)
+    status       = models.CharField(max_length=10, choices=STATUS_CHOICES, default='pending')
+    rbi_arn      = models.CharField(max_length=50, blank=True, help_text='RBI Acknowledgement Number')
+    amount_usd   = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    notes        = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-due_date']
+
+    def __str__(self):
+        return f'{self.investment.company_name} — {self.get_form_type_display()} ({self.status})'

@@ -8,7 +8,7 @@ import logging
 from django.conf import settings
 from rest_framework.decorators import api_view, parser_classes, permission_classes
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 
@@ -225,3 +225,655 @@ def status_check(request):
         "filepath": os.path.basename(meta["filepath"]) if meta["filepath"] else None,
         "report_month": data.get("report_month") if data else None,
     })
+
+
+# ---------------------------------------------------------------------------
+# AI Insights — Portfolio Risk Heatmap + Full Gemini Analysis
+# ---------------------------------------------------------------------------
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def ai_insights(request):
+    """
+    GET /api/ai-insights/
+    Returns:
+      - heatmap: [{company, sector, risk_score, risk_tier, moic, irr_pct}] for visual heatmap
+      - full_analysis: Gemini markdown analysis of the entire portfolio
+      - sector_summary: [{sector, avg_moic, avg_irr, company_count, avg_risk}]
+    """
+    import json
+    import re
+    import google.generativeai as genai
+    from django.conf import settings
+    from accounts.fund_access_helpers import get_accessible_fund_ids
+    from investments.models import PortfolioCompany, Investment, Valuation
+    from riskscore.models import CompanyRiskScore
+    from collections import defaultdict
+
+    org = getattr(request, 'organization', None)
+    if not org:
+        try:
+            from accounts.models import FundAccess
+            fa = FundAccess.objects.filter(user=request.user, revoked_at__isnull=True).select_related('fund__organization').first()
+            if fa and fa.fund:
+                org = fa.fund.organization
+        except Exception:
+            pass
+    if not org:
+        try:
+            from accounts.models import FundAccess
+            fa = FundAccess.objects.filter(user=request.user).select_related('fund__organization').first()
+            if fa and fa.fund:
+                org = fa.fund.organization
+        except Exception:
+            pass
+    if not org:
+        return Response({'detail': 'No organization.'}, status=403)
+
+    fund_ids = get_accessible_fund_ids(request.user)
+    companies_qs = PortfolioCompany.objects.filter(organization=org, is_active=True)
+    if fund_ids:
+        companies_qs = companies_qs.filter(
+            investments__scheme__fund__id__in=fund_ids
+        ).distinct()
+
+    # Build heatmap data
+    heatmap = []
+    sector_data = defaultdict(lambda: {'moics': [], 'irrs': [], 'risks': [], 'count': 0})
+
+    for co in companies_qs[:60]:
+        inv = Investment.objects.filter(portfolio_company=co).order_by('-investment_date').first()
+        val = Valuation.objects.filter(investment__portfolio_company=co).order_by('-valuation_date').first()
+        risk = CompanyRiskScore.objects.filter(portfolio_company=co).order_by('-score_date').first()
+
+        moic = None
+        if inv and inv.total_invested and val and val.fair_value:
+            try:
+                moic = round(float(val.fair_value) / float(inv.total_invested), 2)
+            except Exception:
+                pass
+
+        irr_pct = float(inv.irr_pct) if inv and inv.irr_pct is not None else None
+        risk_score = float(risk.risk_score) if risk else 50.0
+        risk_tier = risk.risk_tier if risk else 'medium'
+        sector = co.sector or 'Other'
+
+        entry = {
+            'company_id': str(co.id),
+            'company_name': co.name,
+            'sector': sector,
+            'stage': inv.stage if inv else '—',
+            'moic': moic,
+            'irr_pct': irr_pct,
+            'risk_score': risk_score,
+            'risk_tier': risk_tier,
+        }
+        heatmap.append(entry)
+
+        sd = sector_data[sector]
+        sd['count'] += 1
+        if moic is not None: sd['moics'].append(moic)
+        if irr_pct is not None: sd['irrs'].append(irr_pct)
+        sd['risks'].append(risk_score)
+
+    # Sector summary
+    sector_summary = []
+    for sector, sd in sector_data.items():
+        sector_summary.append({
+            'sector': sector,
+            'company_count': sd['count'],
+            'avg_moic': round(sum(sd['moics']) / len(sd['moics']), 2) if sd['moics'] else None,
+            'avg_irr': round(sum(sd['irrs']) / len(sd['irrs']), 1) if sd['irrs'] else None,
+            'avg_risk': round(sum(sd['risks']) / len(sd['risks']), 0) if sd['risks'] else None,
+        })
+    sector_summary.sort(key=lambda x: x['avg_moic'] or 0, reverse=True)
+
+    # Full Gemini portfolio analysis
+    full_analysis = ''
+    try:
+        api_key = getattr(settings, 'GEMINI_API_KEY', '')
+        if api_key and heatmap:
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel(getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash'))
+
+            portfolio_summary = json.dumps({
+                'total_companies': len(heatmap),
+                'sector_summary': sector_summary,
+                'top_performers': sorted(
+                    [h for h in heatmap if h['moic'] is not None],
+                    key=lambda x: x['moic'], reverse=True
+                )[:5],
+                'high_risk': [h for h in heatmap if h['risk_tier'] == 'high'][:5],
+            }, default=str)
+
+            prompt = f"""You are a senior CA/CFO and fund analyst for an Indian AIF with 20+ years experience.
+Write a comprehensive portfolio analysis (400-500 words) in professional markdown format.
+
+Portfolio data:
+{portfolio_summary}
+
+Structure your analysis with these sections:
+## Portfolio Overview
+## Sector Analysis
+## Top Performers
+## Risk Assessment
+## Key Recommendations
+
+Be specific about numbers, sector trends, and actionable recommendations.
+Use Indian financial context (₹ Crore, SEBI, AIF categories, Indian market dynamics)."""
+
+            response = model.generate_content(prompt)
+            full_analysis = response.text.strip()
+    except Exception as e:
+        logger.error('AI Insights Gemini error: %s', e)
+        full_analysis = _build_rule_based_analysis(heatmap, sector_summary)
+
+    return Response({
+        'heatmap': heatmap,
+        'sector_summary': sector_summary,
+        'full_analysis': full_analysis,
+        'total_companies': len(heatmap),
+    })
+
+
+def _build_rule_based_analysis(heatmap, sector_summary):
+    """Fallback text analysis when Gemini is unavailable."""
+    total = len(heatmap)
+    high_risk = [h for h in heatmap if h['risk_tier'] == 'high']
+    performers = [h for h in heatmap if h.get('moic') and h['moic'] >= 2.0]
+    moics = [h['moic'] for h in heatmap if h['moic'] is not None]
+    avg_moic = round(sum(moics) / len(moics), 2) if moics else 0
+
+    top_sector = max(sector_summary, key=lambda s: s['avg_moic'] or 0) if sector_summary else {}
+
+    return f"""## Portfolio Overview
+Portfolio comprises **{total} active companies** with an average MOIC of **{avg_moic}x**.
+{len(performers)} companies are outperforming (MOIC ≥ 2.0x) and {len(high_risk)} are flagged as high-risk.
+
+## Sector Analysis
+Top performing sector: **{top_sector.get('sector', 'N/A')}**
+(avg MOIC: {top_sector.get('avg_moic', '—')}x, {top_sector.get('company_count', 0)} companies).
+
+## Risk Assessment
+{len(high_risk)} high-risk companies require immediate attention.
+Run individual risk score computation for detailed signal breakdown.
+
+## Key Recommendations
+- Compute risk scores for all companies to enable full AI analysis
+- Review high-risk companies for portfolio action (write-down, bridge, exit)
+- Import KPI data (revenue, EBITDA, cash) to improve signal accuracy"""
+
+
+# ---------------------------------------------------------------------------
+# AI Predictions — Gemini-powered exit probability + revenue forecasting
+# ---------------------------------------------------------------------------
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def ai_predictions(request):
+    """
+    GET /api/ai-predictions/
+    Uses Gemini to analyse all portfolio company data and return:
+      - exit_probabilities per company (12-month horizon)
+      - revenue_forecast (6-month aggregate)
+      - portfolio_insights (risk score, outperformers, momentum)
+    """
+    import json
+    import re
+    import google.generativeai as genai
+    from django.conf import settings
+    from accounts.fund_access_helpers import get_accessible_fund_ids
+    from investments.models import PortfolioCompany, Investment, Valuation
+    from riskscore.models import CompanyRiskScore
+
+    org = getattr(request, 'organization', None)
+    if not org:
+        # Fallback: resolve org via FundAccess (revoked_at__isnull=True for active access)
+        try:
+            from accounts.models import FundAccess
+            fa = FundAccess.objects.filter(user=request.user, revoked_at__isnull=True).select_related('fund__organization').first()
+            if fa and fa.fund:
+                org = fa.fund.organization
+        except Exception:
+            pass
+    if not org:
+        # Last resort: any fund this user has ever had access to
+        try:
+            from accounts.models import FundAccess
+            fa = FundAccess.objects.filter(user=request.user).select_related('fund__organization').first()
+            if fa and fa.fund:
+                org = fa.fund.organization
+        except Exception:
+            pass
+
+    if not org:
+        return Response({'detail': 'No organization found for user.'}, status=403)
+
+    fund_ids = get_accessible_fund_ids(request.user)
+
+    # Collect portfolio company data — include all org companies even without investments
+    companies_qs = PortfolioCompany.objects.filter(organization=org, is_active=True)
+    if fund_ids:
+        companies_qs = companies_qs.filter(
+            investments__scheme__fund__id__in=fund_ids
+        ).distinct()
+    if not companies_qs.exists():
+        # Fallback: all active companies in org regardless of fund access
+        companies_qs = PortfolioCompany.objects.filter(organization=org, is_active=True)
+
+    company_data = []
+    for co in companies_qs[:50]:  # cap at 50 to keep prompt manageable
+        inv = Investment.objects.filter(portfolio_company=co).order_by('-investment_date').first()
+        val = Valuation.objects.filter(investment__portfolio_company=co).order_by('-valuation_date').first()
+        risk = CompanyRiskScore.objects.filter(portfolio_company=co).order_by('-score_date').first()
+
+        moic = None
+        if inv and inv.total_invested and val and val.fair_value:
+            try:
+                moic = round(float(val.fair_value) / float(inv.total_invested), 2)
+            except Exception:
+                pass
+
+        company_data.append({
+            'id': str(co.id),
+            'name': co.name,
+            'sector': co.sector or 'Unknown',
+            'stage': inv.stage if inv else 'Unknown',
+            'moic': moic,
+            'irr_pct': float(inv.irr_pct) if inv and inv.irr_pct is not None else None,
+            'cost_inr_cr': float(inv.total_invested) if inv and inv.total_invested else None,
+            'fv_inr_cr': float(val.fair_value) if val and val.fair_value else None,
+            'risk_score': float(risk.risk_score) if risk else None,
+            'risk_tier': risk.risk_tier if risk else None,
+        })
+
+    if not company_data:
+        return Response({
+            'exit_probabilities': [],
+            'revenue_forecast': {'months': [], 'values': [], 'growth_cagr_pct': 0},
+            'portfolio_insights': {'avg_risk_score': 0, 'outperformers_count': 0, 'underperformers_count': 0,
+                                   'sector_alpha_tech_pct': 0, 'portfolio_momentum': 'Unknown', 'rev_growth_cagr': 0},
+            'peer_benchmarking': [],
+        })
+
+    # Build Gemini prompt
+    companies_json = json.dumps(company_data, default=str)
+    prompt = f"""You are a senior fund analyst for Indian AIFs with 20+ years of PE/VC experience.
+Analyze this portfolio and return predictions as EXACT JSON only (no markdown, no code fences, no explanation).
+
+Portfolio companies:
+{companies_json}
+
+Return this EXACT JSON structure:
+{{
+  "exit_probabilities": [
+    {{
+      "company_id": "<id>",
+      "company_name": "<name>",
+      "stage": "<stage>",
+      "moic": <float or null>,
+      "exit_prob_12m": <integer 0-100>,
+      "expected_exit_type": "<IPO|Strategic Sale|Secondary|Write-off>",
+      "reasoning": "<1 sentence>"
+    }}
+  ],
+  "revenue_forecast": {{
+    "months": ["Nov-25","Dec-25","Jan-26","Feb-26","Mar-26","Jun-26"],
+    "values": [<6 floats in ₹Cr consolidated portfolio>],
+    "growth_cagr_pct": <float>,
+    "confidence": "<high|medium|low>",
+    "methodology": "<brief note>"
+  }},
+  "portfolio_insights": {{
+    "avg_risk_score": <integer 1-100>,
+    "outperformers_count": <integer — IRR > 25%>,
+    "underperformers_count": <integer — IRR < 5% or risk_tier high>,
+    "rev_growth_cagr": <float — 6-month annualised revenue CAGR %>,
+    "sector_alpha_tech_pct": <float — tech sector alpha vs benchmark %>,
+    "portfolio_momentum": "<Strong ↑|Moderate ↑|Stable|Weak ↓|Declining ↓>"
+  }},
+  "peer_benchmarking": [
+    {{
+      "company_name": "<name>",
+      "sector": "<sector>",
+      "moic": <float>,
+      "irr_pct": <float>,
+      "benchmark_moic": <float — typical for stage/sector>,
+      "benchmark_irr": <float>,
+      "outperforming": <true|false>
+    }}
+  ]
+}}
+
+Rules:
+- MOIC > 3.0x + Pre-IPO/Series D+: exit_prob_12m 40-65
+- MOIC 2.0-3.0x + Series C: exit_prob_12m 20-40
+- MOIC < 1.0x or no data: exit_prob_12m 5-20
+- IRR > 25%: outperformer; IRR < 5% or risk_tier=high: underperformer
+- FinTech/SaaS exit faster; Healthcare/CleanTech slower
+- Revenue forecast should show a realistic growth curve based on MOIC trends
+- peer_benchmarking: include top 8 companies by MOIC
+- Return valid JSON only"""
+
+    try:
+        api_key = getattr(settings, 'GEMINI_API_KEY', '')
+        if not api_key:
+            raise ValueError('GEMINI_API_KEY not set')
+        genai.configure(api_key=api_key)
+        model_name = getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash')
+        model = genai.GenerativeModel(model_name=model_name)
+        response = model.generate_content(prompt)
+        raw = response.text.strip()
+
+        # Strip markdown code fences if Gemini wraps in ```json ... ```
+        raw = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.MULTILINE)
+        raw = re.sub(r'```\s*$', '', raw, flags=re.MULTILINE).strip()
+
+        predictions = json.loads(raw)
+    except Exception as e:
+        logger.error('Gemini predictions error: %s', e)
+        # Fallback: derive basic values from data without AI
+        predictions = _fallback_predictions(company_data)
+
+    return Response(predictions)
+
+
+def _fallback_predictions(company_data):
+    """Rule-based fallback when Gemini is unavailable."""
+    import datetime
+    exit_probs = []
+    outperformers = 0
+    underperformers = 0
+
+    for co in company_data:
+        moic = co.get('moic') or 1.0
+        irr = co.get('irr_pct') or 0
+        stage = (co.get('stage') or '').lower()
+        risk_tier = co.get('risk_tier') or 'medium'
+
+        if moic >= 3.0 and ('pre-ipo' in stage or 'series d' in stage or 'buyout' in stage):
+            prob = 55
+            exit_type = 'IPO'
+        elif moic >= 2.0:
+            prob = 30
+            exit_type = 'Strategic Sale'
+        elif moic < 1.0 or risk_tier == 'high':
+            prob = 10
+            exit_type = 'Write-off'
+        else:
+            prob = 20
+            exit_type = 'Secondary'
+
+        if irr and irr > 25:
+            outperformers += 1
+        if irr is not None and (irr < 5 or risk_tier == 'high'):
+            underperformers += 1
+
+        exit_probs.append({
+            'company_id': co['id'],
+            'company_name': co['name'],
+            'stage': co.get('stage', '—'),
+            'moic': moic,
+            'exit_prob_12m': prob,
+            'expected_exit_type': exit_type,
+            'reasoning': 'Rule-based estimate (AI unavailable)',
+        })
+
+    # Simple revenue forecast: flat growth
+    today = datetime.date.today()
+    months = []
+    values = []
+    base = sum(co.get('fv_inr_cr') or 0 for co in company_data) * 0.15
+    for i in range(6):
+        m = today.replace(day=1)
+        import calendar
+        days = calendar.monthrange(m.year, m.month)[1]
+        future = today.replace(day=1)
+        # advance i months
+        month_num = (today.month + i - 1) % 12 + 1
+        year_num = today.year + (today.month + i - 1) // 12
+        months.append(f"{datetime.date(year_num, month_num, 1).strftime('%b-%y')}")
+        values.append(round(base * (1 + 0.015 * i), 1))
+
+    risk_scores = [co['risk_score'] for co in company_data if co.get('risk_score')]
+    avg_risk = round(sum(risk_scores) / len(risk_scores)) if risk_scores else 68
+
+    peer = [
+        {
+            'company_name': co['name'],
+            'sector': co.get('sector', '—'),
+            'moic': co.get('moic') or 1.0,
+            'irr_pct': co.get('irr_pct') or 0,
+            'benchmark_moic': 2.0,
+            'benchmark_irr': 18.0,
+            'outperforming': (co.get('moic') or 0) > 2.0,
+        }
+        for co in sorted(company_data, key=lambda x: x.get('moic') or 0, reverse=True)[:8]
+    ]
+
+    return {
+        'exit_probabilities': exit_probs,
+        'revenue_forecast': {
+            'months': months,
+            'values': values,
+            'growth_cagr_pct': 15.0,
+            'confidence': 'low',
+            'methodology': 'Rule-based fallback',
+        },
+        'portfolio_insights': {
+            'avg_risk_score': avg_risk,
+            'outperformers_count': outperformers,
+            'underperformers_count': underperformers,
+            'rev_growth_cagr': 15.0,
+            'sector_alpha_tech_pct': 3.2,
+            'portfolio_momentum': 'Moderate ↑',
+        },
+        'peer_benchmarking': peer,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Report Generation — Fund-Level and Company-Level MIS reports
+# ---------------------------------------------------------------------------
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def generate_mis_report(request):
+    """
+    POST /api/generate-report/
+    Body: { "report_type": "monthly_nav" | "quarterly_lp" | "valuation_cert" |
+                           "capital_account" | "annual_fund" | "waterfall_carry" |
+                           "pl_mis" | "balance_sheet" | "cash_flow" | "bva" |
+                           "saas_kpi" | "sector_kpi",
+            "fund_id": "<uuid>",
+            "scheme_id": "<uuid>" (optional) }
+    Returns: { "report_type": ..., "title": ..., "content": [...rows], "generated_at": ... }
+    """
+    import json
+    import re
+    import datetime
+    import google.generativeai as genai
+    from django.conf import settings
+
+    org = getattr(request, 'organization', None)
+    if not org and request.user and request.user.is_authenticated:
+        from accounts.models import Organization
+        org = Organization.objects.filter(users=request.user).first()
+
+    if not org:
+        return Response({'detail': 'No organization.'}, status=403)
+
+    report_type = request.data.get('report_type', '')
+    fund_id = request.data.get('fund_id')
+
+    REPORT_META = {
+        'monthly_nav':     'Monthly NAV Report',
+        'quarterly_lp':    'Quarterly LP Letter',
+        'valuation_cert':  'Valuation Certification Report',
+        'capital_account': 'Capital Account Statement',
+        'annual_fund':     'Annual Fund Report',
+        'waterfall_carry': 'Waterfall & Carry Schedule',
+        'pl_mis':          'P&L (Monthly MIS)',
+        'balance_sheet':   'Balance Sheet Snapshot',
+        'cash_flow':       'Cash Flow Statement',
+        'bva':             'Budget vs Actual',
+        'saas_kpi':        'SaaS KPI Report (Tech)',
+        'sector_kpi':      'Sector KPI Dashboard',
+    }
+
+    title = REPORT_META.get(report_type, 'Report')
+
+    # Collect relevant data for the report
+    context_data = _collect_report_data(org, fund_id, report_type)
+
+    prompt = f"""You are a CA/CFO with 20+ years of Indian AIF fund reporting experience.
+Generate a "{title}" report for this fund in EXACT JSON only (no markdown, no code fences).
+
+Fund data:
+{json.dumps(context_data, default=str)}
+
+Return JSON:
+{{
+  "title": "{title}",
+  "period": "<e.g. Apr 2025 – Mar 2026>",
+  "summary": "<2-3 sentence executive summary>",
+  "sections": [
+    {{
+      "heading": "<section heading>",
+      "rows": [
+        {{"label": "<metric>", "value": "<formatted value>", "note": "<optional note>"}}
+      ]
+    }}
+  ],
+  "highlights": ["<bullet 1>", "<bullet 2>", "<bullet 3>"],
+  "risk_flags": ["<risk 1 if any>"]
+}}"""
+
+    try:
+        api_key = getattr(settings, 'GEMINI_API_KEY', '')
+        if not api_key:
+            raise ValueError('GEMINI_API_KEY not set')
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash'))
+        response = model.generate_content(prompt)
+        raw = response.text.strip()
+        raw = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.MULTILINE)
+        raw = re.sub(r'```\s*$', '', raw, flags=re.MULTILINE).strip()
+        report_content = json.loads(raw)
+    except Exception as e:
+        logger.error('Report generation error: %s', e)
+        report_content = {
+            'title': title,
+            'period': f"FY {datetime.date.today().year}",
+            'summary': f'{title} could not be generated — check AI configuration.',
+            'sections': [],
+            'highlights': [],
+            'risk_flags': [],
+        }
+
+    return Response({
+        'report_type': report_type,
+        'generated_at': datetime.datetime.now().isoformat(),
+        **report_content,
+    })
+
+
+def _collect_report_data(org, fund_id, report_type):
+    """Collect relevant DB data for a given report type."""
+    data = {'fund_id': str(fund_id) if fund_id else None}
+
+    try:
+        from investments.models import PortfolioCompany, Investment, Valuation
+        from accounting.models import NAVRecord, CarriedInterest, ManagementFeeSchedule
+        from lp.models import Investor, CapitalCall, Distribution
+        from mis_consolidation.models import BudgetVsActual, ConsolidatedMIS
+
+        cos = PortfolioCompany.objects.filter(organization=org, is_active=True)
+        data['company_count'] = cos.count()
+        data['companies'] = list(cos.values('name', 'sector')[:20])
+
+        if report_type in ('monthly_nav', 'annual_fund', 'waterfall_carry'):
+            navs = NAVRecord.objects.filter(
+                scheme__fund__organization=org
+            ).order_by('-nav_date')[:12]
+            data['nav_records'] = [
+                {
+                    'date': str(n.nav_date),
+                    'total_nav': float(n.total_nav),
+                    'nav_per_unit': float(n.nav_per_unit),
+                    'total_units': float(n.total_units_outstanding),
+                    'mgmt_fee': float(n.management_fee_payable),
+                }
+                for n in navs
+            ]
+
+        if report_type == 'waterfall_carry':
+            carries = CarriedInterest.objects.filter(
+                scheme__fund__organization=org
+            ).order_by('-calculation_date')[:6]
+            data['carried_interest'] = [
+                {
+                    'date': str(c.calculation_date),
+                    'carry_base': float(c.carry_base),
+                    'carry_gross': float(c.carry_amount_gross),
+                    'carry_net': float(c.carry_amount_net),
+                    'clawback': float(c.gp_clawback_provision),
+                }
+                for c in carries
+            ]
+
+        if report_type in ('quarterly_lp', 'capital_account'):
+            calls = CapitalCall.objects.filter(scheme__fund__organization=org)[:20]
+            data['capital_calls'] = [
+                {
+                    'call_number': c.call_number,
+                    'date': str(c.call_date) if c.call_date else None,
+                    'amount': float(c.total_amount_inr),
+                    'status': c.status,
+                }
+                for c in calls
+            ]
+            dists = Distribution.objects.filter(scheme__fund__organization=org)[:20]
+            data['distributions'] = [
+                {
+                    'date': str(d.distribution_date) if d.distribution_date else None,
+                    'amount': float(d.amount_inr),
+                    'type': d.distribution_type,
+                }
+                for d in dists
+            ]
+
+        if report_type in ('pl_mis', 'bva', 'balance_sheet', 'cash_flow'):
+            bva = BudgetVsActual.objects.filter(
+                portfolio_company__organization=org
+            ).order_by('-period_year', '-period_month')[:40]
+            data['bva_records'] = [
+                {
+                    'company': b.portfolio_company.name,
+                    'line_item': b.line_item,
+                    'budget': float(b.budget_inr) if b.budget_inr else None,
+                    'actual': float(b.actual_inr) if b.actual_inr else None,
+                    'variance_pct': float(b.variance_pct) if b.variance_pct else None,
+                    'period': f"{b.period_year}-{b.period_month or 'Q'}",
+                }
+                for b in bva
+            ]
+
+        if report_type in ('valuation_cert', 'annual_fund'):
+            vals = Valuation.objects.filter(
+                investment__portfolio_company__organization=org
+            ).order_by('-valuation_date')[:20]
+            data['valuations'] = [
+                {
+                    'company': v.investment.portfolio_company.name,
+                    'date': str(v.valuation_date),
+                    'fair_value': float(v.fair_value),
+                    'method': v.methodology,
+                }
+                for v in vals
+            ]
+
+    except Exception as e:
+        logger.error('Report data collection error: %s', e)
+
+    return data

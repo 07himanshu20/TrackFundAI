@@ -8,3 +8,28 @@ pandas==2.2.3
 google-generativeai==0.8.3
 python-dotenv==1.0.1
 Pillow==10.4.0
+
+# Async task queue
+celery==5.3.6
+redis==5.0.1
+django-celery-beat==2.6.0
+django-celery-results==2.5.1
+
+# PDF generation and parsing
+reportlab==4.2.2
+pdfplumber==0.11.0
+
+# MFA
+pyotp==2.9.0
+qrcode==7.4.2
+
+# ML / Risk scoring
+scikit-learn==1.4.2
+xgboost==2.0.3
+numpy==1.26.4
+
+# Email ingestion
+imapclient==3.0.1
+
+# Excel export
+xlsxwriter==3.2.0

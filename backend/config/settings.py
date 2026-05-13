@@ -25,6 +25,8 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework_simplejwt',
     'corsheaders',
+    'django_celery_beat',
+    'django_celery_results',
     'accounts',
     'funds',
     'documents',
@@ -36,6 +38,16 @@ INSTALLED_APPS = [
     'compliance',
     'dataimport',
     'api',
+    'emailingestion',
+    'marketdata',
+    'reporting',
+    'riskscore',
+    'ic_workflow',
+    'fundclose',
+    'tds',
+    'mis_consolidation',
+    'marketresearch',
+    'chatbot',
 ]
 
 AUTH_USER_MODEL = 'accounts.User'
@@ -53,7 +65,7 @@ REST_FRAMEWORK = {
 }
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(hours=2),
+    'ACCESS_TOKEN_LIFETIME': timedelta(hours=8),   # v5: 8h (was 2h)
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': False,
@@ -134,3 +146,44 @@ LOGGING = {
     'handlers': {'console': {'class': 'logging.StreamHandler'}},
     'root': {'handlers': ['console'], 'level': 'INFO'},
 }
+
+# -- Celery Configuration --
+REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+CELERY_BROKER_URL = REDIS_URL
+CELERY_RESULT_BACKEND = 'django-db'
+CELERY_CACHE_BACKEND = 'django-cache'
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = 'Asia/Kolkata'
+CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
+
+# -- Email Ingestion --
+MIS_EMAIL_HOST = os.getenv('MIS_EMAIL_HOST', 'imap.gmail.com')
+MIS_EMAIL_PORT = int(os.getenv('MIS_EMAIL_PORT', '993'))
+MIS_EMAIL_USER = os.getenv('MIS_EMAIL_USER', '')
+MIS_EMAIL_PASSWORD = os.getenv('MIS_EMAIL_PASSWORD', '')
+MIS_EMAIL_FOLDER = os.getenv('MIS_EMAIL_FOLDER', 'INBOX')
+
+# -- Market Data (BSE/NSE) --
+BSE_API_KEY = os.getenv('BSE_API_KEY', '')
+NSE_API_KEY = os.getenv('NSE_API_KEY', '')
+BLOOMBERG_API_KEY = os.getenv('BLOOMBERG_API_KEY', '')
+ALPHA_VANTAGE_API_KEY = os.getenv('ALPHA_VANTAGE_API_KEY', '')
+
+# -- MFA --
+MFA_SMS_PROVIDER = os.getenv('MFA_SMS_PROVIDER', 'msg91')  # msg91 / fast2sms
+MSG91_AUTH_KEY = os.getenv('MSG91_AUTH_KEY', '')
+FAST2SMS_API_KEY = os.getenv('FAST2SMS_API_KEY', '')
+
+# -- SSO (stub placeholders for Google/Microsoft OAuth) --
+GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID', '')
+GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET', '')
+MICROSOFT_CLIENT_ID = os.getenv('MICROSOFT_CLIENT_ID', '')
+MICROSOFT_CLIENT_SECRET = os.getenv('MICROSOFT_CLIENT_SECRET', '')
+
+# -- Market Research / AI --
+MARKET_RESEARCH_AI_ENABLED = os.getenv('MARKET_RESEARCH_AI_ENABLED', 'True') == 'True'
+
+# -- Export Engine --
+EXPORT_BASE_URL = os.getenv('EXPORT_BASE_URL', 'http://localhost:8000')

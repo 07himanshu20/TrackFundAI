@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from .models import (
     PortfolioCompany, Investment, InvestmentTranche, Valuation,
-    KPIDefinition, PortfolioKPI, ExitEvent, BoardMeeting,
+    KPIDefinition, PortfolioKPI, CompanyFinancials, ExitEvent, BoardMeeting,
 )
 
 
@@ -22,10 +22,11 @@ class PortfolioCompanySerializer(serializers.ModelSerializer):
 
 
 class PortfolioCompanyListSerializer(serializers.ModelSerializer):
-    """Lightweight serializer for dropdowns."""
+    """Lightweight serializer for dropdowns and portfolio lists."""
     class Meta:
         model = PortfolioCompany
-        fields = ['id', 'name', 'sector', 'headquarters_city', 'is_active']
+        fields = ['id', 'name', 'sector', 'sub_sector', 'headquarters_city',
+                  'is_active', 'is_quoted', 'listing_exchange']
 
 
 # ── Investment & Tranche ─────���───────────────────────────────
@@ -68,7 +69,7 @@ class InvestmentListSerializer(serializers.ModelSerializer):
             'exceeds_10pct_threshold', 'threshold_breach_date',
             'total_invested', 'investment_date',
             'currency', 'status', 'status_display',
-            'sector', 'board_seat', 'is_lead_investor',
+            'sector', 'stage', 'irr_pct', 'board_seat', 'is_lead_investor',
             'tranche_count', 'latest_valuation',
             'created_at',
         ]
@@ -256,7 +257,22 @@ class ExitEventCreateSerializer(serializers.ModelSerializer):
         ]
 
 
-# ── Board Meeting ─────���──────────────────────────────────────
+# ── Company Financials (Burn & Runway) ───────────────────────
+
+class CompanyFinancialsSerializer(serializers.ModelSerializer):
+    company_name = serializers.CharField(source='investment.company_name', read_only=True)
+
+    class Meta:
+        model = CompanyFinancials
+        fields = [
+            'id', 'investment', 'portfolio_company', 'company_name',
+            'period', 'gross_burn', 'net_burn', 'cash_balance', 'runway_months',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+# ── Board Meeting ──────────────────────────────────────────────
 
 class BoardMeetingSerializer(serializers.ModelSerializer):
     class Meta:

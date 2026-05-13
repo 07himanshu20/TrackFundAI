@@ -13,6 +13,11 @@ urlpatterns = [
     path("chat/",            views.chat,            name="chat"),
     path("upload-mis/",      views.upload_mis,      name="upload_mis"),
 
+    # --- AI Insights + Predictions + MIS Report Generation ---
+    path("ai-insights/",     views.ai_insights,         name="ai_insights"),
+    path("ai-predictions/",  views.ai_predictions,      name="ai_predictions"),
+    path("generate-report/", views.generate_mis_report, name="generate_mis_report"),
+
     # --- New hierarchical portfolio endpoints ---
     path("portfolio/",                              portfolio_views.portfolio_root,      name="portfolio_root"),
     path("portfolio/compare/",                      portfolio_views.portfolio_compare,   name="portfolio_compare"),

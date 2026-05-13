@@ -60,6 +60,19 @@ urlpatterns = [
     path('investments/<uuid:investment_id>/exit-scenarios/',
          views.exit_scenario_list, name='exit-scenario-list'),
 
+    # ── Fund-Level Portfolio Analytics ───────────────────────
+    path('portfolio/burn-runway/',    views.portfolio_burn_runway,     name='portfolio-burn-runway'),
+    path('portfolio/exits/',          views.portfolio_exits_summary,   name='portfolio-exits'),
+    path('portfolio/kpis/',           views.portfolio_kpis_summary,    name='portfolio-kpis'),
+    path('portfolio/saas-metrics/',   views.portfolio_saas_metrics,    name='portfolio-saas-metrics'),
+    path('portfolio/quoted-unquoted/', views.portfolio_quoted_unquoted, name='portfolio-quoted-unquoted'),
+    path('portfolio/investments/',    views.portfolio_investments_list,    name='portfolio-investments-list'),
+    path('portfolio/valuations/',     views.portfolio_valuations_list,     name='portfolio-valuations-list'),
+    path('portfolio/kpi-tracking/',   views.portfolio_kpi_tracking,        name='portfolio-kpi-tracking'),
+    path('portfolio/exit-scenarios/', views.portfolio_exit_scenarios_list, name='portfolio-exit-scenarios-list'),
+    path('portfolio/board-meetings/', views.portfolio_board_meetings_list, name='portfolio-board-meetings-list'),
+    path('portfolio/avg-holding/',    views.portfolio_avg_holding,         name='portfolio-avg-holding'),
+
     # ── Portfolio Companies ──────────────────────────────────
     # GET/POST /api/portfolio-companies/
     path('portfolio-companies/',
@@ -82,4 +95,12 @@ urlpatterns = [
     # POST /api/schemes/{id}/board-pack/generate/
     path('schemes/<uuid:scheme_id>/board-pack/generate/',
          views.board_pack_generate, name='board-pack-generate'),
+
+    # ── Exit Signal Engine (v5 AI Analytics) ─────────────────
+    path('portfolio-companies/<uuid:company_id>/exit-signal/',
+         views.exit_signal_view, name='exit-signal'),
+
+    # ── Feature Engineering / Risk Re-compute ─────────────────
+    path('portfolio-companies/<uuid:company_id>/features/',
+         views.company_features_view, name='company-features'),
 ]

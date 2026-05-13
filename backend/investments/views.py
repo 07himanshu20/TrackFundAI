@@ -684,6 +684,708 @@ def board_pack_generate(request, scheme_id):
 
 
 # ═══════════════════════════════════════════════════════════════
+# PORTFOLIO FUND-LEVEL ANALYTICS (Burn, Exits, KPIs, SaaS, Quoted)
+# ═══════════════════════════════════════════════════════════════
+
+@api_view(['GET'])
+@permission_classes([IsGPUser])
+def portfolio_burn_runway(request):
+    """
+    GET /api/portfolio/burn-runway/?fund=<id>
+    Returns latest burn/cash/runway per company for the selected fund.
+
+    Primary source: CompanyFinancials (if populated from a dedicated burn sheet).
+    Fallback: derives burn metrics from BudgetVsActual (P&L import) when no
+    CompanyFinancials records exist:
+      gross_burn  = latest total_opex (total operating expenses per month)
+      net_burn    = max(0, -EBITDA) i.e. only when EBITDA is negative (losing cash)
+      cash_balance = latest cash_and_equivalents from Balance Sheet import
+      runway_months = cash_balance / gross_burn (if gross_burn > 0)
+    """
+    from decimal import Decimal
+    from django.db.models import Max
+    from .models import CompanyFinancials
+
+    org = request.organization
+    if not org:
+        return Response({'detail': 'No organization.'}, status=403)
+
+    fund_id = request.query_params.get('fund')
+    qs = CompanyFinancials.objects.filter(
+        investment__scheme__fund__organization=org,
+    ).select_related('investment', 'portfolio_company')
+    if fund_id:
+        qs = qs.filter(investment__scheme__fund__id=fund_id)
+
+    # Get latest period per investment
+    latest_per_inv = {}
+    for cf in qs.order_by('investment_id', '-period'):
+        inv_id = str(cf.investment_id)
+        if inv_id not in latest_per_inv:
+            latest_per_inv[inv_id] = cf
+
+    companies = []
+    total_cash = Decimal('0')
+    total_gross = Decimal('0')
+    total_net = Decimal('0')
+    total_runway = Decimal('0')
+    runway_count = 0
+
+    if latest_per_inv:
+        for cf in latest_per_inv.values():
+            row = {
+                'company_name': cf.investment.company_name,
+                'period': str(cf.period),
+                'gross_burn': float(cf.gross_burn) if cf.gross_burn is not None else None,
+                'net_burn': float(cf.net_burn) if cf.net_burn is not None else None,
+                'cash_balance': float(cf.cash_balance) if cf.cash_balance is not None else None,
+                'runway_months': float(cf.runway_months) if cf.runway_months is not None else None,
+            }
+            companies.append(row)
+            if cf.gross_burn:
+                total_gross += cf.gross_burn
+            if cf.net_burn:
+                total_net += cf.net_burn
+            if cf.cash_balance:
+                total_cash += cf.cash_balance
+            if cf.runway_months:
+                total_runway += cf.runway_months
+                runway_count += 1
+    else:
+        # Fallback: derive from BudgetVsActual (P&L + Balance Sheet imports)
+        try:
+            from mis_consolidation.models import BudgetVsActual
+            from django.db.models import Q
+
+            bva_filter = Q(portfolio_company__organization=org)
+            if fund_id:
+                bva_filter &= Q(fund_id=fund_id)
+
+            # For each company, get the latest monthly P&L records
+            bva_qs = BudgetVsActual.objects.filter(
+                bva_filter,
+                period_month__isnull=False,
+                line_item__in=['total_opex', 'ebitda', 'cash_and_equivalents'],
+            ).select_related('portfolio_company')
+
+            # Group by company → {line_item: (year, month, value)}
+            from collections import defaultdict
+            co_data = defaultdict(dict)
+            for rec in bva_qs.order_by('portfolio_company_id', '-period_year', '-period_month'):
+                co_name = rec.portfolio_company.name
+                li = rec.line_item
+                # Only keep the latest period per line_item per company
+                if li not in co_data[co_name]:
+                    co_data[co_name][li] = {
+                        'value': rec.actual_inr,
+                        'period_year': rec.period_year,
+                        'period_month': rec.period_month,
+                    }
+
+            for co_name, metrics in co_data.items():
+                opex_info   = metrics.get('total_opex')
+                ebitda_info = metrics.get('ebitda')
+                cash_info   = metrics.get('cash_and_equivalents')
+
+                gross_burn  = float(opex_info['value']) if opex_info and opex_info['value'] else None
+                ebitda_val  = float(ebitda_info['value']) if ebitda_info and ebitda_info['value'] else None
+                # Net burn = monthly cash loss; only meaningful when EBITDA < 0
+                net_burn    = (-ebitda_val) if (ebitda_val is not None and ebitda_val < 0) else None
+                cash        = float(cash_info['value']) if cash_info and cash_info['value'] else None
+
+                # Runway: cash / monthly gross burn
+                runway = None
+                if cash and gross_burn and gross_burn > 0:
+                    runway = cash / gross_burn
+
+                # Latest period label
+                ref = opex_info or ebitda_info or cash_info
+                period_label = ''
+                if ref:
+                    mo = ref['period_month']
+                    yr = ref['period_year']
+                    mon_names = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                                 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+                    period_label = f'{mon_names[mo] if 1 <= mo <= 12 else mo}-{yr}'
+
+                companies.append({
+                    'company_name': co_name,
+                    'period': period_label,
+                    'gross_burn': gross_burn,
+                    'net_burn': net_burn,
+                    'cash_balance': cash,
+                    'runway_months': runway,
+                })
+
+                if gross_burn:
+                    total_gross += Decimal(str(gross_burn))
+                if net_burn:
+                    total_net += Decimal(str(net_burn))
+                if cash:
+                    total_cash += Decimal(str(cash))
+                if runway:
+                    total_runway += Decimal(str(runway))
+                    runway_count += 1
+        except Exception:
+            pass
+
+    n = len(companies)
+    return Response({
+        'companies': sorted(companies, key=lambda x: x.get('gross_burn') or 0, reverse=True),
+        'avg_gross_burn': float(total_gross / n) if n else None,
+        'avg_net_burn': float(total_net / n) if n else None,
+        'total_cash': float(total_cash),
+        'avg_runway': float(total_runway / runway_count) if runway_count else None,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsGPUser])
+def portfolio_exits_summary(request):
+    """
+    GET /api/portfolio/exits/?fund=<id>
+    Returns all exit events for the selected fund with summary metrics.
+    """
+    from decimal import Decimal
+
+    org = request.organization
+    if not org:
+        return Response({'detail': 'No organization.'}, status=403)
+
+    fund_id = request.query_params.get('fund')
+    qs = ExitEvent.objects.filter(
+        investment__scheme__fund__organization=org,
+    ).select_related('investment', 'investment__portfolio_company',
+                     'investment__scheme')
+    if fund_id:
+        qs = qs.filter(investment__scheme__fund__id=fund_id)
+
+    # Build investment cost map for DPI calc
+    inv_ids = qs.values_list('investment_id', flat=True).distinct()
+    cost_map = {
+        str(inv.id): inv.total_invested
+        for inv in Investment.objects.filter(id__in=inv_ids)
+    }
+
+    exits = []
+    total_proceeds = Decimal('0')
+    total_cost = Decimal('0')
+    moic_sum = Decimal('0')
+    irr_sum = Decimal('0')
+    net_irr_sum = Decimal('0')
+    moic_count = irr_count = net_irr_count = 0
+
+    for e in qs.order_by('-exit_date'):
+        cost = cost_map.get(str(e.investment_id), Decimal('0'))
+        exits.append({
+            'company_name': e.investment.company_name,
+            'sector': e.investment.portfolio_company.sector if e.investment.portfolio_company else '',
+            'exit_type': e.exit_type,
+            'exit_type_display': e.get_exit_type_display(),
+            'is_actual': e.is_actual,
+            'exit_date': str(e.exit_date) if e.exit_date else None,
+            'cost': float(cost),
+            'proceeds': float(e.proceeds) if e.proceeds is not None else None,
+            'moic': float(e.moic) if e.moic is not None else None,
+            'irr_pct': float(e.irr_pct) if e.irr_pct is not None else None,
+            'net_irr_pct': float(e.irr_on_exit) if e.irr_on_exit is not None else None,
+            'gain_loss_nature': e.gain_loss_nature,
+            'buyer_name': e.buyer_name,
+        })
+        if e.proceeds:
+            total_proceeds += e.proceeds
+        if cost:
+            total_cost += cost
+        if e.moic:
+            moic_sum += e.moic
+            moic_count += 1
+        if e.irr_pct:
+            irr_sum += e.irr_pct
+            irr_count += 1
+        if e.irr_on_exit:
+            net_irr_sum += e.irr_on_exit
+            net_irr_count += 1
+
+    # Only compute DPI from actual exits
+    actual_proceeds = sum(
+        (e['proceeds'] or 0) for e in exits if e.get('is_actual')
+    )
+
+    return Response({
+        'exits': exits,
+        'summary': {
+            'total_exits': len(exits),
+            'total_proceeds': float(total_proceeds),
+            'avg_moic': float(moic_sum / moic_count) if moic_count else None,
+            'avg_irr': float(irr_sum / irr_count) if irr_count else None,
+            'avg_net_irr': float(net_irr_sum / net_irr_count) if net_irr_count else None,
+            'dpi': float(actual_proceeds / float(total_cost)) if total_cost else None,
+        },
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsGPUser])
+def portfolio_kpis_summary(request):
+    """
+    GET /api/portfolio/kpis/?fund=<id>
+    Returns all KPI values for companies in the selected fund.
+    """
+    org = request.organization
+    if not org:
+        return Response({'detail': 'No organization.'}, status=403)
+
+    fund_id = request.query_params.get('fund')
+    qs = PortfolioKPI.objects.filter(
+        investment__scheme__fund__organization=org,
+    ).select_related('investment', 'kpi_definition')
+    if fund_id:
+        qs = qs.filter(investment__scheme__fund__id=fund_id)
+
+    kpis = []
+    for k in qs.order_by('investment__company_name', 'kpi_definition__name', '-period')[:500]:
+        kpis.append({
+            'company_name': k.investment.company_name,
+            'kpi_name': k.kpi_definition.name,
+            'kpi_slug': k.kpi_definition.slug,
+            'format': k.kpi_definition.format,
+            'sector_template': k.kpi_definition.sector_template,
+            'period': str(k.period),
+            'value': float(k.value),
+        })
+
+    return Response({'kpis': kpis, 'count': len(kpis)})
+
+
+@api_view(['GET'])
+@permission_classes([IsGPUser])
+def portfolio_saas_metrics(request):
+    """
+    GET /api/portfolio/saas-metrics/?fund=<id>
+    Returns SaaS-specific KPIs (MRR, ARR, NRR, Churn, CAC, LTV) per company.
+    """
+    SAAS_SLUGS = {
+        'mrr':           ('mrr', 'monthly-recurring-revenue', 'monthly-revenue'),
+        'arr':           ('arr', 'annual-recurring-revenue', 'annual-revenue-run-rate'),
+        'churn_rate':    ('churn-rate', 'churn', 'revenue-churn', 'customer-churn', 'monthly-churn'),
+        'nrr':           ('nrr', 'net-revenue-retention', 'net-dollar-retention', 'ndr', 'net-retention'),
+        'cac':           ('cac', 'customer-acquisition-cost', 'blended-cac'),
+        'ltv':           ('ltv', 'clv', 'customer-ltv', 'lifetime-value', 'customer-lifetime-value'),
+        'ltv_cac_ratio': ('ltv-cac', 'ltv-cac-ratio', 'ltv-cac-multiple'),
+    }
+    all_slugs = [s for slugs in SAAS_SLUGS.values() for s in slugs]
+
+    # Reverse map: any slug variant → canonical key (e.g. 'churn-rate' → 'churn_rate')
+    # Without this, 'churn-rate' is stored under key 'churn-rate' but JS reads c.churn_rate
+    # — they are different property names; values always showed as undefined (—).
+    slug_to_canonical = {}
+    for canonical, slugs in SAAS_SLUGS.items():
+        for s in slugs:
+            slug_to_canonical[s] = canonical
+
+    org = request.organization
+    if not org:
+        return Response({'detail': 'No organization.'}, status=403)
+
+    fund_id = request.query_params.get('fund')
+    qs = PortfolioKPI.objects.filter(
+        investment__scheme__fund__organization=org,
+        kpi_definition__slug__in=all_slugs,
+    ).select_related('investment', 'kpi_definition')
+    if fund_id:
+        qs = qs.filter(investment__scheme__fund__id=fund_id)
+
+    # Also match KPIs tagged with sector_template='saas' (covers non-standard slugs)
+    saas_template_qs = PortfolioKPI.objects.filter(
+        investment__scheme__fund__organization=org,
+        kpi_definition__sector_template='saas',
+    ).select_related('investment', 'kpi_definition')
+    if fund_id:
+        saas_template_qs = saas_template_qs.filter(investment__scheme__fund__id=fund_id)
+
+    from itertools import chain
+    all_kpis = list(chain(qs, saas_template_qs))
+
+    # Base: ALL investments for this fund (so every company appears even without SaaS KPIs)
+    fund_ids = get_accessible_fund_ids(request.user)
+    all_inv_qs = Investment.objects.filter(
+        scheme__fund__organization=org,
+        scheme__fund__id__in=fund_ids,
+    ).select_related('portfolio_company')
+    if fund_id:
+        all_inv_qs = all_inv_qs.filter(scheme__fund__id=fund_id)
+
+    companies = {}
+    for inv in all_inv_qs.order_by('company_name'):
+        name = inv.company_name
+        if not name or name in companies:
+            continue
+        sector = inv.sector or (inv.portfolio_company.sector if inv.portfolio_company else '') or ''
+        companies[name] = {'company_name': name, 'sector': sector}
+
+    # Overlay KPI data (latest period per investment+slug wins)
+    seen = set()
+    for k in sorted(all_kpis, key=lambda x: str(x.period), reverse=True):
+        dedup_key = (str(k.investment_id), k.kpi_definition.slug)
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        name = k.investment.company_name
+        raw_slug = k.kpi_definition.slug
+        canonical = slug_to_canonical.get(raw_slug, raw_slug)
+        if name not in companies:
+            sector = k.investment.sector or ''
+            companies[name] = {'company_name': name, 'sector': sector}
+        companies[name][canonical] = float(k.value)
+
+    # Compute ltv_cac_ratio inline if individual LTV and CAC values are present
+    for co in companies.values():
+        if co.get('ltv_cac_ratio') is None and co.get('ltv') and co.get('cac') and co['cac'] != 0:
+            co['ltv_cac_ratio'] = round(co['ltv'] / co['cac'], 4)
+
+    return Response({
+        'companies': list(companies.values()),
+        'metrics_legend': {k: list(v) for k, v in SAAS_SLUGS.items()},
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsGPUser])
+def portfolio_quoted_unquoted(request):
+    """
+    GET /api/portfolio/quoted-unquoted/?fund=<id>
+    Returns companies split by quoted (listed) vs unquoted (private).
+    Also uses IPEV Level 1 valuations as a signal for quoted companies.
+    """
+    from django.db.models import Max
+
+    org = request.organization
+    if not org:
+        return Response({'detail': 'No organization.'}, status=403)
+
+    fund_id = request.query_params.get('fund')
+    fund_ids = get_accessible_fund_ids(request.user)
+    qs = PortfolioCompany.objects.filter(
+        organization=org,
+        investments__scheme__fund__id__in=fund_ids,
+    ).distinct()
+    if fund_id:
+        qs = qs.filter(investments__scheme__fund__id=fund_id).distinct()
+
+    # Get latest valuation and investment data per company
+    from django.db.models import Sum
+    inv_qs = Investment.objects.filter(
+        scheme__fund__organization=org,
+    )
+    if fund_id:
+        inv_qs = inv_qs.filter(scheme__fund__id=fund_id)
+
+    cost_map = {}
+    fv_map = {}
+    ipev_map = {}
+    for inv in inv_qs.prefetch_related('valuations'):
+        name = inv.company_name
+        cost_map[name] = cost_map.get(name, 0) + float(inv.total_invested or 0)
+        latest_val = inv.valuations.filter(status='approved').order_by('-valuation_date').first()
+        if latest_val:
+            fv_map[name] = fv_map.get(name, 0) + float(latest_val.fair_value or 0)
+            if latest_val.ipev_level:
+                ipev_map[name] = latest_val.ipev_level
+
+    quoted = []
+    unquoted = []
+    for co in qs:
+        # Quoted = is_quoted flag OR IPEV Level 1 valuation
+        is_q = co.is_quoted or (ipev_map.get(co.name) == 1)
+        row = {
+            'name': co.name,
+            'sector': co.sector,
+            'exchange': co.listing_exchange or (
+                'IPEV L1' if ipev_map.get(co.name) == 1 else ''),
+            'cost': cost_map.get(co.name, 0),
+            'fair_value': fv_map.get(co.name, 0),
+            'ipev_level': ipev_map.get(co.name),
+        }
+        if is_q:
+            quoted.append(row)
+        else:
+            unquoted.append(row)
+
+    return Response({
+        'quoted': quoted,
+        'unquoted': unquoted,
+        'summary': {
+            'total': len(quoted) + len(unquoted),
+            'quoted_count': len(quoted),
+            'unquoted_count': len(unquoted),
+            'quoted_cost': sum(r['cost'] for r in quoted),
+            'unquoted_cost': sum(r['cost'] for r in unquoted),
+        },
+    })
+
+
+# ═══════════════════════════════════════════════════════════════
+# PORTFOLIO FUND-LEVEL: INVESTMENTS, VALUATIONS, KPI TRACKING,
+# EXIT SCENARIOS, BOARD MEETINGS (5 new endpoints)
+# ═══════════════════════════════════════════════════════════════
+
+@api_view(['GET'])
+@permission_classes([IsGPUser])
+def portfolio_investments_list(request):
+    """
+    GET /api/portfolio/investments/?fund=<id>
+    Returns all investments for the selected fund across all schemes.
+    """
+    org = request.organization
+    if not org:
+        return Response({'detail': 'No organization.'}, status=403)
+
+    fund_ids = get_accessible_fund_ids(request.user)
+    fund_id = request.query_params.get('fund')
+
+    qs = Investment.objects.filter(
+        scheme__fund__organization=org,
+        scheme__fund__id__in=fund_ids,
+    ).select_related('scheme', 'scheme__fund', 'portfolio_company')
+
+    if fund_id:
+        qs = qs.filter(scheme__fund__id=fund_id)
+
+    investments = []
+    for inv in qs.order_by('company_name'):
+        latest_val = inv.valuations.filter(status='approved').order_by('-valuation_date').first()
+        investments.append({
+            'id': str(inv.id),
+            'company_name': inv.company_name,
+            'scheme_name': inv.scheme.name,
+            'sector': inv.sector or (inv.portfolio_company.sector if inv.portfolio_company else ''),
+            'stage': inv.stage or '',
+            'instrument_type': inv.instrument_type,
+            'instrument_type_display': inv.get_instrument_type_display(),
+            'status': inv.status,
+            'status_display': inv.get_status_display(),
+            'total_invested': float(inv.total_invested) if inv.total_invested else 0,
+            'ownership_pct': float(inv.ownership_pct) if inv.ownership_pct else None,
+            'investment_date': str(inv.investment_date) if inv.investment_date else None,
+            'irr_pct': float(inv.irr_pct) if inv.irr_pct else None,
+            'latest_valuation': float(latest_val.fair_value) if latest_val else None,
+            'currency': inv.currency,
+        })
+
+    return Response({'investments': investments, 'count': len(investments)})
+
+
+@api_view(['GET'])
+@permission_classes([IsGPUser])
+def portfolio_valuations_list(request):
+    """
+    GET /api/portfolio/valuations/?fund=<id>
+    Returns all valuations for investments in the selected fund.
+    """
+    org = request.organization
+    if not org:
+        return Response({'detail': 'No organization.'}, status=403)
+
+    fund_ids = get_accessible_fund_ids(request.user)
+    fund_id = request.query_params.get('fund')
+
+    qs = Valuation.objects.filter(
+        investment__scheme__fund__organization=org,
+        investment__scheme__fund__id__in=fund_ids,
+    ).select_related('investment', 'investment__scheme', 'submitted_by', 'approved_by')
+
+    if fund_id:
+        qs = qs.filter(investment__scheme__fund__id=fund_id)
+
+    valuations = []
+    for v in qs.order_by('-valuation_date'):
+        valuations.append({
+            'id': str(v.id),
+            'company_name': v.investment.company_name,
+            'scheme_name': v.investment.scheme.name,
+            'valuation_date': str(v.valuation_date),
+            'fair_value': float(v.fair_value) if v.fair_value else 0,
+            'methodology': v.methodology,
+            'methodology_display': v.get_methodology_display(),
+            'ipev_level': v.ipev_level,
+            'multiple': float(v.multiple) if v.multiple else None,
+            'status': v.status,
+            'submitted_by': v.submitted_by.username if v.submitted_by else None,
+            'approved_by': v.approved_by.username if v.approved_by else None,
+        })
+
+    return Response({'valuations': valuations, 'count': len(valuations)})
+
+
+@api_view(['GET'])
+@permission_classes([IsGPUser])
+def portfolio_kpi_tracking(request):
+    """
+    GET /api/portfolio/kpi-tracking/?fund=<id>&status=<status>
+    Returns all KPI submissions for the selected fund with review status.
+    """
+    org = request.organization
+    if not org:
+        return Response({'detail': 'No organization.'}, status=403)
+
+    fund_ids = get_accessible_fund_ids(request.user)
+    fund_id = request.query_params.get('fund')
+    kpi_status = request.query_params.get('status')
+
+    qs = PortfolioKPI.objects.filter(
+        investment__scheme__fund__organization=org,
+        investment__scheme__fund__id__in=fund_ids,
+    ).select_related('investment', 'kpi_definition', 'submitted_by', 'reviewed_by')
+
+    if fund_id:
+        qs = qs.filter(investment__scheme__fund__id=fund_id)
+    if kpi_status:
+        qs = qs.filter(status=kpi_status)
+
+    kpis = []
+    for k in qs.order_by('-period', 'investment__company_name')[:500]:
+        kpis.append({
+            'id': str(k.id),
+            'company_name': k.investment.company_name,
+            'kpi_name': k.kpi_definition.name,
+            'kpi_slug': k.kpi_definition.slug,
+            'format': k.kpi_definition.format,
+            'period': str(k.period),
+            'value': float(k.value),
+            'notes': k.notes or '',
+            'status': k.status,
+            'submitted_by': k.submitted_by.username if k.submitted_by else None,
+            'submitted_at': k.submitted_at.isoformat() if k.submitted_at else None,
+            'reviewed_by': k.reviewed_by.username if k.reviewed_by else None,
+        })
+
+    return Response({'kpis': kpis, 'count': len(kpis)})
+
+
+@api_view(['GET'])
+@permission_classes([IsGPUser])
+def portfolio_exit_scenarios_list(request):
+    """
+    GET /api/portfolio/exit-scenarios/?fund=<id>
+    Returns all exit scenarios and actual exits for the selected fund.
+    """
+    org = request.organization
+    if not org:
+        return Response({'detail': 'No organization.'}, status=403)
+
+    fund_ids = get_accessible_fund_ids(request.user)
+    fund_id = request.query_params.get('fund')
+
+    qs = ExitEvent.objects.filter(
+        investment__scheme__fund__organization=org,
+        investment__scheme__fund__id__in=fund_ids,
+    ).select_related('investment', 'investment__scheme')
+
+    if fund_id:
+        qs = qs.filter(investment__scheme__fund__id=fund_id)
+
+    scenarios = []
+    for e in qs.order_by('investment__company_name', '-exit_date'):
+        scenarios.append({
+            'id': str(e.id),
+            'company_name': e.investment.company_name,
+            'scheme_name': e.investment.scheme.name,
+            'exit_type': e.exit_type,
+            'exit_type_display': e.get_exit_type_display(),
+            'is_actual': e.is_actual,
+            'exit_date': str(e.exit_date) if e.exit_date else None,
+            'proceeds': float(e.proceeds) if e.proceeds else None,
+            'moic': float(e.moic) if e.moic else None,
+            'irr_pct': float(e.irr_pct) if e.irr_pct else None,
+            'gain_loss_nature': e.gain_loss_nature or '',
+            'buyer_name': e.buyer_name or '',
+            'assumptions': e.assumptions or '',
+        })
+
+    return Response({'scenarios': scenarios, 'count': len(scenarios)})
+
+
+@api_view(['GET'])
+@permission_classes([IsGPUser])
+def portfolio_board_meetings_list(request):
+    """
+    GET /api/portfolio/board-meetings/?fund=<id>
+    Returns all board meetings for investments in the selected fund.
+    """
+    org = request.organization
+    if not org:
+        return Response({'detail': 'No organization.'}, status=403)
+
+    fund_ids = get_accessible_fund_ids(request.user)
+    fund_id = request.query_params.get('fund')
+
+    qs = BoardMeeting.objects.filter(
+        investment__scheme__fund__organization=org,
+        investment__scheme__fund__id__in=fund_ids,
+    ).select_related('investment', 'investment__scheme')
+
+    if fund_id:
+        qs = qs.filter(investment__scheme__fund__id=fund_id)
+
+    meetings = []
+    for m in qs.order_by('-meeting_date'):
+        meetings.append({
+            'id': str(m.id),
+            'company_name': m.investment.company_name,
+            'scheme_name': m.investment.scheme.name,
+            'meeting_date': str(m.meeting_date),
+            'agenda': m.agenda or '',
+            'attendees': m.attendees or [],
+            'resolutions': m.resolutions or [],
+            'minutes': m.minutes or '',
+            'next_meeting_date': str(m.next_meeting_date) if m.next_meeting_date else None,
+        })
+
+    return Response({'meetings': meetings, 'count': len(meetings)})
+
+
+@api_view(['GET'])
+@permission_classes([IsGPUser])
+def portfolio_avg_holding(request):
+    """
+    GET /api/portfolio/avg-holding/?fund=<id>
+    Returns avg holding period in years across all investments with a known
+    investment_date.  Calculated on the backend using today's date as the
+    reference so the frontend only ever renders the result.
+    """
+    from datetime import date as date_cls
+
+    org = request.organization
+    if not org:
+        return Response({'detail': 'No organization.'}, status=403)
+
+    fund_ids = get_accessible_fund_ids(request.user)
+    fund_id = request.query_params.get('fund')
+
+    qs = Investment.objects.filter(
+        scheme__fund__organization=org,
+        scheme__fund__id__in=fund_ids,
+        investment_date__isnull=False,
+    ).values_list('investment_date', flat=True)
+
+    if fund_id:
+        qs = qs.filter(scheme__fund__id=fund_id)
+
+    dates = list(qs)
+    if not dates:
+        return Response({'avg_holding_years': None, 'investment_count': 0})
+
+    today = date_cls.today()
+    total_days = sum((today - d).days for d in dates)
+    avg_years = round(total_days / len(dates) / 365.25, 1)
+
+    return Response({
+        'avg_holding_years': avg_years,
+        'investment_count': len(dates),
+    })
+
+
+# ═══════════════════════════════════════════════════════════════
 # PORTFOLIO COMPANY CRUD
 # ═══════════════════════════════════════════════════════════════
 
@@ -702,6 +1404,13 @@ def portfolio_company_list(request):
             organization=org,
             investments__scheme__fund__id__in=fund_ids,
         ).distinct()
+        # Optional: filter to a specific fund or scheme
+        fund_id = request.query_params.get('fund')
+        if fund_id:
+            qs = qs.filter(investments__scheme__fund__id=fund_id).distinct()
+        scheme_id = request.query_params.get('scheme')
+        if scheme_id:
+            qs = qs.filter(investments__scheme__id=scheme_id).distinct()
         sector = request.query_params.get('sector')
         if sector:
             qs = qs.filter(sector__iexact=sector)
@@ -804,3 +1513,45 @@ def kpi_definition_detail(request, kpi_def_id):
     log_audit(request, 'delete', 'kpi_definition', kpi_def.id)
     kpi_def.delete()
     return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------------------
+# Exit Signal Engine + Feature Engineering (v5 AI Analytics)
+# ---------------------------------------------------------------------------
+
+@api_view(['GET'])
+@permission_classes([IsGPUser])
+def exit_signal_view(request, company_id):
+    """
+    AI-powered exit signal analysis for a portfolio company.
+    Returns exit score, recommended timing, route, and Gemini rationale.
+    """
+    org = request.organization
+    try:
+        company = PortfolioCompany.objects.get(pk=company_id, fund__organization=org)
+    except PortfolioCompany.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=404)
+
+    from .feature_engineering import ExitSignalEngine
+    engine = ExitSignalEngine(company)
+    result = engine.analyze()
+    return Response(result)
+
+
+@api_view(['GET'])
+@permission_classes([IsGPUser])
+def company_features_view(request, company_id):
+    """
+    Return computed financial features (ratios, trends, Z-scores) for a company.
+    Used by risk scoring and AI analytics.
+    """
+    org = request.organization
+    try:
+        company = PortfolioCompany.objects.get(pk=company_id, fund__organization=org)
+    except PortfolioCompany.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=404)
+
+    from .feature_engineering import FinancialFeatureExtractor, XGBoostRiskScorer
+    features = FinancialFeatureExtractor(company).extract()
+    risk = XGBoostRiskScorer(company).predict()
+    return Response({'features': features, 'risk': risk})

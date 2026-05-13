@@ -3,11 +3,14 @@ from .models import ImportJob, ImportFile
 
 
 class ImportFileSerializer(serializers.ModelSerializer):
+    fund_name = serializers.CharField(read_only=True)
+
     class Meta:
         model = ImportFile
         fields = [
             'id', 'original_filename', 'file_size', 'status',
             'gemini_confidence', 'sheet_names', 'error_detail',
+            'fund', 'fund_name',
             'created_at', 'completed_at',
         ]
 

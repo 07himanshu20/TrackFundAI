@@ -14,8 +14,14 @@
 (() => {
   const API_BASE = (() => {
     const p = window.location.port;
+    // If running directly from Django (port 8000) use relative path.
+    // Otherwise (live-server / http.server on 5500/5501/3000/etc) point at Django.
     const same = (p === '8000' || p === '' || p === '80' || p === '443');
-    return same ? '/api' : 'http://127.0.0.1:8000/api';
+    if (same) return '/api';
+    // Read the backend port from localStorage so it can be overridden at runtime,
+    // fallback to 8000 (the canonical Django dev port for this project).
+    const backendPort = localStorage.getItem('tfai_backend_port') || '8000';
+    return `http://127.0.0.1:${backendPort}/api`;
   })();
 
   const KEYS = {
@@ -163,6 +169,9 @@
   async function apiDelete(path) {
     const r = await _authFetch(`${API_BASE}${path}`, {method: 'DELETE'});
     if (r.status !== 204 && !r.ok) throw new Error(`API ${path} → ${r.status}`);
+    if (r.status === 204) return true;
+    const ct = r.headers.get('content-type') || '';
+    if (ct.includes('application/json')) return r.json();
     return true;
   }
 

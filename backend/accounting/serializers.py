@@ -39,6 +39,7 @@ class NAVRecordListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'scheme', 'scheme_name', 'nav_date',
             'total_nav', 'total_units_outstanding', 'nav_per_unit',
+            'management_fee_payable', 'unrealized_gains', 'realized_gains',
             'depository_reconciled', 'depository_type',
             'created_at',
         ]
@@ -56,6 +57,7 @@ class NAVRecordDetailSerializer(serializers.ModelSerializer):
             'total_nav', 'total_units_outstanding', 'nav_per_unit',
             'investments_at_fair_value', 'cash_and_equivalents',
             'receivables', 'management_fee_payable', 'other_liabilities',
+            'unrealized_gains', 'realized_gains',
             'depository_type', 'depository_reconciled',
             'depository_variance_amount',
             'approved_by', 'approved_at',

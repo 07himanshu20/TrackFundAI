@@ -187,7 +187,7 @@ def _get_accessible_fund_names(user) -> Optional[set[str]]:
     except ImportError:
         return None
 
-    if user.role == 'platform_admin':
+    if user.role in ('platform_admin', 'gp_admin'):
         return None  # Admins see everything
 
     fund_ids = get_accessible_fund_ids(user)

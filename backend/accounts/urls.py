@@ -8,4 +8,10 @@ urlpatterns = [
     path('me/', views.me_view, name='auth-me'),
     path('change-password/', views.change_password_view, name='auth-change-password'),
     path('audit-log/', views.audit_log_list, name='audit-log-list'),
+
+    # MFA — TOTP (v5)
+    path('mfa/setup/', views.mfa_setup_view, name='mfa-setup'),
+    path('mfa/enable/', views.mfa_enable_view, name='mfa-enable'),
+    path('mfa/disable/', views.mfa_disable_view, name='mfa-disable'),
+    path('mfa/verify/', views.mfa_verify_view, name='mfa-verify'),
 ]

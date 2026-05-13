@@ -46,6 +46,16 @@ class PortfolioCompany(models.Model):
     description = models.TextField(blank=True)
     is_active = models.BooleanField(default=True)
 
+    # Listing status — for Quoted & Unquoted analysis
+    is_quoted = models.BooleanField(
+        default=False,
+        help_text='True if the company is publicly listed on a stock exchange',
+    )
+    listing_exchange = models.CharField(
+        max_length=20, blank=True,
+        help_text='Stock exchange: NSE, BSE, NYSE, NASDAQ, LSE, etc.',
+    )
+
     # Link to dashboard hierarchy node (optional — for dashboard rendering)
     portfolio_node_id = models.CharField(
         max_length=500, blank=True,
@@ -140,6 +150,14 @@ class Investment(models.Model):
     currency = models.CharField(max_length=3, default='INR')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
     sector = models.CharField(max_length=100, blank=True)
+    stage = models.CharField(
+        max_length=100, blank=True,
+        help_text='Funding stage / round name (e.g. Seed, Series A, Series B, Bridge)',
+    )
+    irr_pct = models.DecimalField(
+        max_digits=8, decimal_places=2, null=True, blank=True,
+        help_text='Gross IRR % for this investment (e.g. 45.92 means 45.92%)',
+    )
     description = models.TextField(blank=True)
 
     # Governance
@@ -233,7 +251,8 @@ class Valuation(models.Model):
     Maps to FundOS: valuations table.
 
     Added: fvtpl_movement (Ind AS 109), valuer_reg_number (IBBI),
-    fair_value_of_holding, enterprise_value.
+    fair_value_of_holding, enterprise_value, IPEV Level 1/2/3 fields,
+    DLOM, DRHP value, Pre-IPO track, corporate action support.
     """
     METHOD_CHOICES = [
         ('dcf', 'Discounted Cash Flow'),
@@ -248,6 +267,19 @@ class Valuation(models.Model):
         ('submitted', 'Submitted'),
         ('approved', 'Approved'),
         ('rejected', 'Rejected'),
+    ]
+    IPEV_LEVEL_CHOICES = [
+        (1, 'Level 1 — Quoted (Exchange Listed, CMP × shares)'),
+        (2, 'Level 2 — Observable Inputs (Peer Multiples, IBBI certified)'),
+        (3, 'Level 3 — Unobservable Inputs (DCF / Last Round, Board + IBBI certified)'),
+    ]
+    CORPORATE_ACTION_CHOICES = [
+        ('none',         'None'),
+        ('stock_split',  'Stock Split'),
+        ('bonus',        'Bonus Issue'),
+        ('rights',       'Rights Issue'),
+        ('dividend',     'Dividend'),
+        ('buyback',      'Buyback'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -302,6 +334,55 @@ class Valuation(models.Model):
         help_text='List of comparable company names/multiples',
     )
     assumptions = models.TextField(blank=True, help_text='Valuation assumptions and notes')
+
+    # IPEV Classification (v5 — International Private Equity Valuation)
+    ipev_level = models.PositiveSmallIntegerField(
+        null=True, blank=True,
+        choices=IPEV_LEVEL_CHOICES,
+        help_text='IPEV Level 1/2/3 classification — determines valuation method and certification',
+    )
+
+    # Pre-IPO track
+    is_pre_ipo = models.BooleanField(
+        default=False,
+        help_text='True if company has filed DRHP — enables Pre-IPO valuation track',
+    )
+    drhp_value = models.DecimalField(
+        max_digits=18, decimal_places=2, null=True, blank=True,
+        help_text='Valuation implied by DRHP filing (basis for Pre-IPO track)',
+    )
+
+    # DLOM — Discount for Lack of Marketability (applied to Pre-IPO and Level 3)
+    dlom_pct = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True,
+        help_text='DLOM % applied to fair value (e.g., 20.00 = 20% discount)',
+    )
+
+    # Level 2/3 specific fields
+    peer_multiples_used = models.JSONField(
+        default=list, blank=True,
+        help_text='List of peer EV/Revenue or EV/EBITDA multiples used in Level 2 valuation',
+    )
+    dcf_terminal_growth_rate = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True,
+        help_text='Terminal growth rate used in DCF (Level 3) — percentage',
+    )
+    last_round_premium_discount_pct = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True,
+        help_text='Premium or discount to last round price (Level 3 last-round method)',
+    )
+
+    # Corporate action handling (Level 1 listed securities)
+    corporate_action_type = models.CharField(
+        max_length=15,
+        choices=CORPORATE_ACTION_CHOICES,
+        default='none',
+        help_text='Corporate action since last valuation — adjusts share count/price basis',
+    )
+    corporate_action_ratio = models.DecimalField(
+        max_digits=8, decimal_places=4, null=True, blank=True,
+        help_text='Ratio for split/bonus (e.g., 2.0 for 2:1 split, 0.5 for 1:2 consolidation)',
+    )
 
     # IBBI Registered Valuer
     valuer_name = models.CharField(
@@ -358,6 +439,16 @@ class KPIDefinition(models.Model):
         ('annual', 'Annual'),
     ]
 
+    SECTOR_TEMPLATE_CHOICES = [
+        ('generic',       'Generic'),
+        ('saas',          'SaaS'),
+        ('healthcare',    'Healthcare'),
+        ('manufacturing', 'Manufacturing'),
+        ('nbfc',          'NBFC / Fintech'),
+        ('consumer',      'Consumer'),
+        ('realestate',    'Real Estate'),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     organization = models.ForeignKey(
         'accounts.Organization',
@@ -372,6 +463,16 @@ class KPIDefinition(models.Model):
     is_required = models.BooleanField(default=True)
     sort_order = models.IntegerField(default=0)
     is_active = models.BooleanField(default=True)
+
+    # Sector-specific KPI template (v5)
+    sector_template = models.CharField(
+        max_length=15, choices=SECTOR_TEMPLATE_CHOICES, default='generic',
+        help_text='Which sector template this KPI belongs to',
+    )
+    is_system_kpi = models.BooleanField(
+        default=False,
+        help_text='True for seeded system KPIs (not org-created) — prevents deletion',
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -459,6 +560,54 @@ class PortfolioKPI(models.Model):
 
     def __str__(self):
         return f'{self.investment.company_name} — {self.kpi_definition.name} — {self.period}'
+
+
+class CompanyFinancials(models.Model):
+    """
+    Monthly burn rate, cash balance, and runway for a portfolio company.
+    Stores structured financial metrics extracted from fund Excel files.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    investment = models.ForeignKey(
+        Investment,
+        on_delete=models.CASCADE,
+        related_name='financials',
+    )
+    portfolio_company = models.ForeignKey(
+        PortfolioCompany,
+        on_delete=models.CASCADE,
+        related_name='financials',
+        null=True, blank=True,
+    )
+    period = models.DateField(
+        help_text='First day of the reporting month (e.g., 2025-04-01)',
+    )
+    gross_burn = models.DecimalField(
+        max_digits=18, decimal_places=2, null=True, blank=True,
+        help_text='Total monthly cash outflow in Cr (expenses + capex)',
+    )
+    net_burn = models.DecimalField(
+        max_digits=18, decimal_places=2, null=True, blank=True,
+        help_text='Net monthly burn in Cr = gross burn minus revenue',
+    )
+    cash_balance = models.DecimalField(
+        max_digits=18, decimal_places=2, null=True, blank=True,
+        help_text='Cash and equivalents at period end in Cr',
+    )
+    runway_months = models.DecimalField(
+        max_digits=6, decimal_places=1, null=True, blank=True,
+        help_text='Computed runway = cash_balance / net_burn. Null if burn is zero or not known.',
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['investment', '-period']
+        unique_together = ('investment', 'period')
+
+    def __str__(self):
+        return f'{self.investment.company_name} — {self.period}'
 
 
 class ExitEvent(models.Model):

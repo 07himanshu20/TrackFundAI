@@ -22,6 +22,7 @@ SHEET_DOMAINS = {
     'exits_distributions': 'Exit events (IPO, M&A, secondary) and LP distribution payouts with TDS',
     'compliance': 'SEBI reports (QAR/AAR), compliance calendar, compliance test reports, SEBI circulars, PPM amendments',
     'portfolio_hierarchy': 'Portfolio hierarchy tree: fund > sector > segment > company nodes with cross-fund mapping',
+    'financials_pl_bva': 'Company-level P&L (Revenue, COGS, EBITDA, PAT), Balance Sheet, Cash Flow, and Budget vs Actual — monthly or period-based financial statements for portfolio companies',
 }
 
 # ---------------------------------------------------------------------------
@@ -179,6 +180,10 @@ PORTFOLIO_INVESTMENTS_FIELDS = {
     'pre_money_valuation': 'Pre-money valuation',
     'post_money_valuation': 'Post-money valuation',
     'round_name': 'Funding round name (Series A, B, etc.)',
+    'stage': 'Current investment stage / funding round (Seed, Series A, Series B, Series C, Bridge, Growth Round, Pre-IPO)',
+    'irr_pct': 'Gross IRR % for this investment — may appear as IRR%(Gross), Gross IRR, IRR%, IRR — if stored as decimal (0.45) multiply by 100 to get percentage (45)',
+    'is_quoted': 'Whether the company is publicly listed on a stock exchange. Look for: Listed/Unlisted, Quoted/Unquoted, Listing Status, Public/Private. True if Listed or Quoted.',
+    'listing_exchange': 'Stock exchange where shares are listed: NSE, BSE, NYSE, NASDAQ, LSE, SGX, etc. Blank for unlisted/private companies.',
 }
 
 VALUATIONS_KPIS_FIELDS = {
@@ -201,6 +206,19 @@ VALUATIONS_KPIS_FIELDS = {
     'kpi_frequency': 'Reporting frequency: monthly, quarterly, annual',
     'kpi_period': 'Reporting period date (first day of period)',
     'kpi_value': 'KPI value',
+    # Burn & Runway fields (from Portfolio Financials / Burn Rate sheets)
+    'gross_burn': 'Total monthly cash outflow / gross burn rate — may appear as Gross Burn, Total Burn, Monthly Expenses, Cash Outflow, Total Outflow (in Cr or Lakhs)',
+    'net_burn': 'Net monthly cash burn = outflow minus revenue — may appear as Net Burn, Net Cash Burn, Net Outflow, Monthly Net Burn',
+    'cash_balance': 'Cash and equivalents at period end — may appear as Cash Balance, Cash in Bank, Cash & Equivalents, Closing Cash, Cash on Hand',
+    'runway_months': 'Months of runway = cash / net burn — may appear as Runway, Cash Runway, Months of Runway, Runway (Months), Runway Left',
+    # SaaS Metrics
+    'mrr': 'Monthly Recurring Revenue — MRR, Monthly Revenue, Recurring Revenue (for SaaS/subscription businesses)',
+    'arr': 'Annual Recurring Revenue = MRR × 12 — ARR, Annual Revenue Run Rate, Annual Recurring Revenue',
+    'churn_rate': 'Monthly or annual customer/revenue churn — Churn %, Churn Rate, Revenue Churn, Customer Churn, Monthly Churn',
+    'nrr': 'Net Revenue Retention / Net Dollar Retention — NRR %, NDR, Net Retention, Net Dollar Retention, Net Revenue Retention',
+    'cac': 'Customer Acquisition Cost — CAC, Customer Acquisition Cost, Blended CAC, Cost to Acquire',
+    'ltv': 'Customer Lifetime Value — LTV, CLV, Customer LTV, Lifetime Value, Customer Value',
+    'ltv_cac_ratio': 'LTV to CAC ratio — LTV/CAC, LTV:CAC, LTV CAC Ratio, Payback Multiple',
 }
 
 NAV_ACCOUNTING_FIELDS = {
@@ -322,6 +340,43 @@ COMPLIANCE_FIELDS = {
     'effective_date': 'Date the amendment takes effect',
 }
 
+FINANCIALS_PL_BVA_FIELDS = {
+    # Identity
+    'company_name': 'Portfolio company name — may appear as Company, Entity, Investee, Portfolio Company',
+    'period': 'Reporting period — Month (Apr-24, May-24), Quarter (Q1 FY25), or Year (FY2025, 2025)',
+    'period_type': 'Period granularity: monthly, quarterly, or annual',
+    # P&L line items
+    'revenue': 'Revenue / Net Sales / Operating Revenue / Top Line — actual for the period',
+    'other_income': 'Other Income / Non-Operating Income / Interest Income',
+    'total_revenue': 'Total Revenue / Total Income = Revenue + Other Income',
+    'cogs': 'Cost of Goods Sold / Cost of Sales / Cost of Revenue / Direct Cost / Variable Cost',
+    'gross_profit': 'Gross Profit / Gross Margin = Revenue minus COGS',
+    'employee_cost': 'Employee Cost / Payroll / Salaries / Manpower Cost / People Cost / HR Cost',
+    'marketing_cost': 'Marketing Cost / Advertising / Sales & Marketing / Promotion Spend',
+    'rd_cost': 'R&D Cost / Research & Development / Technology Cost / Product Cost',
+    'g_and_a': 'General & Administrative / G&A / Overhead / Corporate Cost / Admin Expenses',
+    'total_opex': 'Total Operating Expenses / Total Opex / Total Cost / Total Expenditure',
+    'ebitda': 'EBITDA / Operating Profit / Earnings Before Interest Tax Depreciation Amortisation',
+    'depreciation': 'Depreciation & Amortisation / D&A / Dep. / Amortization',
+    'ebit': 'EBIT / Earnings Before Interest and Tax / Operating Income (after D&A)',
+    'finance_cost': 'Finance Cost / Interest Expense / Borrowing Cost / Financial Charges',
+    'pbt': 'Profit Before Tax / PBT / Pre-Tax Profit / EBT',
+    'tax': 'Income Tax / Tax Expense / Current Tax / Deferred Tax / Tax Provision',
+    'pat': 'Profit After Tax / PAT / Net Profit / Net Income / Bottom Line / Net Earnings',
+    # Balance sheet items
+    'total_assets': 'Total Assets / Balance Sheet Total / Total Asset Base',
+    'total_debt': 'Total Debt / Borrowings / Long-Term Debt / Bank Borrowings / Total Loans',
+    'cash_and_equivalents': 'Cash & Equivalents / Cash in Bank / Bank Balance / Closing Cash / Liquid Assets',
+    'net_worth': 'Net Worth / Shareholders Equity / Shareholders Funds / Total Equity / Capital & Reserves',
+    # Budget vs Actual
+    'budget': 'Budgeted amount / AOP / Annual Operating Plan / Plan / Target — for the period',
+    'actual': 'Actual amount achieved / Real / Actuals / YTD Actual — for the period',
+    'variance': 'Variance = Actual minus Budget (positive = over-achievement for revenue)',
+    'variance_pct': 'Variance percentage = Variance / |Budget| × 100',
+    'is_favorable': 'Whether the variance is favorable — Yes/No, Favorable/Unfavorable, Green/Red',
+    'line_item': 'The P&L / Balance Sheet line item being reported (Revenue, EBITDA, PAT, etc.)',
+}
+
 PORTFOLIO_HIERARCHY_FIELDS = {
     'level': 'Hierarchy level: Fund, Sector, Segment, Company',
     'node_id': 'Unique node identifier (e.g., fund_avendus::sector_technology)',
@@ -331,6 +386,8 @@ PORTFOLIO_HIERARCHY_FIELDS = {
     'fair_value': 'Current fair value at this node',
     'irr': 'IRR percentage',
     'moic': 'MOIC (multiple on invested capital)',
+    'stage': 'Investment stage of the company (Series A, Series B, Bridge, etc.)',
+    'headquarters_city': 'City where the company is headquartered',
 }
 
 
@@ -350,4 +407,5 @@ DOMAIN_FIELDS = {
     'exits_distributions': EXITS_DISTRIBUTIONS_FIELDS,
     'compliance': COMPLIANCE_FIELDS,
     'portfolio_hierarchy': PORTFOLIO_HIERARCHY_FIELDS,
+    'financials_pl_bva': FINANCIALS_PL_BVA_FIELDS,
 }
