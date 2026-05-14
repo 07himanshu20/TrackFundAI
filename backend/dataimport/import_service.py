@@ -6419,7 +6419,7 @@ class FundImportService:
         Keyed on (organization, fund, company_name) — safe to re-import.
         """
         from ic_workflow.models import DealPipeline
-        for inv in investments:
+        for inv in investments.values():
             co    = inv.portfolio_company
             stage = self._STATUS_TO_PIPELINE_STAGE.get(inv.status, 'approved')
             DealPipeline.objects.update_or_create(

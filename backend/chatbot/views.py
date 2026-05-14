@@ -43,7 +43,7 @@ def chat_query(request):
     if company_id:
         try:
             from investments.models import PortfolioCompany
-            company = PortfolioCompany.objects.get(pk=company_id, fund__organization=org)
+            company = PortfolioCompany.objects.get(pk=company_id, organization=org)
         except Exception:
             pass
 

@@ -10,7 +10,13 @@
 (function () {
   'use strict';
 
-  const API = '/api';
+  const API = (() => {
+    const p = window.location.port;
+    const same = (p === '8000' || p === '' || p === '80' || p === '443');
+    if (same) return '/api';
+    const backendPort = localStorage.getItem('tfai_backend_port') || '8000';
+    return `http://127.0.0.1:${backendPort}/api`;
+  })();
 
   /* ── Inject styles ────────────────────────────────────────── */
   const style = document.createElement('style');
@@ -38,7 +44,7 @@
     /* ── Chat panel ── */
     #tfai-chat-panel {
       position: fixed; bottom: 90px; right: 28px; z-index: 8000;
-      width: 380px; max-height: 560px;
+      width: 380px; max-height: 75vh;
       background: var(--bg-card, #111120);
       border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
       border-radius: 16px;
@@ -188,6 +194,78 @@
     @media (max-width: 440px) {
       #tfai-chat-panel { right: 12px; left: 12px; width: auto; }
     }
+
+    /* ── Light theme overrides ── */
+    [data-theme='light'] #tfai-chat-panel {
+      background: #ffffff;
+      border-color: rgba(0,0,0,0.12);
+      box-shadow: 0 12px 48px rgba(0,0,0,0.15);
+    }
+    [data-theme='light'] .chat-header {
+      background: linear-gradient(135deg, rgba(0,100,204,0.1), rgba(0,212,255,0.06));
+      border-bottom-color: rgba(0,0,0,0.08);
+    }
+    [data-theme='light'] .chat-title { color: #1a1a2e; }
+    [data-theme='light'] .chat-subtitle { color: #666; }
+    [data-theme='light'] .chat-close-btn { color: #888; }
+    [data-theme='light'] .chat-close-btn:hover { color: #333; }
+    [data-theme='light'] .chat-messages::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); }
+    [data-theme='light'] .msg-content { color: #1a1a2e; }
+    [data-theme='light'] .chat-msg.bot .msg-content {
+      background: #f0f4f8;
+      color: #1a1a2e;
+    }
+    [data-theme='light'] .chat-msg.user .msg-content {
+      background: rgba(0,100,204,0.12);
+      color: #0a2540;
+    }
+    [data-theme='light'] .msg-content h3,
+    [data-theme='light'] .msg-content h4,
+    [data-theme='light'] .msg-content strong { color: #0a2540; }
+    [data-theme='light'] .msg-content table { border-color: #d0d5dd; }
+    [data-theme='light'] .msg-content th {
+      background: #e8ecf1; color: #1a1a2e; border-color: #d0d5dd;
+    }
+    [data-theme='light'] .msg-content td {
+      border-color: #d0d5dd; color: #333;
+    }
+    [data-theme='light'] .intent-chip {
+      background: rgba(0,100,204,0.1); color: #0066cc;
+    }
+    [data-theme='light'] .fb-btn {
+      border-color: rgba(0,0,0,0.12); color: #888;
+    }
+    [data-theme='light'] .fb-btn:hover {
+      background: rgba(0,0,0,0.04); color: #333;
+    }
+    [data-theme='light'] .suggestion-chip {
+      background: rgba(0,100,204,0.06);
+      border-color: rgba(0,100,204,0.2);
+      color: #0066cc;
+    }
+    [data-theme='light'] .suggestion-chip:hover {
+      background: rgba(0,100,204,0.12);
+      border-color: rgba(0,100,204,0.35);
+    }
+    [data-theme='light'] .chat-input-area {
+      border-top-color: rgba(0,0,0,0.08);
+    }
+    [data-theme='light'] .chat-input {
+      background: #f5f7fa;
+      border-color: rgba(0,0,0,0.12);
+      color: #1a1a2e;
+    }
+    [data-theme='light'] .chat-input:focus {
+      border-color: rgba(0,100,204,0.4);
+    }
+    [data-theme='light'] .chat-input::placeholder { color: #999; }
+    [data-theme='light'] .chat-msg.bot .msg-avatar {
+      background: rgba(0,100,204,0.1); color: #0066cc;
+    }
+    [data-theme='light'] .chat-msg.user .msg-avatar {
+      background: rgba(0,180,100,0.1); color: #00a862;
+    }
+    [data-theme='light'] .typing-dot { background: #0066cc; }
   `;
   document.head.appendChild(style);
 
@@ -280,7 +358,10 @@
   document.getElementById('chat-send-btn').addEventListener('click', sendMessage);
 
   /* ── Helpers ──────────────────────────────────────────────── */
-  function getToken() { return localStorage.getItem('tfai_token'); }
+  function getToken() {
+    // Auth module stores token as 'tfai_access'; fallback to legacy key
+    return localStorage.getItem('tfai_access') || localStorage.getItem('tfai_token');
+  }
   function apiHeaders() {
     return { 'Authorization': `Bearer ${getToken()}`, 'Content-Type': 'application/json' };
   }
@@ -291,17 +372,18 @@
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
 
-  function appendMessage(role, text, intent, messageId) {
+  function appendMessage(role, text, intent, messageId, chartData) {
     // Hide suggestions after first real message
     document.getElementById('chat-suggestions').style.display = 'none';
 
+    const rendered = role === 'bot' ? mdToHtml(text) : escapeHtml(text);
     const div = document.createElement('div');
     div.className = `chat-msg ${role}`;
     div.innerHTML = `
       <div class="msg-avatar">${role === 'bot' ? '🤖' : 'You'}</div>
       <div>
         ${intent && role === 'bot' ? `<div class="intent-chip">${intent.replace(/_/g,' ')}</div>` : ''}
-        <div class="msg-content">${escapeHtml(text)}</div>
+        <div class="msg-content">${rendered}</div>
         ${role === 'bot' && messageId ? `
           <div class="msg-feedback">
             <button class="fb-btn" data-mid="${messageId}" data-helpful="true" title="Helpful">👍</button>
@@ -309,6 +391,31 @@
           </div>` : ''}
       </div>`;
     messagesEl.appendChild(div);
+
+    // Render chart if provided
+    if (chartData && chartData.labels && chartData.datasets && typeof Chart !== 'undefined') {
+      const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+      const wrap = document.createElement('div');
+      wrap.style.cssText = `margin-top:8px;padding:10px;background:${isLight ? 'rgba(0,0,0,0.04)' : 'rgba(0,0,0,0.2)'};border-radius:8px;`;
+      const canvas = document.createElement('canvas');
+      canvas.height = 160;
+      wrap.appendChild(canvas);
+      div.querySelector('.msg-content').appendChild(wrap);
+      const tickColor = isLight ? '#555' : '#94a3b8';
+      const gridColor = isLight ? '#e0e4ea' : '#1e293b';
+      try {
+        const ds = chartData.datasets.map((d,i) => ({
+          label: d.label, data: d.data,
+          backgroundColor: chartData.type==='doughnut' ? d.data.map((_,j)=>['#00d4ff','#7c3aed','#10b981','#f59e0b','#ef4444','#3b82f6'][j%6]) : (d.color||'#00d4ff')+'99',
+          borderColor: d.color||'#00d4ff', borderWidth: 2, fill: chartData.type==='line', tension: 0.3,
+        }));
+        new Chart(canvas, {
+          type: chartData.type||'bar', data:{labels:chartData.labels,datasets:ds},
+          options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:tickColor,font:{size:9}}}},
+            scales: chartData.type==='doughnut'?{}:{x:{ticks:{color:tickColor,font:{size:8}},grid:{color:gridColor}},y:{ticks:{color:tickColor,font:{size:8}},grid:{color:gridColor}}}},
+        });
+      } catch(e) {}
+    }
 
     // Attach feedback handlers
     div.querySelectorAll('.fb-btn').forEach(fbBtn => {
@@ -351,12 +458,24 @@
       .replace(/\n/g,'<br>');
   }
 
+  function mdToHtml(s) {
+    let h = escapeHtml(s);
+    h = h.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    h = h.replace(/\*(.+?)\*/g, '<em>$1</em>');
+    h = h.replace(/^[•\-]\s+(.+)$/gm, '<li>$1</li>');
+    h = h.replace(/(<li>.*<\/li>(<br>)?)+/g, m => '<ul>' + m.replace(/<br>/g,'') + '</ul>');
+    return h;
+  }
+
   /* ── Send message ─────────────────────────────────────────── */
   async function sendMessage() {
     const query = inputEl.value.trim();
     if (!query || isLoading) return;
     const token = getToken();
-    if (!token) return;
+    if (!token) {
+      appendMessage('bot', 'Please log in to use the chatbot.', null, null);
+      return;
+    }
 
     isLoading = true;
     document.getElementById('chat-send-btn').disabled = true;
@@ -386,7 +505,7 @@
       }
 
       const data = await res.json();
-      appendMessage('bot', data.response, data.intent, data.message_id);
+      appendMessage('bot', data.response, data.intent, data.message_id, data.chart);
     } catch (e) {
       removeTyping();
       appendMessage('bot', 'Connection error. Please check your network and try again.', null, null);

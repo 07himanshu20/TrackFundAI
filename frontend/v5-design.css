@@ -315,6 +315,29 @@ body {
 }
 .v5-sidebar-item.active { color: var(--accent3); }
 
+/* Sidebar fund selector */
+.sidebar-fund-section {
+  padding: 12px 10px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.sidebar-fund-selector {
+  width: 100%;
+  max-width: 100%;
+  min-width: unset;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* Dynamic sub-tabs section */
+#sidebar-dynamic {
+  border-bottom: 1px solid var(--border);
+}
+#sidebar-dynamic:empty {
+  display: none;
+  border-bottom: none;
+}
+
 /* ═══ MAIN CONTENT ═══════════════════════════════════════════ */
 .v5-main {
   flex: 1;
@@ -869,7 +892,7 @@ table.v5-table { width: 100%; border-collapse: collapse; }
 .v5-chat-box {
   display: flex;
   flex-direction: column;
-  height: 400px;
+  height: 65vh;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   overflow: hidden;

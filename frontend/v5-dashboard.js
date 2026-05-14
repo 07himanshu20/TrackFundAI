@@ -99,6 +99,124 @@ async function _fetchInvestmentsForSchemes(schemeIds) {
   return all;
 }
 
+/* ── Sidebar dynamic sub-tabs ─────────────────────────────── */
+const SIDEBAR_SUBTABS = {
+  overview: [],
+  portfolio: [
+    { icon: '\u{1F4CA}', label: 'Overview', sub: 'overview' },
+    { icon: '\u{1F3E2}', label: 'Companies', sub: 'companies' },
+    { icon: '\u{1F525}', label: 'Burn & Runway', sub: 'burn' },
+    { icon: '\u{1F6AA}', label: 'Exits', sub: 'exits' },
+    { icon: '\u{1F4C9}', label: 'KPIs', sub: 'kpis' },
+    { icon: '\u26A1', label: 'SaaS Metrics', sub: 'saas' },
+    { icon: '\u{1F3E0}', label: 'Quoted & Unquoted', sub: 'quoted' },
+    { icon: '\u{1F4BC}', label: 'Investments', sub: 'inv-detail' },
+    { icon: '\u{1F4CA}', label: 'Valuations', sub: 'val-tab' },
+    { icon: '\u{1F4CB}', label: 'KPI Tracking', sub: 'kpi-tracking' },
+    { icon: '\u{1F680}', label: 'Exit Scenarios', sub: 'exit-scenarios' },
+    { icon: '\u{1F3DB}', label: 'Board Meetings', sub: 'board-meetings' },
+  ],
+  accounting: [
+    { icon: '\u{1F4C8}', label: 'NAV & Unit Value', sub: 'nav' },
+    { icon: '\u{1F4B5}', label: 'Waterfall', sub: 'waterfall' },
+    { icon: '\u{1F4CB}', label: 'Capital Calls', sub: 'calls' },
+    { icon: '\u{1F4B8}', label: 'Distributions', sub: 'dist' },
+    { icon: '\u{1F4CC}', label: 'Fund P&L', sub: 'fpl' },
+    { icon: '\u{1F4F1}', label: 'NAV Records', sub: 'navrecords' },
+    { icon: '\u{1F4B0}', label: 'Carried Interest', sub: 'carried' },
+    { icon: '\u{1F4DC}', label: 'Fund Ledger', sub: 'ledger' },
+    { icon: '\u{1F4BC}', label: 'Management Fees', sub: 'fees' },
+    { icon: '\u{1F4C1}', label: 'Chart of Accounts', sub: 'coa' },
+    { icon: '\u2696', label: 'Trial Balance', sub: 'tb' },
+    { icon: '\u{1F4CA}', label: 'Financial Statements', sub: 'finstat' },
+  ],
+  financials: [
+    { icon: '\u{1F4C8}', label: 'P&L', sub: 'pl' },
+    { icon: '\u{1F4CC}', label: 'Budget vs Actual', sub: 'bva' },
+    { icon: '\u{1F4F0}', label: 'Consolidated', sub: 'consolidated' },
+  ],
+  valuations: [
+    { icon: '\u{1F4CA}', label: 'Summary', sub: 'summary' },
+    { icon: '\u2699', label: 'Methodology', sub: 'method' },
+    { icon: '\u{1F4C8}', label: 'Value Bridge', sub: 'bridge' },
+  ],
+  investors: [
+    { icon: '\u{1F91D}', label: 'LP Register', sub: 'register' },
+    { icon: '\u{1F5A5}', label: 'Capital Accounts', sub: 'capital' },
+    { icon: '\u2705', label: 'KYC/FATCA', sub: 'kyc' },
+  ],
+  compliance: [
+    { icon: '\u{1F4CA}', label: 'Dashboard', sub: 'dashboard' },
+    { icon: '\u{1F58C}', label: 'SEBI', sub: 'sebi' },
+    { icon: '\u26A0', label: 'Alerts', sub: 'alerts' },
+    { icon: '\u{1F4C5}', label: 'Calendar', sub: 'calendar' },
+  ],
+  benchmarks: [],
+  market: [],
+  analytics: [
+    { icon: '\u{1F916}', label: 'AI Chatbot', sub: 'chatbot' },
+    { icon: '\u{1F4A1}', label: 'AI Insights', sub: 'insights' },
+    { icon: '\u{1F4C9}', label: 'Risk Monitor', sub: 'risk' },
+    { icon: '\u{1F4F0}', label: 'MIS Reports', sub: 'mis' },
+    { icon: '\u2713', label: 'Audit Log', sub: 'audit' },
+    { icon: '\u{1F52E}', label: 'Predictions', sub: 'predict' },
+  ],
+  icworkflow: [],
+};
+
+// Page display names for the sidebar label
+const SIDEBAR_PAGE_LABELS = {
+  overview: 'Dashboard',
+  portfolio: 'Portfolio',
+  accounting: 'Fund Accounting',
+  financials: 'Financials',
+  valuations: 'Valuations',
+  investors: 'Investors',
+  compliance: 'Compliance',
+  benchmarks: 'Benchmarks',
+  market: 'Market Research',
+  analytics: 'AI Analytics',
+  icworkflow: 'IC Workflow',
+};
+
+let _currentPage = 'overview';
+
+function updateSidebarSubtabs(pageId) {
+  _currentPage = pageId;
+  const container = $('sidebar-dynamic');
+  if (!container) return;
+
+  const tabs = SIDEBAR_SUBTABS[pageId] || [];
+  if (!tabs.length) {
+    container.innerHTML = '';
+    return;
+  }
+
+  const label = SIDEBAR_PAGE_LABELS[pageId] || pageId;
+  const activeSub = _activeSubTab[pageId] || tabs[0].sub;
+
+  container.innerHTML =
+    `<div class="v5-sidebar-label">${esc(label)}</div>` +
+    tabs.map(t => {
+      const isActive = t.sub === activeSub ? ' active' : '';
+      return `<div class="v5-sidebar-item sidebar-subtab-item${isActive}" data-page="${pageId}" data-sub="${t.sub}" onclick="onSidebarSubClick(this,'${pageId}','${t.sub}')">` +
+        `<span class="s-icon">${t.icon}</span>${esc(t.label)}` +
+        `</div>`;
+    }).join('');
+}
+
+function onSidebarSubClick(el, page, sub) {
+  // Highlight clicked item in dynamic section
+  const container = $('sidebar-dynamic');
+  if (container) {
+    container.querySelectorAll('.sidebar-subtab-item').forEach(i => i.classList.remove('active'));
+  }
+  if (el) el.classList.add('active');
+
+  // Trigger the sub-tab switch
+  showSub(page, sub);
+}
+
 /* ── Page routing ──────────────────────────────────────────── */
 function showPage(id, btn) {
   document.querySelectorAll('.v5-page').forEach(el => el.classList.remove('active'));
@@ -114,6 +232,9 @@ function showPage(id, btn) {
     const found = tabs.find(t => (t.getAttribute('onclick') || '').includes("'" + id + "'"));
     if (found) found.classList.add('active');
   }
+
+  // Update sidebar sub-tabs for the active page
+  updateSidebarSubtabs(id);
 
   if (!_pageRendered[id]) {
     _pageRendered[id] = true;
@@ -147,6 +268,14 @@ function showSub(page, sub) {
   // Always track the last-clicked sub-tab so fund-switch can reload it
   _activeSubTab[page] = sub;
 
+  // Sync sidebar dynamic sub-tab highlight
+  const sidebarDyn = $('sidebar-dynamic');
+  if (sidebarDyn) {
+    sidebarDyn.querySelectorAll('.sidebar-subtab-item').forEach(i => {
+      i.classList.toggle('active', i.dataset.sub === sub && i.dataset.page === page);
+    });
+  }
+
   const key = page + '-' + sub;
   if (!_subRendered[key]) {
     _subRendered[key] = true;
@@ -155,7 +284,8 @@ function showSub(page, sub) {
 }
 
 function sideActive(el) {
-  document.querySelectorAll('.v5-sidebar-item').forEach(i => i.classList.remove('active'));
+  // Clear active on static sidebar items only (not dynamic sub-tab items)
+  document.querySelectorAll('.v5-sidebar-item:not(.sidebar-subtab-item)').forEach(i => i.classList.remove('active'));
   if (el) el.classList.add('active');
 }
 
@@ -4011,12 +4141,75 @@ async function loadMIS() {
 }
 
 /* ── AI Chatbot ────────────────────────────────────────────── */
+
+/** Simple markdown→HTML: **bold**, *italic*, bullet points, line breaks */
+function mdToHtml(text) {
+  if (!text) return '';
+  let h = esc(text);
+  // Bold
+  h = h.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  // Italic
+  h = h.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  // Bullet points (lines starting with • or -)
+  h = h.replace(/^[•\-]\s+(.+)$/gm, '<li>$1</li>');
+  h = h.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>');
+  // Line breaks
+  h = h.replace(/\n/g, '<br>');
+  return h;
+}
+
+/** Render a Chart.js chart from chatbot chart data */
+function renderChatChart(container, chartData) {
+  if (!chartData || !chartData.labels || !chartData.datasets) return;
+  const wrapper = document.createElement('div');
+  wrapper.className = 'v5-chat-chart';
+  wrapper.style.cssText = 'margin-top:12px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:14px;';
+  const canvas = document.createElement('canvas');
+  canvas.height = 200;
+  wrapper.appendChild(canvas);
+  container.appendChild(wrapper);
+
+  const datasets = chartData.datasets.map(ds => ({
+    label: ds.label,
+    data: ds.data,
+    backgroundColor: chartData.type === 'doughnut'
+      ? chartData.datasets[0].data.map((_, i) => ['#00d4ff','#7c3aed','#10b981','#f59e0b','#ef4444','#3b82f6','#ec4899','#14b8a6'][i % 8])
+      : ds.color + '99',
+    borderColor: ds.color,
+    borderWidth: chartData.type === 'doughnut' ? 2 : 2,
+    fill: chartData.type === 'line',
+    tension: 0.3,
+    pointRadius: chartData.type === 'line' ? 3 : 0,
+  }));
+
+  try {
+    new Chart(canvas, {
+      type: chartData.type || 'bar',
+      data: { labels: chartData.labels, datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: datasets.length > 1 || chartData.type === 'doughnut', labels: { color: '#94a3b8', font: { size: 10 } } },
+          title: { display: !!chartData.title, text: chartData.title || '', color: '#e2e8f0', font: { size: 12 } },
+        },
+        scales: chartData.type === 'doughnut' ? {} : {
+          x: { ticks: { color: '#94a3b8', font: { size: 9 }, maxRotation: 45 }, grid: { color: '#1e293b' } },
+          y: { ticks: { color: '#94a3b8', font: { size: 9 } }, grid: { color: '#1e293b' } },
+        },
+      },
+    });
+  } catch (e) { /* Chart.js not loaded or error */ }
+}
+
+let _aiChatLoading = false;
 async function sendAIChat(text) {
   const inp  = $('ai-chat-inp');
   const msgs = $('ai-chat-msgs');
   const q    = text || (inp ? inp.value.trim() : '');
-  if (!q || !msgs) return;
+  if (!q || !msgs || _aiChatLoading) return;
   if (inp) inp.value = '';
+  _aiChatLoading = true;
 
   msgs.innerHTML += `
     <div class="v5-chat-msg user">
@@ -4036,19 +4229,46 @@ async function sendAIChat(text) {
   try {
     const token  = Auth.getToken();
     const apiBase = (window.location.port === '8000' || !window.location.port) ? '' : 'http://127.0.0.1:8000';
+    const payload = { query: q };
+    if (_ctx.fundId) payload.fund_id = _ctx.fundId;
     const res    = await fetch(`${apiBase}/api/chatbot/query/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify({ query: q }),
+      body: JSON.stringify(payload),
     });
     const data  = await res.json();
     const reply = data.response || 'No response from AI.';
     const typingEl = $(typingId);
-    if (typingEl) typingEl.querySelector('.v5-chat-bubble').textContent = reply;
+    if (typingEl) {
+      const bubble = typingEl.querySelector('.v5-chat-bubble');
+      bubble.innerHTML = mdToHtml(reply);
+      // Render chart if present
+      if (data.chart) renderChatChart(bubble, data.chart);
+      // Render data table if rows present and > 1 row
+      if (data.data && data.data.columns && data.data.rows && data.data.rows.length > 1) {
+        const tbl = document.createElement('div');
+        tbl.className = 'v5-chat-data-table';
+        tbl.style.cssText = 'margin-top:10px;max-height:200px;overflow:auto;font-size:11px;';
+        const cols = data.data.columns;
+        const rows = data.data.rows.slice(0, 15);
+        let html = '<table class="v5-table" style="font-size:11px;"><thead><tr>';
+        cols.forEach(c => html += `<th>${esc(c)}</th>`);
+        html += '</tr></thead><tbody>';
+        rows.forEach(r => {
+          html += '<tr>';
+          r.forEach(v => html += `<td>${esc(String(v ?? '—'))}</td>`);
+          html += '</tr>';
+        });
+        html += '</tbody></table>';
+        tbl.innerHTML = html;
+        bubble.appendChild(tbl);
+      }
+    }
   } catch(e) {
     const typingEl = $(typingId);
     if (typingEl) typingEl.querySelector('.v5-chat-bubble').textContent = 'AI service unavailable. Please try again.';
   }
+  _aiChatLoading = false;
   msgs.scrollTop = msgs.scrollHeight;
 }
 
@@ -4122,6 +4342,9 @@ async function loadNotifCount() {
     }, 400);
   }
 
+  // Initialize sidebar sub-tabs for the currently active page
+  updateSidebarSubtabs(_currentPage);
+
   // loadFundList already triggers onContextChange → loadOverview via the select.
   // Fallback: if no overview rendered within 1.5s (e.g. auth error), load it anyway.
   setTimeout(() => {
@@ -4130,4 +4353,1365 @@ async function loadNotifCount() {
       loadOverview();
     }
   }, 1500);
+
+/* ══════════════════════════════════════════════════════════════
+   EXPORT FUNCTIONS — Full Report PDF, Portfolio CSV, Accounting CSV
+══════════════════════════════════════════════════════════════ */
+
+/* ── Helpers ───────────────────────────────────────────────── */
+function _csvEsc(val) {
+  if (val == null) return '';
+  const s = String(val);
+  if (s.includes(',') || s.includes('"') || s.includes('\n')) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+function _csvRow(arr) { return arr.map(_csvEsc).join(',') + '\n'; }
+function _downloadCSV(filename, csvStr) {
+  const bom = '\uFEFF';
+  const blob = new Blob([bom + csvStr], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
+function _numVal(v) { return v == null ? 0 : parseFloat(v) || 0; }
+function _numStr(v, dec) { return v == null ? '' : Number(v).toFixed(dec ?? 2); }
+
+/* ══════════════════════════════════════════════════════════════
+   HOC-1: FULL REPORT PDF — exportFullReportPDF()
+══════════════════════════════════════════════════════════════ */
+window.exportFullReportPDF = async function() {
+  const btn = $('btn-full-report');
+  if (btn) { btn.disabled = true; btn.textContent = 'Generating PDF…'; }
+
+  try {
+    const schemeIds = _ctx.schemeIds;
+    const qs  = schemeQS(schemeIds);
+    const fqs = _ctx.fundId ? `?fund=${_ctx.fundId}` : '';
+
+    // Fetch all data in parallel
+    const cosUrl = '/portfolio-companies/' + fqs;
+    const [cosRes, invRes, navRes, callsRes, distsRes, exitsRes] = await Promise.allSettled([
+      Auth.apiGet(cosUrl),
+      getInvestmentsForContext(schemeIds),
+      Auth.apiGet('/accounting/nav/' + (qs ? '?' + qs : '')),
+      Auth.apiGet('/lp/capital-calls/' + (qs ? '?' + qs : '')),
+      Auth.apiGet('/lp/distributions/' + (qs ? '?' + qs : '')),
+      Auth.apiGet('/portfolio/exits/' + fqs),
+    ]);
+
+    const cos   = cosRes.value?.results  || cosRes.value  || [];
+    const invs  = Array.isArray(invRes.value) ? invRes.value : [];
+    const navs  = (navRes.value?.results  || navRes.value  || []);
+    const calls = (callsRes.value?.results || callsRes.value || []);
+    const dists = (distsRes.value?.results || distsRes.value || []);
+    const exitsData = exitsRes.value || {};
+    const exits = exitsData.exits || [];
+    const exitSummary = exitsData.summary || {};
+
+    // Compute KPIs
+    const active = cos.filter(c => c.is_active).length;
+    const inactive = cos.length - active;
+    let totalCost = 0, totalFV = 0;
+    invs.forEach(inv => { totalCost += _numVal(inv.total_invested); totalFV += _numVal(inv.latest_valuation); });
+    if (!totalFV && navs.length) {
+      const latest = {}; navs.forEach(n => { if (!latest[n.scheme] || n.nav_date > latest[n.scheme].nav_date) latest[n.scheme] = n; });
+      Object.values(latest).forEach(n => { totalFV += _numVal(n.total_nav); });
+    }
+    if (!totalCost && calls.length) calls.forEach(c => { totalCost += _numVal(c.total_call_amount); });
+    const moic = totalCost > 0 ? totalFV / totalCost : 0;
+    let totalDist = 0; dists.forEach(d => { totalDist += _numVal(d.total_net_amount); });
+    const dpi  = totalCost > 0 ? totalDist / totalCost : 0;
+    const tvpi = totalCost > 0 ? (totalFV + totalDist) / totalCost : 0;
+
+    // IRR
+    let irrNum = 0, irrDen = 0;
+    invs.forEach(inv => { if (inv.irr_pct != null) { const w = _numVal(inv.total_invested); irrNum += parseFloat(inv.irr_pct) * w; irrDen += w; }});
+    let netIrr = irrDen > 0 ? irrNum / irrDen : null;
+    if (netIrr === null && _ctx.fundId) {
+      try { const misIrr = await Auth.apiGet(`/mis/consolidated/?fund=${_ctx.fundId}&line_item=net_irr`);
+        const r = (Array.isArray(misIrr) ? misIrr : (misIrr.results||[])).find(r => r.line_item === 'net_irr');
+        if (r?.total_actual_inr != null) netIrr = parseFloat(r.total_actual_inr);
+      } catch(e){}
+    }
+
+    // Sector data
+    const sectorFV = {}, sectorCost = {}, sectorCount = {};
+    cos.forEach(c => { const s = c.sector || 'Other'; sectorCount[s] = (sectorCount[s]||0)+1; });
+    invs.forEach(inv => { const s = inv.sector || 'Other'; sectorFV[s] = (sectorFV[s]||0)+_numVal(inv.latest_valuation); sectorCost[s] = (sectorCost[s]||0)+_numVal(inv.total_invested); });
+
+    // Top companies by FV
+    const costMap = {}, fvMap = {};
+    invs.forEach(inv => { const n = inv.company_name || inv.portfolio_company_name || '';
+      costMap[n] = (costMap[n]||0) + _numVal(inv.total_invested);
+      fvMap[n]   = (fvMap[n]||0)   + _numVal(inv.latest_valuation);
+    });
+    const topCos = [...cos].sort((a,b) => (fvMap[b.name]||0) - (fvMap[a.name]||0));
+
+    // Stage, Geo, Co-Investor data
+    const stageMap = {}; cos.forEach(c => { const s = c.sector || 'Unknown'; stageMap[s] = (stageMap[s]||0)+1; });
+    const geoMap = {};   cos.forEach(c => { const g = c.headquarters_city || c.headquarters_country || 'Unknown'; geoMap[g] = (geoMap[g]||0)+1; });
+
+    // NAV trend
+    const navByDate = {};
+    [...navs].sort((a,b) => (a.nav_date||'') < (b.nav_date||'') ? -1 : 1)
+      .forEach(n => { navByDate[n.nav_date] = (navByDate[n.nav_date]||0) + _numVal(n.total_nav); });
+
+    // Build PDF HTML
+    const now = new Date().toLocaleDateString('en-IN', {day:'2-digit',month:'short',year:'numeric'});
+    const reportHtml = `
+    <div style="font-family:'Segoe UI',Helvetica,Arial,sans-serif;color:#1a1a2e;padding:30px;max-width:900px;margin:auto;">
+
+      <!-- Header -->
+      <div style="text-align:center;margin-bottom:30px;border-bottom:3px solid #0066cc;padding-bottom:20px;">
+        <h1 style="font-size:26px;color:#0066cc;margin:0;">TrackFundAI — Fund Intelligence Report</h1>
+        <p style="font-size:14px;color:#555;margin:6px 0 0;">${esc(_ctx.fundName)} &middot; Generated ${now}</p>
+      </div>
+
+      <!-- 1. Overview KPIs -->
+      <h2 style="font-size:18px;color:#0066cc;border-bottom:1px solid #ddd;padding-bottom:6px;">1. Fund Overview</h2>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:20px;font-size:13px;">
+        <tr><td style="padding:8px;border:1px solid #ddd;font-weight:600;width:50%;">Portfolio Companies</td><td style="padding:8px;border:1px solid #ddd;">${cos.length} (${active} Active, ${inactive} Inactive)</td></tr>
+        <tr><td style="padding:8px;border:1px solid #ddd;font-weight:600;">Total Fair Value</td><td style="padding:8px;border:1px solid #ddd;">${fmtCr(totalFV)}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #ddd;font-weight:600;">Total Cost Deployed</td><td style="padding:8px;border:1px solid #ddd;">${fmtCr(totalCost)}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #ddd;font-weight:600;">Portfolio MOIC</td><td style="padding:8px;border:1px solid #ddd;">${fmtX(moic)} (Gross, Unrealized)</td></tr>
+        <tr><td style="padding:8px;border:1px solid #ddd;font-weight:600;">Net IRR</td><td style="padding:8px;border:1px solid #ddd;">${netIrr != null ? netIrr.toFixed(1) + '%' : '—'}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #ddd;font-weight:600;">TVPI</td><td style="padding:8px;border:1px solid #ddd;">${fmtX(tvpi)}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #ddd;font-weight:600;">DPI</td><td style="padding:8px;border:1px solid #ddd;">${fmtX(dpi)}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #ddd;font-weight:600;">Total Distributions</td><td style="padding:8px;border:1px solid #ddd;">${fmtCr(totalDist)}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #ddd;font-weight:600;">Deployment</td><td style="padding:8px;border:1px solid #ddd;">${fmtCr(totalCost)}${_ctx.corpusTarget ? ' (' + ((totalCost/_ctx.corpusTarget)*100).toFixed(1) + '% of corpus)' : ''}</td></tr>
+      </table>
+
+      <!-- 2. Sector Allocation by Fair Value -->
+      <h2 style="font-size:18px;color:#0066cc;border-bottom:1px solid #ddd;padding-bottom:6px;">2. Sector Allocation by Fair Value</h2>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:20px;font-size:12px;">
+        <tr style="background:#f0f4f8;"><th style="padding:6px 8px;border:1px solid #ddd;text-align:left;">Sector</th><th style="padding:6px 8px;border:1px solid #ddd;text-align:right;">Fair Value (Cr)</th><th style="padding:6px 8px;border:1px solid #ddd;text-align:right;">% of Total</th></tr>
+        ${Object.entries(sectorFV).sort(([,a],[,b])=>b-a).map(([s,v]) => `<tr><td style="padding:6px 8px;border:1px solid #ddd;">${esc(s)}</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:right;">${fmtCr(v)}</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:right;">${totalFV > 0 ? (v/totalFV*100).toFixed(1)+'%' : '—'}</td></tr>`).join('')}
+      </table>
+
+      <!-- 3. Sector Allocation by Cost -->
+      <h2 style="font-size:18px;color:#0066cc;border-bottom:1px solid #ddd;padding-bottom:6px;">3. Sector Allocation by Cost</h2>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:20px;font-size:12px;">
+        <tr style="background:#f0f4f8;"><th style="padding:6px 8px;border:1px solid #ddd;text-align:left;">Sector</th><th style="padding:6px 8px;border:1px solid #ddd;text-align:right;">Cost (Cr)</th><th style="padding:6px 8px;border:1px solid #ddd;text-align:right;">% of Total</th></tr>
+        ${Object.entries(sectorCost).sort(([,a],[,b])=>b-a).map(([s,v]) => `<tr><td style="padding:6px 8px;border:1px solid #ddd;">${esc(s)}</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:right;">${fmtCr(v)}</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:right;">${totalCost > 0 ? (v/totalCost*100).toFixed(1)+'%' : '—'}</td></tr>`).join('')}
+      </table>
+
+      <!-- 4. Sector Allocation by Count -->
+      <h2 style="font-size:18px;color:#0066cc;border-bottom:1px solid #ddd;padding-bottom:6px;">4. Sector Allocation by Company Count</h2>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:20px;font-size:12px;">
+        <tr style="background:#f0f4f8;"><th style="padding:6px 8px;border:1px solid #ddd;text-align:left;">Sector</th><th style="padding:6px 8px;border:1px solid #ddd;text-align:right;">Count</th><th style="padding:6px 8px;border:1px solid #ddd;text-align:right;">% of Total</th></tr>
+        ${Object.entries(sectorCount).sort(([,a],[,b])=>b-a).map(([s,v]) => `<tr><td style="padding:6px 8px;border:1px solid #ddd;">${esc(s)}</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:right;">${v}</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:right;">${cos.length > 0 ? (v/cos.length*100).toFixed(1)+'%' : '—'}</td></tr>`).join('')}
+      </table>
+
+      <!-- 5. Performance Snapshot & NAV Trends -->
+      <h2 style="font-size:18px;color:#0066cc;border-bottom:1px solid #ddd;padding-bottom:6px;">5. Performance Snapshot & NAV Trends</h2>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:12px;font-size:13px;">
+        <tr><td style="padding:8px;border:1px solid #ddd;font-weight:600;width:50%;">MOIC</td><td style="padding:8px;border:1px solid #ddd;">${fmtX(moic)}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #ddd;font-weight:600;">TVPI</td><td style="padding:8px;border:1px solid #ddd;">${fmtX(tvpi)}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #ddd;font-weight:600;">DPI</td><td style="padding:8px;border:1px solid #ddd;">${fmtX(dpi)}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #ddd;font-weight:600;">Net IRR</td><td style="padding:8px;border:1px solid #ddd;">${netIrr != null ? netIrr.toFixed(1)+'%' : '—'}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #ddd;font-weight:600;">Active / Total Companies</td><td style="padding:8px;border:1px solid #ddd;">${active} / ${cos.length}</td></tr>
+      </table>
+      <h3 style="font-size:14px;color:#333;margin:12px 0 6px;">NAV Trend (Recent Periods)</h3>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:20px;font-size:12px;">
+        <tr style="background:#f0f4f8;"><th style="padding:6px 8px;border:1px solid #ddd;text-align:left;">Period</th><th style="padding:6px 8px;border:1px solid #ddd;text-align:right;">Total NAV (Cr)</th></tr>
+        ${Object.entries(navByDate).sort(([a],[b])=>a<b?-1:1).slice(-12).map(([d,v]) => `<tr><td style="padding:6px 8px;border:1px solid #ddd;">${d}</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:right;">${fmtCr(v)}</td></tr>`).join('') || '<tr><td colspan="2" style="padding:6px 8px;border:1px solid #ddd;color:#999;">No NAV data</td></tr>'}
+      </table>
+
+      <!-- 6. Top Portfolio Companies by Fair Value -->
+      <h2 style="font-size:18px;color:#0066cc;border-bottom:1px solid #ddd;padding-bottom:6px;">6. Top Portfolio Companies by Fair Value</h2>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:20px;font-size:12px;">
+        <tr style="background:#f0f4f8;"><th style="padding:6px 8px;border:1px solid #ddd;text-align:left;">#</th><th style="padding:6px 8px;border:1px solid #ddd;text-align:left;">Company</th><th style="padding:6px 8px;border:1px solid #ddd;text-align:left;">Sector</th><th style="padding:6px 8px;border:1px solid #ddd;text-align:right;">Cost (Cr)</th><th style="padding:6px 8px;border:1px solid #ddd;text-align:right;">FV (Cr)</th><th style="padding:6px 8px;border:1px solid #ddd;text-align:right;">MOIC</th><th style="padding:6px 8px;border:1px solid #ddd;text-align:center;">Status</th></tr>
+        ${topCos.map((c, i) => { const cost = costMap[c.name]||0; const fv = fvMap[c.name]||0; const m = cost > 0 ? (fv/cost).toFixed(2)+'x' : '—';
+          return `<tr><td style="padding:6px 8px;border:1px solid #ddd;">${i+1}</td><td style="padding:6px 8px;border:1px solid #ddd;font-weight:600;">${esc(c.name)}</td><td style="padding:6px 8px;border:1px solid #ddd;">${esc(c.sector||'—')}</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:right;">${cost > 0 ? fmtCr(cost) : '—'}</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:right;">${fv > 0 ? fmtCr(fv) : '—'}</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:right;">${m}</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:center;">${c.is_active ? 'Active' : 'Inactive'}</td></tr>`; }).join('')}
+      </table>
+
+      <!-- 7. Stage, Geography & Co-Investors -->
+      <h2 style="font-size:18px;color:#0066cc;border-bottom:1px solid #ddd;padding-bottom:6px;">7. Stage, Geography & Co-Investors</h2>
+      <div style="display:flex;gap:30px;margin-bottom:20px;">
+        <div style="flex:1;">
+          <h3 style="font-size:14px;color:#333;margin:0 0 8px;">Stage / Sector Mix</h3>
+          <table style="width:100%;border-collapse:collapse;font-size:12px;">
+            ${Object.entries(stageMap).sort(([,a],[,b])=>b-a).map(([s,c]) => `<tr><td style="padding:4px 8px;border:1px solid #ddd;">${esc(s)}</td><td style="padding:4px 8px;border:1px solid #ddd;text-align:right;">${c}</td></tr>`).join('')}
+          </table>
+        </div>
+        <div style="flex:1;">
+          <h3 style="font-size:14px;color:#333;margin:0 0 8px;">Geography</h3>
+          <table style="width:100%;border-collapse:collapse;font-size:12px;">
+            ${Object.entries(geoMap).sort(([,a],[,b])=>b-a).slice(0,15).map(([g,c]) => `<tr><td style="padding:4px 8px;border:1px solid #ddd;">${esc(g)}</td><td style="padding:4px 8px;border:1px solid #ddd;text-align:right;">${c}</td></tr>`).join('')}
+          </table>
+        </div>
+      </div>
+
+      <!-- 8. Recent Capital Calls -->
+      <h2 style="font-size:18px;color:#0066cc;border-bottom:1px solid #ddd;padding-bottom:6px;">8. Recent Capital Calls</h2>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:20px;font-size:12px;">
+        <tr style="background:#f0f4f8;"><th style="padding:6px 8px;border:1px solid #ddd;text-align:left;">#</th><th style="padding:6px 8px;border:1px solid #ddd;text-align:left;">Scheme / LP</th><th style="padding:6px 8px;border:1px solid #ddd;text-align:left;">Call Date</th><th style="padding:6px 8px;border:1px solid #ddd;text-align:right;">Amount (Cr)</th><th style="padding:6px 8px;border:1px solid #ddd;text-align:center;">Status</th></tr>
+        ${calls.slice(0,20).map((c,i) => { const lp = (c.purpose||c.scheme_name||'—').split(' — ')[0];
+          return `<tr><td style="padding:6px 8px;border:1px solid #ddd;">${i+1}</td><td style="padding:6px 8px;border:1px solid #ddd;">${esc(lp)}</td><td style="padding:6px 8px;border:1px solid #ddd;">${c.call_date||'—'}</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:right;">${fmtCr(_numVal(c.total_call_amount))}</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:center;">${esc(c.status_display||c.call_status||'—')}</td></tr>`; }).join('') || '<tr><td colspan="5" style="padding:6px 8px;border:1px solid #ddd;color:#999;">No capital calls</td></tr>'}
+      </table>
+
+      <!-- 9. Realized Returns (Exits) -->
+      <h2 style="font-size:18px;color:#0066cc;border-bottom:1px solid #ddd;padding-bottom:6px;">9. Realized Returns (Exits)</h2>
+      ${exits.length ? `
+      <table style="width:100%;border-collapse:collapse;margin-bottom:12px;font-size:13px;">
+        <tr><td style="padding:6px;border:1px solid #ddd;font-weight:600;">Total Proceeds</td><td style="padding:6px;border:1px solid #ddd;">${exitSummary.total_proceeds ? fmtCr(exitSummary.total_proceeds) : '—'}</td><td style="padding:6px;border:1px solid #ddd;font-weight:600;">Avg Exit MOIC</td><td style="padding:6px;border:1px solid #ddd;">${exitSummary.avg_moic != null ? fmtX(exitSummary.avg_moic) : '—'}</td></tr>
+        <tr><td style="padding:6px;border:1px solid #ddd;font-weight:600;">DPI</td><td style="padding:6px;border:1px solid #ddd;">${exitSummary.dpi != null ? exitSummary.dpi.toFixed(2)+'x' : '—'}</td><td style="padding:6px;border:1px solid #ddd;font-weight:600;">Total Exits</td><td style="padding:6px;border:1px solid #ddd;">${exitSummary.total_exits || exits.length}</td></tr>
+      </table>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:20px;font-size:12px;">
+        <tr style="background:#f0f4f8;"><th style="padding:6px 8px;border:1px solid #ddd;text-align:left;">Company</th><th style="padding:6px 8px;border:1px solid #ddd;text-align:left;">Sector</th><th style="padding:6px 8px;border:1px solid #ddd;text-align:left;">Exit Type</th><th style="padding:6px 8px;border:1px solid #ddd;text-align:right;">Cost (Cr)</th><th style="padding:6px 8px;border:1px solid #ddd;text-align:right;">Proceeds (Cr)</th><th style="padding:6px 8px;border:1px solid #ddd;text-align:right;">MOIC</th><th style="padding:6px 8px;border:1px solid #ddd;text-align:right;">IRR%</th><th style="padding:6px 8px;border:1px solid #ddd;">Exit Date</th></tr>
+        ${exits.map(e => `<tr><td style="padding:6px 8px;border:1px solid #ddd;">${esc(e.company_name)}</td><td style="padding:6px 8px;border:1px solid #ddd;">${esc(e.sector||'—')}</td><td style="padding:6px 8px;border:1px solid #ddd;">${esc(e.exit_type_display||e.exit_type)}</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:right;">${e.cost ? fmtCr(e.cost) : '—'}</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:right;">${e.proceeds != null ? fmtCr(e.proceeds) : '—'}</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:right;">${e.moic != null ? e.moic.toFixed(2)+'x' : '—'}</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:right;">${(e.net_irr_pct ?? e.irr_pct) != null ? (e.net_irr_pct ?? e.irr_pct).toFixed(1)+'%' : '—'}</td><td style="padding:6px 8px;border:1px solid #ddd;">${e.exit_date||'—'}</td></tr>`).join('')}
+      </table>` : '<p style="color:#999;font-size:13px;">No exits recorded for this fund.</p>'}
+
+      <!-- 10. Fund Scorecard -->
+      <h2 style="font-size:18px;color:#0066cc;border-bottom:1px solid #ddd;padding-bottom:6px;">10. Fund Scorecard</h2>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:20px;font-size:13px;">
+        <tr style="background:#f0f4f8;"><th style="padding:8px;border:1px solid #ddd;text-align:left;">Metric</th><th style="padding:8px;border:1px solid #ddd;text-align:right;">Value</th></tr>
+        <tr><td style="padding:8px;border:1px solid #ddd;">MOIC</td><td style="padding:8px;border:1px solid #ddd;text-align:right;">${fmtX(moic)}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #ddd;">Net IRR</td><td style="padding:8px;border:1px solid #ddd;text-align:right;">${netIrr != null ? netIrr.toFixed(1)+'%' : '—'}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #ddd;">TVPI</td><td style="padding:8px;border:1px solid #ddd;text-align:right;">${fmtX(tvpi)}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #ddd;">DPI</td><td style="padding:8px;border:1px solid #ddd;text-align:right;">${fmtX(dpi)}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #ddd;">Active Companies</td><td style="padding:8px;border:1px solid #ddd;text-align:right;">${active}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #ddd;">Total Companies</td><td style="padding:8px;border:1px solid #ddd;text-align:right;">${cos.length}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #ddd;">Total Cost Deployed</td><td style="padding:8px;border:1px solid #ddd;text-align:right;">${fmtCr(totalCost)}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #ddd;">Total Fair Value</td><td style="padding:8px;border:1px solid #ddd;text-align:right;">${fmtCr(totalFV)}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #ddd;">Total Distributions</td><td style="padding:8px;border:1px solid #ddd;text-align:right;">${fmtCr(totalDist)}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #ddd;">Avg Ticket Size</td><td style="padding:8px;border:1px solid #ddd;text-align:right;">${cos.length ? fmtCr(totalCost / cos.length) : '—'}</td></tr>
+      </table>
+
+      <div style="text-align:center;color:#999;font-size:10px;border-top:1px solid #ddd;padding-top:12px;margin-top:30px;">
+        TrackFundAI &middot; Confidential &middot; ${_ctx.fundName} &middot; ${now}
+      </div>
+    </div>`;
+
+    // Generate PDF with html2pdf
+    const container = document.createElement('div');
+    container.innerHTML = reportHtml;
+    document.body.appendChild(container);
+
+    const fileName = `TrackFundAI_Full_Report_${(_ctx.fundName||'AllFunds').replace(/[^a-zA-Z0-9]/g,'_')}_${new Date().toISOString().slice(0,10)}.pdf`;
+
+    await html2pdf().set({
+      margin:       [10, 10, 10, 10],
+      filename:     fileName,
+      image:        { type: 'jpeg', quality: 0.95 },
+      html2canvas:  { scale: 2, useCORS: true, letterRendering: true },
+      jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' },
+      pagebreak:    { mode: ['avoid-all', 'css', 'legacy'] },
+    }).from(container).save();
+
+    document.body.removeChild(container);
+
+  } catch(e) {
+    console.error('PDF export error:', e);
+    alert('Error generating PDF report. Please try again.');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '&#128202; Full Report'; }
+  }
+};
+
+/* ══════════════════════════════════════════════════════════════
+   HOC-2: PORTFOLIO CSV — exportPortfolioCSV()
+══════════════════════════════════════════════════════════════ */
+window.exportPortfolioCSV = async function() {
+  const btn = $('btn-export-portfolio-csv');
+  if (btn) { btn.disabled = true; btn.textContent = 'Exporting…'; }
+
+  try {
+    const fqs = _ctx.fundId ? `?fund=${_ctx.fundId}` : '';
+    const schemeIds = _ctx.schemeIds;
+
+    // Fetch all data in parallel
+    const [cosRes, invCtx, burnRes, exitsRes, kpisRes, saasRes, qqRes, invDetailRes, valRes, kpiTrackRes, exitScenRes] = await Promise.allSettled([
+      Auth.apiGet('/portfolio-companies/' + fqs),
+      getInvestmentsForContext(schemeIds),
+      Auth.apiGet('/portfolio/burn-runway/' + fqs),
+      Auth.apiGet('/portfolio/exits/' + fqs),
+      Auth.apiGet('/portfolio/kpis/' + fqs),
+      Auth.apiGet('/portfolio/saas-metrics/' + fqs),
+      Auth.apiGet('/portfolio/quoted-unquoted/' + fqs),
+      Auth.apiGet('/portfolio/investments/' + fqs),
+      Auth.apiGet('/portfolio/valuations/' + fqs),
+      Auth.apiGet('/portfolio/kpi-tracking/' + fqs),
+      Auth.apiGet('/portfolio/exit-scenarios/' + fqs),
+    ]);
+
+    const cos   = cosRes.value?.results || cosRes.value || [];
+    const invs  = Array.isArray(invCtx.value) ? invCtx.value : [];
+    const burnData  = burnRes.value || {};
+    const exitsData = exitsRes.value || {};
+    const kpisData  = kpisRes.value || {};
+    const saasData  = saasRes.value || {};
+    const qqData    = qqRes.value || {};
+    const invDetailData = invDetailRes.value || {};
+    const valData   = valRes.value || {};
+    const kpiTrackData = kpiTrackRes.value || {};
+    const exitScenData = exitScenRes.value || {};
+
+    // Build cost/FV maps
+    const costMap = {}, fvMap = {}, stageMap = {}, irrMap = {};
+    invs.forEach(inv => {
+      const n = inv.company_name || inv.portfolio_company_name || '';
+      costMap[n] = (costMap[n]||0) + _numVal(inv.total_invested);
+      fvMap[n]   = (fvMap[n]||0)   + _numVal(inv.latest_valuation);
+      if (inv.stage && !stageMap[n]) stageMap[n] = inv.stage;
+      if (inv.irr_pct != null && irrMap[n] == null) irrMap[n] = parseFloat(inv.irr_pct);
+    });
+
+    let totalCost = 0, totalFV = 0;
+    invs.forEach(inv => { totalCost += _numVal(inv.total_invested); totalFV += _numVal(inv.latest_valuation); });
+
+    let csv = '';
+
+    // ── Section 1: Overview Summary ──
+    csv += _csvRow(['=== PORTFOLIO OVERVIEW ===']);
+    csv += _csvRow(['Metric', 'Value']);
+    csv += _csvRow(['Fund', _ctx.fundName]);
+    csv += _csvRow(['Total Companies', cos.length]);
+    csv += _csvRow(['Active Companies', cos.filter(c => c.is_active).length]);
+    csv += _csvRow(['Total Cost Deployed (Cr)', _numStr(totalCost)]);
+    csv += _csvRow(['Total Fair Value (Cr)', _numStr(totalFV)]);
+    csv += _csvRow(['Avg Ticket (Cr)', cos.length ? _numStr(totalCost / cos.length) : '']);
+    csv += _csvRow(['Unrealized Gain (MOIC)', totalCost > 0 ? _numStr(totalFV / totalCost) + 'x' : '']);
+    csv += '\n';
+
+    // Sector Breakdown
+    csv += _csvRow(['--- Sector Breakdown ---']);
+    csv += _csvRow(['Sector', 'Company Count', 'FV (Cr)', '% of FV', 'Cost (Cr)']);
+    const sectors = {};
+    cos.forEach(c => { const s = c.sector || 'Other'; sectors[s] = (sectors[s]||0)+1; });
+    const sectorFVLocal = {}, sectorCostLocal = {};
+    invs.forEach(inv => { const s = inv.sector || 'Other'; sectorFVLocal[s] = (sectorFVLocal[s]||0)+_numVal(inv.latest_valuation); sectorCostLocal[s] = (sectorCostLocal[s]||0)+_numVal(inv.total_invested); });
+    Object.entries(sectors).sort(([,a],[,b])=>b-a).forEach(([s,cnt]) => {
+      csv += _csvRow([s, cnt, _numStr(sectorFVLocal[s]||0), totalFV > 0 ? _numStr((sectorFVLocal[s]||0)/totalFV*100,1)+'%' : '', _numStr(sectorCostLocal[s]||0)]);
+    });
+    csv += '\n';
+
+    // ── Section 2: All Companies ──
+    csv += _csvRow(['=== ALL PORTFOLIO COMPANIES ===']);
+    csv += _csvRow(['#', 'Company', 'Sector', 'Stage', 'City', 'Cost (Cr)', 'FV (Cr)', 'IRR%', 'MOIC', 'Status']);
+    cos.forEach((c, i) => {
+      const cost = costMap[c.name] || 0;
+      const fv   = fvMap[c.name]   || 0;
+      const moic = cost > 0 ? (fv/cost).toFixed(2)+'x' : '';
+      csv += _csvRow([i+1, c.name||'', c.sector||'', stageMap[c.name]||'', c.headquarters_city||'',
+        _numStr(cost), _numStr(fv), irrMap[c.name] != null ? irrMap[c.name].toFixed(1) : '', moic, c.is_active ? 'Active' : 'Inactive']);
+    });
+    csv += '\n';
+
+    // ── Section 3: Burn & Runway ──
+    const burnCos = burnData.companies || [];
+    csv += _csvRow(['=== BURN & RUNWAY ===']);
+    csv += _csvRow(['Summary', 'Avg Gross Burn (Cr)', 'Avg Net Burn (Cr)', 'Avg Runway (mo)', 'Total Cash (Cr)']);
+    csv += _csvRow(['', _numStr(burnData.avg_gross_burn), _numStr(burnData.avg_net_burn), burnData.avg_runway != null ? burnData.avg_runway.toFixed(1) : '', _numStr(burnData.total_cash)]);
+    csv += _csvRow(['#', 'Company', 'Gross Burn (Cr)', 'Net Burn (Cr)', 'Cash Balance (Cr)', 'Runway (mo)', 'Risk']);
+    burnCos.forEach((c, i) => {
+      const risk = c.runway_months == null ? '' : c.runway_months < 6 ? 'High' : c.runway_months < 12 ? 'Watch' : 'Safe';
+      csv += _csvRow([i+1, c.company_name||'', _numStr(c.gross_burn), _numStr(c.net_burn), _numStr(c.cash_balance), c.runway_months != null ? c.runway_months.toFixed(1) : '', risk]);
+    });
+    csv += '\n';
+
+    // ── Section 4: Exits ──
+    const exitsList = exitsData.exits || [];
+    const exitSum = exitsData.summary || {};
+    csv += _csvRow(['=== EXITS ===']);
+    csv += _csvRow(['Summary', 'Total Proceeds (Cr)', 'Avg MOIC', 'Avg IRR%', 'DPI', 'Total Exits']);
+    csv += _csvRow(['', _numStr(exitSum.total_proceeds), exitSum.avg_moic != null ? _numStr(exitSum.avg_moic) : '', exitSum.avg_irr != null ? _numStr(exitSum.avg_irr,1) : '', exitSum.dpi != null ? _numStr(exitSum.dpi) : '', exitSum.total_exits||'']);
+    csv += _csvRow(['#', 'Company', 'Sector', 'Exit Type', 'Cost (Cr)', 'Proceeds (Cr)', 'MOIC', 'IRR%', 'Exit Date']);
+    exitsList.forEach((e, i) => {
+      const irr = (e.net_irr_pct ?? e.irr_pct);
+      csv += _csvRow([i+1, e.company_name||'', e.sector||'', e.exit_type_display||e.exit_type||'', _numStr(e.cost), e.proceeds != null ? _numStr(e.proceeds) : '', e.moic != null ? _numStr(e.moic) : '', irr != null ? irr.toFixed(1) : '', e.exit_date||'']);
+    });
+    csv += '\n';
+
+    // ── Section 5: KPIs ──
+    const kpis = kpisData.kpis || [];
+    csv += _csvRow(['=== KPIs ===']);
+    csv += _csvRow(['#', 'Company', 'Metric', 'Value', 'Period', 'Format']);
+    kpis.forEach((k, i) => {
+      let v = k.value;
+      if (v != null) {
+        if (k.format === 'currency') v = _numStr(v);
+        else if (k.format === 'percent') v = v.toFixed(2) + '%';
+        else if (k.format === 'ratio') v = v.toFixed(2) + 'x';
+        else v = String(v);
+      } else v = '';
+      csv += _csvRow([i+1, k.company_name||'', k.kpi_name||'', v, k.period||'', k.format||'']);
+    });
+    csv += '\n';
+
+    // ── Section 6: SaaS Metrics ──
+    const saas = saasData.companies || [];
+    csv += _csvRow(['=== SaaS METRICS ===']);
+    csv += _csvRow(['#', 'Company', 'Sector', 'MRR (Cr)', 'ARR (Cr)', 'NRR%', 'Churn%', 'CAC', 'LTV', 'LTV/CAC']);
+    saas.forEach((c, i) => {
+      csv += _csvRow([i+1, c.company_name||'', c.sector||'', _numStr(c.mrr), _numStr(c.arr), c.nrr != null ? c.nrr.toFixed(1) : '', c.churn_rate != null ? c.churn_rate.toFixed(2) : '', c.cac != null ? _numStr(c.cac,0) : '', c.ltv != null ? _numStr(c.ltv,0) : '', c.ltv_cac_ratio != null ? c.ltv_cac_ratio.toFixed(1) : '']);
+    });
+    csv += '\n';
+
+    // ── Section 7: Quoted & Unquoted ──
+    const quoted = qqData.quoted || [];
+    const unquoted = qqData.unquoted || [];
+    csv += _csvRow(['=== QUOTED (LISTED) COMPANIES ===']);
+    csv += _csvRow(['#', 'Company', 'Sector', 'Exchange', 'Cost (Cr)', 'FV (Cr)', 'IPEV Level']);
+    quoted.forEach((c, i) => {
+      csv += _csvRow([i+1, c.name||'', c.sector||'', c.exchange||'', _numStr(c.cost), _numStr(c.fair_value), c.ipev_level||'']);
+    });
+    csv += '\n';
+    csv += _csvRow(['=== UNQUOTED (PRIVATE) COMPANIES ===']);
+    csv += _csvRow(['#', 'Company', 'Sector', 'Cost (Cr)', 'FV (Cr)', 'IPEV Level']);
+    unquoted.forEach((c, i) => {
+      csv += _csvRow([i+1, c.name||'', c.sector||'', _numStr(c.cost), _numStr(c.fair_value), c.ipev_level||'']);
+    });
+    csv += '\n';
+
+    // ── Section 8: Investments Detail ──
+    const invDetail = invDetailData.investments || [];
+    csv += _csvRow(['=== INVESTMENTS DETAIL ===']);
+    csv += _csvRow(['#', 'Company', 'Scheme', 'Sector', 'Stage', 'Instrument', 'Invested (Cr)', 'Ownership%', 'IRR%', 'FV (Cr)', 'Status', 'Date']);
+    invDetail.forEach((inv, i) => {
+      csv += _csvRow([i+1, inv.company_name||'', inv.scheme_name||'', inv.sector||'', inv.stage||'', inv.instrument_type_display||inv.instrument_type||'',
+        _numStr(inv.total_invested), inv.ownership_pct != null ? inv.ownership_pct.toFixed(2) : '', inv.irr_pct != null ? inv.irr_pct.toFixed(1) : '',
+        inv.latest_valuation != null ? _numStr(inv.latest_valuation) : '', inv.status_display||inv.status||'', inv.investment_date ? inv.investment_date.slice(0,10) : '']);
+    });
+    csv += '\n';
+
+    // ── Section 9: Valuations ──
+    const vals = valData.valuations || [];
+    csv += _csvRow(['=== VALUATIONS ===']);
+    csv += _csvRow(['#', 'Company', 'Scheme', 'Date', 'Fair Value (Cr)', 'Methodology', 'IPEV Level', 'MOIC', 'Status', 'Submitted By', 'Approved By']);
+    vals.forEach((v, i) => {
+      csv += _csvRow([i+1, v.company_name||'', v.scheme_name||'', v.valuation_date ? v.valuation_date.slice(0,10) : '', _numStr(v.fair_value),
+        v.methodology_display||v.methodology||'', v.ipev_level||'', v.multiple != null ? v.multiple.toFixed(2) : '', v.status||'', v.submitted_by||'', v.approved_by||'']);
+    });
+    csv += '\n';
+
+    // ── Section 10: KPI Tracking ──
+    const kpiTrack = kpiTrackData.kpis || [];
+    csv += _csvRow(['=== KPI TRACKING ===']);
+    csv += _csvRow(['#', 'Company', 'KPI Metric', 'Period', 'Value', 'Format', 'Status', 'Submitted By', 'Submitted At', 'Reviewed By']);
+    kpiTrack.forEach((k, i) => {
+      let v = k.value;
+      if (v != null) {
+        if (k.format === 'currency') v = _numStr(v);
+        else if (k.format === 'percent') v = v.toFixed(2) + '%';
+        else if (k.format === 'ratio') v = v.toFixed(2) + 'x';
+        else v = String(v);
+      } else v = '';
+      csv += _csvRow([i+1, k.company_name||'', k.kpi_name||'', k.period ? k.period.slice(0,7) : '', v, k.format||'', k.status||'', k.submitted_by||'', k.submitted_at ? k.submitted_at.slice(0,10) : '', k.reviewed_by||'']);
+    });
+    csv += '\n';
+
+    // ── Section 11: Exit Scenarios ──
+    const exitScens = exitScenData.scenarios || [];
+    csv += _csvRow(['=== EXIT SCENARIOS ===']);
+    csv += _csvRow(['#', 'Company', 'Scheme', 'Exit Type', 'Actual?', 'Exit Date', 'Proceeds (Cr)', 'MOIC', 'IRR%', 'Nature', 'Buyer']);
+    exitScens.forEach((e, i) => {
+      csv += _csvRow([i+1, e.company_name||'', e.scheme_name||'', e.exit_type_display||e.exit_type||'', e.is_actual ? 'Yes' : 'No',
+        e.exit_date ? e.exit_date.slice(0,10) : '', e.proceeds != null ? _numStr(e.proceeds) : '', e.moic != null ? _numStr(e.moic) : '',
+        e.irr_pct != null ? e.irr_pct.toFixed(1) : '', e.gain_loss_nature||'', e.buyer_name||'']);
+    });
+
+    const fileName = `TrackFundAI_Portfolio_${(_ctx.fundName||'AllFunds').replace(/[^a-zA-Z0-9]/g,'_')}_${new Date().toISOString().slice(0,10)}.csv`;
+    _downloadCSV(fileName, csv);
+
+  } catch(e) {
+    console.error('Portfolio CSV error:', e);
+    alert('Error exporting Portfolio CSV. Please try again.');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '&#128228; Export CSV'; }
+  }
+};
+
+/* ══════════════════════════════════════════════════════════════
+   HOC-3: FUND ACCOUNTING CSV — exportAccountingCSV()
+══════════════════════════════════════════════════════════════ */
+window.exportAccountingCSV = async function() {
+  const btn = $('btn-export-accounting-csv');
+  if (btn) { btn.disabled = true; btn.textContent = 'Exporting…'; }
+
+  try {
+    const fqs  = _ctx.fundId ? `?fund=${_ctx.fundId}` : '';
+    const qs   = schemeQS(_ctx.schemeIds);
+
+    // Fetch all accounting data in parallel
+    const [navRes, carryRes, callsRes, distsRes, ledgerRes, feesRes, coaRes] = await Promise.allSettled([
+      Auth.apiGet('/accounting/nav/' + (fqs || (qs ? '?' + qs : ''))),
+      Auth.apiGet('/accounting/carry/' + fqs),
+      Auth.apiGet('/lp/capital-calls/' + (qs ? '?' + qs : fqs)),
+      Auth.apiGet('/lp/distributions/' + (qs ? '?' + qs : fqs)),
+      Auth.apiGet('/accounting/ledger/' + fqs),
+      Auth.apiGet('/accounting/fees/' + fqs),
+      Auth.apiGet('/accounting/chart-of-accounts/'),
+    ]);
+
+    const navArr   = (navRes.value?.results   || navRes.value   || []).sort((a,b) => (b.nav_date||'') > (a.nav_date||'') ? 1 : -1);
+    const carries  = carryRes.value?.results   || carryRes.value   || [];
+    const calls    = callsRes.value?.results   || callsRes.value   || [];
+    const dists    = distsRes.value?.results    || distsRes.value    || [];
+    const ledger   = ledgerRes.value?.results   || ledgerRes.value   || [];
+    const fees     = feesRes.value?.results     || feesRes.value     || [];
+    const coa      = coaRes.value?.results      || coaRes.value      || [];
+
+    let csv = '';
+
+    // ── Section 1: NAV Summary ──
+    csv += _csvRow(['=== NAV SUMMARY ===']);
+    const latestByScheme = {};
+    navArr.forEach(n => { if (!latestByScheme[n.scheme]) latestByScheme[n.scheme] = n; });
+    const latestArr = Object.values(latestByScheme);
+    const totalNav = latestArr.reduce((s,n) => s + _numVal(n.total_nav), 0);
+    csv += _csvRow(['Metric', 'Value']);
+    csv += _csvRow(['Total NAV (Latest)', _numStr(totalNav)]);
+    csv += _csvRow(['Avg NAV per Unit', latestArr.length ? _numStr(latestArr.reduce((s,n) => s + _numVal(n.nav_per_unit), 0) / latestArr.length, 4) : '']);
+    csv += _csvRow(['Total Unrealized Gains', _numStr(latestArr.reduce((s,n) => s + _numVal(n.unrealized_gains), 0))]);
+    csv += _csvRow(['Total Realized Gains', _numStr(latestArr.reduce((s,n) => s + _numVal(n.realized_gains), 0))]);
+    csv += _csvRow(['Total Mgmt Fee', _numStr(navArr.reduce((s,n) => s + _numVal(n.management_fee_payable), 0))]);
+    csv += '\n';
+
+    // ── Section 2: NAV History ──
+    csv += _csvRow(['=== NAV HISTORY ===']);
+    csv += _csvRow(['Period', 'Scheme', 'Total NAV', 'NAV per Unit', 'Units Outstanding', 'Investments at FV', 'Cash', 'Receivables', 'Mgmt Fee Payable', 'Other Liabilities', 'Unrealized Gains', 'Realized Gains', 'Reconciled', 'Depository']);
+    navArr.forEach(n => {
+      csv += _csvRow([n.nav_date||'', n.scheme_name||'', _numStr(n.total_nav), _numStr(n.nav_per_unit, 4), _numStr(n.total_units_outstanding, 4),
+        _numStr(n.investments_at_fair_value), _numStr(n.cash_and_equivalents), _numStr(n.receivables), _numStr(n.management_fee_payable),
+        _numStr(n.other_liabilities), _numStr(n.unrealized_gains), _numStr(n.realized_gains),
+        n.depository_reconciled ? 'Yes' : 'No', n.depository_type||'']);
+    });
+    csv += '\n';
+
+    // ── Section 3: Waterfall & Carry ──
+    csv += _csvRow(['=== CARRY & CLAWBACK ===']);
+    csv += _csvRow(['Scheme', 'Calculation Date', 'Status', 'Total Distributions', 'Called Capital', 'Preferred Return', 'Carry Base', 'Gross Carry', 'Net Carry', 'GP Clawback']);
+    carries.forEach(c => {
+      csv += _csvRow([c.scheme_name||'', c.calculation_date||'', c.status_display||c.calculation_status||'',
+        _numStr(c.total_distributions), _numStr(c.total_called_capital), _numStr(c.preferred_return_amount),
+        _numStr(c.carry_base), _numStr(c.carry_amount_gross), _numStr(c.carry_amount_net), _numStr(c.gp_clawback_provision)]);
+    });
+    csv += '\n';
+
+    // ── Section 4: Capital Calls ──
+    csv += _csvRow(['=== CAPITAL CALLS ===']);
+    csv += _csvRow(['#', 'LP / Scheme', 'Call Date', 'Amount (Cr)', 'Status', 'Purpose']);
+    calls.forEach((c, i) => {
+      const parts = (c.purpose||c.scheme_name||'').split(' — ');
+      csv += _csvRow([i+1, parts[0]||'', c.call_date||'', _numStr(c.total_call_amount), c.status_display||c.call_status||'', parts.length > 1 ? parts.slice(1).join(' — ') : '']);
+    });
+    csv += '\n';
+
+    // ── Section 5: Distributions ──
+    csv += _csvRow(['=== DISTRIBUTIONS ===']);
+    csv += _csvRow(['#', 'Scheme / LP', 'Date', 'Amount (Cr)', 'Type', 'Status']);
+    dists.forEach((d, i) => {
+      csv += _csvRow([i+1, d.scheme_name||'', d.distribution_date||'', _numStr(d.total_net_amount), d.type_display||d.distribution_type||'', d.status_display||d.distribution_status||'']);
+    });
+    csv += '\n';
+
+    // ── Section 6: Fund P&L ──
+    csv += _csvRow(['=== FUND P&L ===']);
+    csv += _csvRow(['Period', 'Scheme', 'Unrealized Gains', 'Realized Gains', 'Mgmt Fee', 'Other Liabilities', 'Gross Income', 'Total Expenses', 'Net P&L']);
+    const plArr = [...navArr].sort((a,b) => (a.nav_date||'') < (b.nav_date||'') ? -1 : 1);
+    plArr.forEach(n => {
+      const unrealized = _numVal(n.unrealized_gains);
+      const realized   = _numVal(n.realized_gains);
+      const mgmtFee    = _numVal(n.management_fee_payable);
+      const otherLiab  = _numVal(n.other_liabilities);
+      const gross = unrealized + realized;
+      const exp   = mgmtFee + otherLiab;
+      csv += _csvRow([n.nav_date||'', n.scheme_name||'', _numStr(unrealized), _numStr(realized), _numStr(mgmtFee), _numStr(otherLiab), _numStr(gross), _numStr(exp), _numStr(gross - exp)]);
+    });
+    csv += '\n';
+
+    // ── Section 7: Fund Ledger ──
+    csv += _csvRow(['=== FUND LEDGER ===']);
+    csv += _csvRow(['Entry #', 'Date', 'Description', 'Debit Account', 'Credit Account', 'Amount', 'Ref Type', 'Status']);
+    ledger.forEach(e => {
+      csv += _csvRow([e.journal_entry_number||'', e.entry_date||'', e.description||'', e.debit_account_name||'', e.credit_account_name||'',
+        _numStr(e.amount), e.reference_type_display||e.reference_type||'', e.is_reversed ? 'REVERSED' : 'POSTED']);
+    });
+    csv += '\n';
+
+    // ── Section 8: Management Fees ──
+    csv += _csvRow(['=== MANAGEMENT FEES ===']);
+    csv += _csvRow(['Scheme', 'Period Start', 'Period End', 'Fee Basis', 'Rate%', 'Fee Amount', 'GST', 'Total (incl GST)', 'Invoice #', 'Status']);
+    fees.forEach(f => {
+      csv += _csvRow([f.scheme_name||'', f.period_start||'', f.period_end||'', _numStr(f.fee_basis_amount),
+        f.fee_rate ? parseFloat(f.fee_rate).toFixed(4) : '', _numStr(f.fee_amount), _numStr(f.gst_amount),
+        _numStr(f.total_fee_with_gst), f.invoice_number||'', f.status_display||f.fee_status||'']);
+    });
+    csv += '\n';
+
+    // ── Section 9: Chart of Accounts ──
+    csv += _csvRow(['=== CHART OF ACCOUNTS ===']);
+    csv += _csvRow(['Code', 'Account Name', 'Type', 'Parent Account', 'Description', 'Active']);
+    coa.forEach(a => {
+      csv += _csvRow([a.account_code||'', a.account_name||'', a.account_type_display||a.account_type||'', a.parent_account_name||'', a.description||'', a.is_active ? 'Yes' : 'No']);
+    });
+
+    const fileName = `TrackFundAI_Accounting_${(_ctx.fundName||'AllFunds').replace(/[^a-zA-Z0-9]/g,'_')}_${new Date().toISOString().slice(0,10)}.csv`;
+    _downloadCSV(fileName, csv);
+
+  } catch(e) {
+    console.error('Accounting CSV error:', e);
+    alert('Error exporting Accounting CSV. Please try again.');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '&#128228; Export CSV'; }
+  }
+};
+
+/* ── Shared PDF helpers ────────────────────────────────────── */
+const _pdfStyles = `
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: 'Segoe UI', Helvetica, Arial, sans-serif; color: #1a1a2e; }
+    .pdf-header { text-align:center; margin-bottom:28px; border-bottom:3px solid #0066cc; padding-bottom:18px; }
+    .pdf-header h1 { font-size:24px; color:#0066cc; margin:0; }
+    .pdf-header p  { font-size:13px; color:#555; margin:5px 0 0; }
+    .pdf-section { margin-bottom:22px; page-break-inside:avoid; }
+    .pdf-section h2 { font-size:16px; color:#0066cc; border-bottom:1px solid #d0d5dd; padding-bottom:5px; margin:0 0 10px; }
+    .pdf-section h3 { font-size:13px; color:#333; margin:10px 0 6px; }
+    .pdf-kpi-grid { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:14px; }
+    .pdf-kpi { flex:1 1 140px; border:1px solid #d0d5dd; border-radius:6px; padding:10px 12px; background:#f8fafc; }
+    .pdf-kpi .label { font-size:10px; color:#666; text-transform:uppercase; letter-spacing:.03em; }
+    .pdf-kpi .value { font-size:18px; font-weight:700; color:#1a1a2e; margin-top:2px; }
+    .pdf-kpi .sub   { font-size:10px; color:#888; margin-top:1px; }
+    table { width:100%; border-collapse:collapse; font-size:11px; margin-bottom:8px; }
+    th { background:#edf0f5; color:#1a1a2e; font-weight:700; text-align:left; padding:5px 7px; border:1px solid #d0d5dd; font-size:10px; }
+    td { padding:4px 7px; border:1px solid #d0d5dd; color:#333; }
+    .r { text-align:right; } .c { text-align:center; } .b { font-weight:600; }
+    .pdf-footer { text-align:center; color:#999; font-size:9px; border-top:1px solid #d0d5dd; padding-top:10px; margin-top:24px; }
+    .pdf-empty { color:#999; font-size:11px; font-style:italic; padding:8px 0; }
+  </style>`;
+
+function _pdfKpi(label, value, sub) {
+  return `<div class="pdf-kpi"><div class="label">${label}</div><div class="value">${value}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div>`;
+}
+
+async function _generatePDF(htmlContent, fileName) {
+  const container = document.createElement('div');
+  container.innerHTML = htmlContent;
+  document.body.appendChild(container);
+  try {
+    await html2pdf().set({
+      margin:       [8, 8, 8, 8],
+      filename:     fileName,
+      image:        { type: 'jpeg', quality: 0.92 },
+      html2canvas:  { scale: 2, useCORS: true, letterRendering: true },
+      jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' },
+      pagebreak:    { mode: ['css', 'legacy'], avoid: ['.pdf-kpi', 'tr'] },
+    }).from(container).save();
+  } finally {
+    document.body.removeChild(container);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════
+   PORTFOLIO PDF — exportPortfolioPDF()
+══════════════════════════════════════════════════════════════ */
+window.exportPortfolioPDF = async function() {
+  const btn = $('btn-export-portfolio-pdf');
+  if (btn) { btn.disabled = true; btn.textContent = 'Generating PDF…'; }
+
+  try {
+    const fqs = _ctx.fundId ? `?fund=${_ctx.fundId}` : '';
+    const schemeIds = _ctx.schemeIds;
+
+    const [cosRes, invCtx, burnRes, exitsRes, kpisRes, saasRes, qqRes, invDetailRes, valRes, kpiTrackRes, exitScenRes, holdingRes] = await Promise.allSettled([
+      Auth.apiGet('/portfolio-companies/' + fqs),
+      getInvestmentsForContext(schemeIds),
+      Auth.apiGet('/portfolio/burn-runway/' + fqs),
+      Auth.apiGet('/portfolio/exits/' + fqs),
+      Auth.apiGet('/portfolio/kpis/' + fqs),
+      Auth.apiGet('/portfolio/saas-metrics/' + fqs),
+      Auth.apiGet('/portfolio/quoted-unquoted/' + fqs),
+      Auth.apiGet('/portfolio/investments/' + fqs),
+      Auth.apiGet('/portfolio/valuations/' + fqs),
+      Auth.apiGet('/portfolio/kpi-tracking/' + fqs),
+      Auth.apiGet('/portfolio/exit-scenarios/' + fqs),
+      Auth.apiGet('/portfolio/avg-holding/' + fqs),
+    ]);
+
+    const cos      = cosRes.value?.results || cosRes.value || [];
+    const invs     = Array.isArray(invCtx.value) ? invCtx.value : [];
+    const burnData = burnRes.value || {};
+    const exitsData= exitsRes.value || {};
+    const kpisData = kpisRes.value || {};
+    const saasData = saasRes.value || {};
+    const qqData   = qqRes.value || {};
+    const invDetail= (invDetailRes.value || {}).investments || [];
+    const vals     = (valRes.value || {}).valuations || [];
+    const kpiTrack = (kpiTrackRes.value || {}).kpis || [];
+    const exitScens= (exitScenRes.value || {}).scenarios || [];
+    const holdData = holdingRes.value || {};
+
+    // Compute summary maps
+    const costMap = {}, fvMap2 = {}, stageMap2 = {}, irrMap2 = {};
+    invs.forEach(inv => {
+      const n = inv.company_name || inv.portfolio_company_name || '';
+      costMap[n]  = (costMap[n]||0)  + _numVal(inv.total_invested);
+      fvMap2[n]   = (fvMap2[n]||0)   + _numVal(inv.latest_valuation);
+      if (inv.stage && !stageMap2[n]) stageMap2[n] = inv.stage;
+      if (inv.irr_pct != null && irrMap2[n] == null) irrMap2[n] = parseFloat(inv.irr_pct);
+    });
+    let totalCost = 0, totalFV = 0;
+    invs.forEach(inv => { totalCost += _numVal(inv.total_invested); totalFV += _numVal(inv.latest_valuation); });
+    const active = cos.filter(c => c.is_active).length;
+    const moicVal = totalCost > 0 ? totalFV / totalCost : 0;
+    const avgHold = holdData.avg_holding_years;
+
+    // Sectors
+    const sectors = {};
+    cos.forEach(c => { const s = c.sector || 'Other'; sectors[s] = (sectors[s]||0)+1; });
+    const sectorFVm = {}, sectorCostm = {};
+    invs.forEach(inv => { const s = inv.sector || 'Other'; sectorFVm[s] = (sectorFVm[s]||0)+_numVal(inv.latest_valuation); sectorCostm[s] = (sectorCostm[s]||0)+_numVal(inv.total_invested); });
+
+    const now = new Date().toLocaleDateString('en-IN', {day:'2-digit',month:'short',year:'numeric'});
+
+    let html = `<div style="max-width:900px;margin:auto;padding:20px;">${_pdfStyles}`;
+
+    // Header
+    html += `<div class="pdf-header"><h1>Portfolio Report</h1><p>${esc(_ctx.fundName)} &middot; Generated ${now}</p></div>`;
+
+    // ── 1. Overview ──
+    html += `<div class="pdf-section"><h2>1. Portfolio Overview</h2>
+      <div class="pdf-kpi-grid">
+        ${_pdfKpi('Total Companies', cos.length, `${active} Active · ${cos.length - active} Inactive`)}
+        ${_pdfKpi('Total Cost Deployed', fmtCr(totalCost), `${cos.length} companies`)}
+        ${_pdfKpi('Total Fair Value', fmtCr(totalFV), `vs Cost ${fmtCr(totalCost)}`)}
+        ${_pdfKpi('Avg Ticket', cos.length ? fmtCr(totalCost / cos.length) : '—', 'per company')}
+        ${_pdfKpi('Unrealized Gain (MOIC)', fmtX(moicVal), 'vs cost')}
+        ${_pdfKpi('Avg Holding', avgHold != null ? avgHold.toFixed(1) + ' yrs' : '—', 'fully diluted')}
+      </div>
+      <h3>Sector Breakdown</h3>
+      <table><tr><th>Sector</th><th class="r">Companies</th><th class="r">FV (Cr)</th><th class="r">% of FV</th><th class="r">Cost (Cr)</th></tr>
+      ${Object.entries(sectors).sort(([,a],[,b])=>b-a).map(([s,c]) => `<tr><td class="b">${esc(s)}</td><td class="r">${c}</td><td class="r">${_numStr(sectorFVm[s]||0)}</td><td class="r">${totalFV > 0 ? ((sectorFVm[s]||0)/totalFV*100).toFixed(1)+'%' : '—'}</td><td class="r">${_numStr(sectorCostm[s]||0)}</td></tr>`).join('')}
+      </table>
+    </div>`;
+
+    // ── 2. All Companies ──
+    html += `<div class="pdf-section" style="page-break-before:always;"><h2>2. All Portfolio Companies (${cos.length})</h2>
+      <table><tr><th>#</th><th>Company</th><th>Sector</th><th>Stage</th><th>City</th><th class="r">Cost (Cr)</th><th class="r">FV (Cr)</th><th class="r">IRR%</th><th class="r">MOIC</th><th class="c">Status</th></tr>
+      ${cos.map((c, i) => { const cost = costMap[c.name]||0; const fv = fvMap2[c.name]||0; const m = cost > 0 ? (fv/cost).toFixed(2)+'x' : '—';
+        return `<tr><td>${i+1}</td><td class="b">${esc(c.name||'—')}</td><td>${esc(c.sector||'—')}</td><td>${esc(stageMap2[c.name]||'—')}</td><td>${esc(c.headquarters_city||'—')}</td><td class="r">${cost > 0 ? _numStr(cost) : '—'}</td><td class="r">${fv > 0 ? _numStr(fv) : '—'}</td><td class="r">${irrMap2[c.name] != null ? irrMap2[c.name].toFixed(1) : '—'}</td><td class="r">${m}</td><td class="c">${c.is_active ? 'Active' : 'Inactive'}</td></tr>`; }).join('')}
+      </table></div>`;
+
+    // ── 3. Burn & Runway ──
+    const burnCos = burnData.companies || [];
+    html += `<div class="pdf-section" style="page-break-before:always;"><h2>3. Burn & Runway (${burnCos.length} companies)</h2>
+      <div class="pdf-kpi-grid">
+        ${_pdfKpi('Avg Gross Burn', burnData.avg_gross_burn != null ? fmtCr(burnData.avg_gross_burn) : '—', '/Month')}
+        ${_pdfKpi('Avg Net Burn', burnData.avg_net_burn != null ? fmtCr(burnData.avg_net_burn) : '—', '/Month')}
+        ${_pdfKpi('Avg Runway', burnData.avg_runway != null ? burnData.avg_runway.toFixed(1) + ' mo' : '—', 'Portfolio avg')}
+        ${_pdfKpi('Total Cash', burnData.total_cash != null ? fmtCr(burnData.total_cash) : '—', 'All companies')}
+      </div>`;
+    if (burnCos.length) {
+      html += `<table><tr><th>#</th><th>Company</th><th class="r">Gross Burn (Cr)</th><th class="r">Net Burn (Cr)</th><th class="r">Cash (Cr)</th><th class="r">Runway (mo)</th><th class="c">Risk</th></tr>
+      ${burnCos.map((c, i) => { const rmo = c.runway_months; const risk = rmo == null ? '—' : rmo < 6 ? 'High' : rmo < 12 ? 'Watch' : 'Safe';
+        return `<tr><td>${i+1}</td><td class="b">${esc(c.company_name)}</td><td class="r">${c.gross_burn != null ? _numStr(c.gross_burn) : '—'}</td><td class="r">${c.net_burn != null ? _numStr(c.net_burn) : '—'}</td><td class="r">${c.cash_balance != null ? _numStr(c.cash_balance) : '—'}</td><td class="r">${rmo != null ? rmo.toFixed(1) : '—'}</td><td class="c">${risk}</td></tr>`; }).join('')}
+      </table>`;
+    } else { html += '<p class="pdf-empty">No burn/runway data.</p>'; }
+    html += '</div>';
+
+    // ── 4. Exits ──
+    const exitsList = exitsData.exits || [];
+    const exitSum = exitsData.summary || {};
+    html += `<div class="pdf-section" style="page-break-before:always;"><h2>4. Exits (${exitsList.length} exits)</h2>
+      <div class="pdf-kpi-grid">
+        ${_pdfKpi('Total Proceeds', exitSum.total_proceeds ? fmtCr(exitSum.total_proceeds) : '—', 'exits')}
+        ${_pdfKpi('Avg Exit MOIC', exitSum.avg_moic != null ? fmtX(exitSum.avg_moic) : '—', 'Gross realized')}
+        ${_pdfKpi('Avg IRR', (exitSum.avg_net_irr ?? exitSum.avg_irr) != null ? (exitSum.avg_net_irr ?? exitSum.avg_irr).toFixed(1)+'%' : '—', 'On exits')}
+        ${_pdfKpi('DPI', exitSum.dpi != null ? exitSum.dpi.toFixed(2)+'x' : '—', 'Distributed / Paid-in')}
+        ${_pdfKpi('Total Exits', exitSum.total_exits ?? exitsList.length, 'Completed')}
+      </div>`;
+    if (exitsList.length) {
+      html += `<table><tr><th>#</th><th>Company</th><th>Sector</th><th>Exit Type</th><th class="r">Cost (Cr)</th><th class="r">Proceeds (Cr)</th><th class="r">MOIC</th><th class="r">IRR%</th><th>Exit Date</th></tr>
+      ${exitsList.map((e, i) => { const irr = e.net_irr_pct ?? e.irr_pct;
+        return `<tr><td>${i+1}</td><td class="b">${esc(e.company_name)}</td><td>${esc(e.sector||'—')}</td><td>${esc(e.exit_type_display||e.exit_type)}</td><td class="r">${e.cost ? _numStr(e.cost) : '—'}</td><td class="r">${e.proceeds != null ? _numStr(e.proceeds) : '—'}</td><td class="r">${e.moic != null ? e.moic.toFixed(2)+'x' : '—'}</td><td class="r">${irr != null ? irr.toFixed(1) : '—'}</td><td>${e.exit_date||'—'}</td></tr>`; }).join('')}
+      </table>`;
+    } else { html += '<p class="pdf-empty">No exits recorded.</p>'; }
+    html += '</div>';
+
+    // ── 5. KPIs ──
+    const kpis = kpisData.kpis || [];
+    html += `<div class="pdf-section" style="page-break-before:always;"><h2>5. Portfolio KPIs (${kpis.length} records)</h2>`;
+    if (kpis.length) {
+      html += `<table><tr><th>#</th><th>Company</th><th>Metric</th><th class="r">Value</th><th>Period</th><th>Format</th></tr>
+      ${kpis.map((k, i) => {
+        let v = '—'; if (k.value != null) { if (k.format === 'currency') v = fmtCr(k.value); else if (k.format === 'percent') v = k.value.toFixed(2)+'%'; else if (k.format === 'ratio') v = k.value.toFixed(2)+'x'; else v = Number(k.value).toLocaleString('en-IN'); }
+        return `<tr><td>${i+1}</td><td class="b">${esc(k.company_name||'—')}</td><td>${esc(k.kpi_name||'—')}</td><td class="r">${v}</td><td>${k.period||'—'}</td><td>${esc(k.format||'—')}</td></tr>`; }).join('')}
+      </table>`;
+    } else { html += '<p class="pdf-empty">No KPI data.</p>'; }
+    html += '</div>';
+
+    // ── 6. SaaS Metrics ──
+    const saas = saasData.companies || [];
+    html += `<div class="pdf-section" style="page-break-before:always;"><h2>6. SaaS Metrics (${saas.length} companies)</h2>`;
+    if (saas.length) {
+      let totalMRR = 0, totalARR = 0; saas.forEach(c => { if (c.mrr) totalMRR += c.mrr; if (c.arr) totalARR += c.arr; });
+      html += `<div class="pdf-kpi-grid">
+        ${_pdfKpi('Portfolio MRR', totalMRR ? fmtCr(totalMRR) : '—', 'Monthly Recurring Rev')}
+        ${_pdfKpi('Portfolio ARR', totalARR ? fmtCr(totalARR) : '—', 'Annual Run Rate')}
+      </div>
+      <table><tr><th>#</th><th>Company</th><th>Sector</th><th class="r">MRR (Cr)</th><th class="r">ARR (Cr)</th><th class="r">NRR%</th><th class="r">Churn%</th><th class="r">CAC</th><th class="r">LTV</th><th class="r">LTV/CAC</th></tr>
+      ${saas.map((c, i) => `<tr><td>${i+1}</td><td class="b">${esc(c.company_name||'—')}</td><td>${esc(c.sector||'—')}</td><td class="r">${c.mrr != null ? _numStr(c.mrr) : '—'}</td><td class="r">${c.arr != null ? _numStr(c.arr) : '—'}</td><td class="r">${c.nrr != null ? c.nrr.toFixed(1)+'%' : '—'}</td><td class="r">${c.churn_rate != null ? c.churn_rate.toFixed(2)+'%' : '—'}</td><td class="r">${c.cac != null ? '₹'+Number(c.cac).toLocaleString('en-IN',{maximumFractionDigits:0}) : '—'}</td><td class="r">${c.ltv != null ? '₹'+Number(c.ltv).toLocaleString('en-IN',{maximumFractionDigits:0}) : '—'}</td><td class="r">${c.ltv_cac_ratio != null ? c.ltv_cac_ratio.toFixed(1)+'x' : '—'}</td></tr>`).join('')}
+      </table>`;
+    } else { html += '<p class="pdf-empty">No SaaS metrics data.</p>'; }
+    html += '</div>';
+
+    // ── 7. Quoted & Unquoted ──
+    const quoted = qqData.quoted || [];
+    const unquoted = qqData.unquoted || [];
+    const qqSummary = qqData.summary || {};
+    html += `<div class="pdf-section" style="page-break-before:always;"><h2>7. Quoted & Unquoted Companies</h2>
+      <div class="pdf-kpi-grid">
+        ${_pdfKpi('Quoted (Listed)', qqSummary.quoted_count ?? quoted.length, qqSummary.quoted_cost ? 'Cost: '+fmtCr(qqSummary.quoted_cost) : '')}
+        ${_pdfKpi('Unquoted (Private)', qqSummary.unquoted_count ?? unquoted.length, qqSummary.unquoted_cost ? 'Cost: '+fmtCr(qqSummary.unquoted_cost) : '')}
+      </div>`;
+    if (quoted.length) {
+      html += `<h3>Quoted (Listed) — ${quoted.length} companies</h3>
+      <table><tr><th>#</th><th>Company</th><th>Sector</th><th>Exchange</th><th class="r">Cost (Cr)</th><th class="r">FV (Cr)</th><th>IPEV</th></tr>
+      ${quoted.map((c, i) => `<tr><td>${i+1}</td><td class="b">${esc(c.name)}</td><td>${esc(c.sector||'—')}</td><td>${esc(c.exchange||'—')}</td><td class="r">${_numStr(c.cost)}</td><td class="r">${_numStr(c.fair_value)}</td><td>${c.ipev_level||'—'}</td></tr>`).join('')}
+      </table>`;
+    }
+    if (unquoted.length) {
+      html += `<h3>Unquoted (Private) — ${unquoted.length} companies</h3>
+      <table><tr><th>#</th><th>Company</th><th>Sector</th><th class="r">Cost (Cr)</th><th class="r">FV (Cr)</th><th>IPEV</th></tr>
+      ${unquoted.map((c, i) => `<tr><td>${i+1}</td><td class="b">${esc(c.name)}</td><td>${esc(c.sector||'—')}</td><td class="r">${_numStr(c.cost)}</td><td class="r">${_numStr(c.fair_value)}</td><td>${c.ipev_level||'—'}</td></tr>`).join('')}
+      </table>`;
+    }
+    if (!quoted.length && !unquoted.length) html += '<p class="pdf-empty">No quoted/unquoted data.</p>';
+    html += '</div>';
+
+    // ── 8. Investments Detail ──
+    html += `<div class="pdf-section" style="page-break-before:always;"><h2>8. Investments Detail (${invDetail.length} investments)</h2>`;
+    if (invDetail.length) {
+      html += `<table><tr><th>#</th><th>Company</th><th>Scheme</th><th>Sector</th><th>Stage</th><th>Instrument</th><th class="r">Invested (Cr)</th><th class="r">Own%</th><th class="r">IRR%</th><th class="r">FV (Cr)</th><th class="c">Status</th><th>Date</th></tr>
+      ${invDetail.map((inv, i) => `<tr><td>${i+1}</td><td class="b">${esc(inv.company_name)}</td><td style="font-size:10px;">${esc(inv.scheme_name)}</td><td>${esc(inv.sector||'—')}</td><td>${esc(inv.stage||'—')}</td><td style="font-size:10px;">${esc(inv.instrument_type_display||inv.instrument_type||'—')}</td><td class="r">${inv.total_invested ? _numStr(inv.total_invested) : '—'}</td><td class="r">${inv.ownership_pct != null ? inv.ownership_pct.toFixed(2) : '—'}</td><td class="r">${inv.irr_pct != null ? inv.irr_pct.toFixed(1) : '—'}</td><td class="r">${inv.latest_valuation != null ? _numStr(inv.latest_valuation) : '—'}</td><td class="c">${esc(inv.status_display||inv.status||'—')}</td><td style="font-size:10px;">${inv.investment_date ? inv.investment_date.slice(0,10) : '—'}</td></tr>`).join('')}
+      </table>`;
+    } else { html += '<p class="pdf-empty">No investment data.</p>'; }
+    html += '</div>';
+
+    // ── 9. Valuations ──
+    html += `<div class="pdf-section" style="page-break-before:always;"><h2>9. Valuations (${vals.length} records)</h2>`;
+    if (vals.length) {
+      const ipevLabel = { 1: 'L1 Quoted', 2: 'L2 Observable', 3: 'L3 Unobservable' };
+      html += `<table><tr><th>#</th><th>Company</th><th>Scheme</th><th>Date</th><th class="r">Fair Value (Cr)</th><th>Methodology</th><th class="c">IPEV</th><th class="r">MOIC</th><th class="c">Status</th><th>Submitted</th><th>Approved</th></tr>
+      ${vals.map((v, i) => `<tr><td>${i+1}</td><td class="b">${esc(v.company_name)}</td><td style="font-size:10px;">${esc(v.scheme_name)}</td><td style="font-size:10px;">${v.valuation_date ? v.valuation_date.slice(0,10) : '—'}</td><td class="r">${_numStr(v.fair_value)}</td><td style="font-size:10px;">${esc(v.methodology_display||v.methodology||'—')}</td><td class="c" style="font-size:10px;">${v.ipev_level ? esc(ipevLabel[v.ipev_level]||'L'+v.ipev_level) : '—'}</td><td class="r">${v.multiple != null ? v.multiple.toFixed(2)+'x' : '—'}</td><td class="c">${esc(v.status||'—')}</td><td style="font-size:10px;">${esc(v.submitted_by||'—')}</td><td style="font-size:10px;">${esc(v.approved_by||'—')}</td></tr>`).join('')}
+      </table>`;
+    } else { html += '<p class="pdf-empty">No valuation data.</p>'; }
+    html += '</div>';
+
+    // ── 10. KPI Tracking ──
+    html += `<div class="pdf-section" style="page-break-before:always;"><h2>10. KPI Tracking (${kpiTrack.length} submissions)</h2>`;
+    if (kpiTrack.length) {
+      html += `<table><tr><th>#</th><th>Company</th><th>KPI Metric</th><th>Period</th><th class="r">Value</th><th>Format</th><th class="c">Status</th><th>Submitted By</th><th>Date</th><th>Reviewed By</th></tr>
+      ${kpiTrack.map((k, i) => {
+        let v = '—'; if (k.value != null) { if (k.format === 'currency') v = fmtCr(k.value); else if (k.format === 'percent') v = k.value.toFixed(2)+'%'; else if (k.format === 'ratio') v = k.value.toFixed(2)+'x'; else v = String(k.value); }
+        return `<tr><td>${i+1}</td><td class="b">${esc(k.company_name)}</td><td>${esc(k.kpi_name)}</td><td style="font-size:10px;">${k.period ? k.period.slice(0,7) : '—'}</td><td class="r">${v}</td><td style="font-size:10px;">${esc(k.format||'—')}</td><td class="c">${esc(k.status||'—')}</td><td style="font-size:10px;">${esc(k.submitted_by||'—')}</td><td style="font-size:10px;">${k.submitted_at ? k.submitted_at.slice(0,10) : '—'}</td><td style="font-size:10px;">${esc(k.reviewed_by||'—')}</td></tr>`; }).join('')}
+      </table>`;
+    } else { html += '<p class="pdf-empty">No KPI tracking data.</p>'; }
+    html += '</div>';
+
+    // ── 11. Exit Scenarios ──
+    html += `<div class="pdf-section" style="page-break-before:always;"><h2>11. Exit Scenarios (${exitScens.length} records)</h2>`;
+    if (exitScens.length) {
+      const actual = exitScens.filter(r => r.is_actual).length;
+      html += `<div class="pdf-kpi-grid">
+        ${_pdfKpi('Total Scenarios', exitScens.length, 'Across portfolio')}
+        ${_pdfKpi('Actual Exits', actual, 'Completed exits')}
+        ${_pdfKpi('Modelled', exitScens.length - actual, 'IPO / M&A / Secondary')}
+      </div>
+      <table><tr><th>#</th><th>Company</th><th>Scheme</th><th>Exit Type</th><th class="c">Actual?</th><th>Exit Date</th><th class="r">Proceeds (Cr)</th><th class="r">MOIC</th><th class="r">IRR%</th><th>Nature</th><th>Buyer</th></tr>
+      ${exitScens.map((e, i) => `<tr><td>${i+1}</td><td class="b">${esc(e.company_name)}</td><td style="font-size:10px;">${esc(e.scheme_name)}</td><td>${esc(e.exit_type_display||e.exit_type)}</td><td class="c">${e.is_actual ? 'Yes' : 'No'}</td><td style="font-size:10px;">${e.exit_date ? e.exit_date.slice(0,10) : '—'}</td><td class="r">${e.proceeds != null ? _numStr(e.proceeds) : '—'}</td><td class="r">${e.moic != null ? e.moic.toFixed(2)+'x' : '—'}</td><td class="r">${e.irr_pct != null ? e.irr_pct.toFixed(1) : '—'}</td><td style="font-size:10px;">${esc(e.gain_loss_nature||'—')}</td><td style="font-size:10px;">${esc(e.buyer_name||'—')}</td></tr>`).join('')}
+      </table>`;
+    } else { html += '<p class="pdf-empty">No exit scenarios.</p>'; }
+    html += '</div>';
+
+    // Footer
+    html += `<div class="pdf-footer">TrackFundAI &middot; Confidential &middot; ${esc(_ctx.fundName)} &middot; Portfolio Report &middot; ${now}</div></div>`;
+
+    const fileName = `TrackFundAI_Portfolio_${(_ctx.fundName||'AllFunds').replace(/[^a-zA-Z0-9]/g,'_')}_${new Date().toISOString().slice(0,10)}.pdf`;
+    await _generatePDF(html, fileName);
+
+  } catch(e) {
+    console.error('Portfolio PDF error:', e);
+    alert('Error generating Portfolio PDF. Please try again.');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '&#128196; Export PDF'; }
+  }
+};
+
+/* ══════════════════════════════════════════════════════════════
+   FUND ACCOUNTING PDF — exportAccountingPDF()
+══════════════════════════════════════════════════════════════ */
+window.exportAccountingPDF = async function() {
+  const btn = $('btn-export-accounting-pdf');
+  if (btn) { btn.disabled = true; btn.textContent = 'Generating PDF…'; }
+
+  try {
+    const fqs = _ctx.fundId ? `?fund=${_ctx.fundId}` : '';
+    const qs  = schemeQS(_ctx.schemeIds);
+
+    const [navRes, carryRes, callsRes, distsRes, ledgerRes, feesRes, coaRes] = await Promise.allSettled([
+      Auth.apiGet('/accounting/nav/' + (fqs || (qs ? '?' + qs : ''))),
+      Auth.apiGet('/accounting/carry/' + fqs),
+      Auth.apiGet('/lp/capital-calls/' + (qs ? '?' + qs : fqs)),
+      Auth.apiGet('/lp/distributions/' + (qs ? '?' + qs : fqs)),
+      Auth.apiGet('/accounting/ledger/' + fqs),
+      Auth.apiGet('/accounting/fees/' + fqs),
+      Auth.apiGet('/accounting/chart-of-accounts/'),
+    ]);
+
+    const navArr  = (navRes.value?.results  || navRes.value  || []).sort((a,b) => (b.nav_date||'') > (a.nav_date||'') ? 1 : -1);
+    const carries = carryRes.value?.results  || carryRes.value  || [];
+    const calls   = callsRes.value?.results  || callsRes.value  || [];
+    const dists   = distsRes.value?.results   || distsRes.value   || [];
+    const ledger  = ledgerRes.value?.results  || ledgerRes.value  || [];
+    const fees    = feesRes.value?.results    || feesRes.value    || [];
+    const coa     = coaRes.value?.results     || coaRes.value     || [];
+
+    // NAV aggregates
+    const latestByScheme = {};
+    navArr.forEach(n => { if (!latestByScheme[n.scheme]) latestByScheme[n.scheme] = n; });
+    const latestArr = Object.values(latestByScheme);
+    const totalNav = latestArr.reduce((s,n) => s + _numVal(n.total_nav), 0);
+    const avgNavPerUnit = latestArr.length ? latestArr.reduce((s,n) => s + _numVal(n.nav_per_unit), 0) / latestArr.length : 0;
+    const totalUnrealized = latestArr.reduce((s,n) => s + _numVal(n.unrealized_gains), 0);
+    const totalRealized   = latestArr.reduce((s,n) => s + _numVal(n.realized_gains), 0);
+    const totalMgmtFee    = navArr.reduce((s,n) => s + _numVal(n.management_fee_payable), 0);
+
+    // Carry aggregates
+    let totalCalled = 0, totalDistC = 0, prefReturn = 0, carryGross = 0, carryNet = 0, clawback = 0;
+    carries.forEach(c => {
+      totalCalled += _numVal(c.total_called_capital);
+      totalDistC  += _numVal(c.total_distributions);
+      prefReturn  += _numVal(c.preferred_return_amount);
+      carryGross  += _numVal(c.carry_amount_gross);
+      carryNet    += _numVal(c.carry_amount_net);
+      clawback    += _numVal(c.gp_clawback_provision);
+    });
+
+    const now = new Date().toLocaleDateString('en-IN', {day:'2-digit',month:'short',year:'numeric'});
+
+    let html = `<div style="max-width:900px;margin:auto;padding:20px;">${_pdfStyles}`;
+
+    // Header
+    html += `<div class="pdf-header"><h1>Fund Accounting Report</h1><p>${esc(_ctx.fundName)} &middot; Generated ${now}</p></div>`;
+
+    // ── 1. NAV Summary ──
+    html += `<div class="pdf-section"><h2>1. NAV Summary</h2>
+      <div class="pdf-kpi-grid">
+        ${_pdfKpi('Total NAV', fmtCr(totalNav), 'As of latest period')}
+        ${_pdfKpi('NAV / Unit', avgNavPerUnit > 0 ? '₹'+avgNavPerUnit.toFixed(4) : '—', latestArr.length+' schemes')}
+        ${_pdfKpi('Mgmt Fee YTD', totalMgmtFee > 0 ? fmtCr(totalMgmtFee) : '—', '2.0% p.a. on corpus')}
+        ${_pdfKpi('Unrealized Gains', totalUnrealized > 0 ? fmtCr(totalUnrealized) : '—', 'Portfolio revaluation')}
+        ${_pdfKpi('Realized Gains', totalRealized > 0 ? fmtCr(totalRealized) : '—', 'From exits')}
+      </div></div>`;
+
+    // ── 2. NAV History ──
+    html += `<div class="pdf-section"><h2>2. NAV History (${navArr.length} records)</h2>`;
+    if (navArr.length) {
+      html += `<table><tr><th>Period</th><th>Scheme</th><th class="r">Total NAV</th><th class="r">NAV/Unit</th><th class="r">Units</th><th class="r">Investments FV</th><th class="r">Cash</th><th class="r">Receivables</th><th class="r">Mgmt Fee</th><th class="r">Unrealized</th><th class="r">Realized</th><th class="c">Recon</th></tr>
+      ${navArr.map(n => `<tr><td style="font-size:10px;">${n.nav_date||'—'}</td><td style="font-size:10px;">${esc(n.scheme_name||'—')}</td><td class="r">${_numStr(n.total_nav)}</td><td class="r">${n.nav_per_unit ? parseFloat(n.nav_per_unit).toFixed(4) : '—'}</td><td class="r">${n.total_units_outstanding ? _numStr(n.total_units_outstanding,2) : '—'}</td><td class="r">${_numStr(n.investments_at_fair_value)}</td><td class="r">${_numStr(n.cash_and_equivalents)}</td><td class="r">${_numStr(n.receivables)}</td><td class="r">${_numStr(n.management_fee_payable)}</td><td class="r">${_numStr(n.unrealized_gains)}</td><td class="r">${_numStr(n.realized_gains)}</td><td class="c" style="font-size:10px;">${n.depository_reconciled ? '✓' : '✗'}</td></tr>`).join('')}
+      </table>`;
+    } else { html += '<p class="pdf-empty">No NAV records.</p>'; }
+    html += '</div>';
+
+    // ── 3. Waterfall & Carry ──
+    html += `<div class="pdf-section" style="page-break-before:always;"><h2>3. Carry & Clawback Analysis</h2>`;
+    if (carries.length) {
+      html += `<div class="pdf-kpi-grid">
+        ${_pdfKpi('Carry Base', fmtCr(carries.reduce((s,c)=>s+_numVal(c.carry_base),0)), 'Profit above hurdle')}
+        ${_pdfKpi('GP Carry (Gross)', fmtCr(carryGross), 'Before clawback')}
+        ${_pdfKpi('GP Carry (Net)', fmtCr(carryNet), 'After clawback')}
+        ${_pdfKpi('Clawback Provision', fmtCr(clawback), 'Excess carry to LPs')}
+      </div>
+      <table><tr><th>Scheme</th><th>Date</th><th class="c">Status</th><th class="r">Distributions</th><th class="r">Called Capital</th><th class="r">Pref Return</th><th class="r">Carry Base</th><th class="r">Gross Carry</th><th class="r">Net Carry</th><th class="r">Clawback</th></tr>
+      ${carries.map(c => `<tr><td class="b">${esc(c.scheme_name||'—')}</td><td style="font-size:10px;">${c.calculation_date||'—'}</td><td class="c">${esc(c.status_display||c.calculation_status||'—')}</td><td class="r">${_numStr(c.total_distributions)}</td><td class="r">${_numStr(c.total_called_capital)}</td><td class="r">${_numStr(c.preferred_return_amount)}</td><td class="r">${_numStr(c.carry_base)}</td><td class="r">${_numStr(c.carry_amount_gross)}</td><td class="r">${_numStr(c.carry_amount_net)}</td><td class="r">${_numStr(c.gp_clawback_provision)}</td></tr>`).join('')}
+      </table>`;
+    } else { html += '<p class="pdf-empty">No carry data. Run waterfall engine to compute.</p>'; }
+    html += '</div>';
+
+    // ── 4. Capital Calls ──
+    html += `<div class="pdf-section" style="page-break-before:always;"><h2>4. Capital Calls (${calls.length} records)</h2>`;
+    if (calls.length) {
+      const totalCallAmt = calls.reduce((s,c) => s + _numVal(c.total_call_amount), 0);
+      html += `<div class="pdf-kpi-grid">${_pdfKpi('Total Called', fmtCr(totalCallAmt), calls.length+' calls')}</div>
+      <table><tr><th>#</th><th>LP / Scheme</th><th>Call Date</th><th class="r">Amount (Cr)</th><th class="c">Status</th><th>Purpose</th></tr>
+      ${calls.map((c, i) => { const parts = (c.purpose||c.scheme_name||'').split(' — ');
+        return `<tr><td>${i+1}</td><td class="b">${esc(parts[0])}</td><td style="font-size:10px;">${c.call_date||'—'}</td><td class="r">${_numStr(c.total_call_amount)}</td><td class="c">${esc(c.status_display||c.call_status||'—')}</td><td style="font-size:10px;">${esc(parts.length > 1 ? parts.slice(1).join(' — ') : '—')}</td></tr>`; }).join('')}
+      </table>`;
+    } else { html += '<p class="pdf-empty">No capital calls.</p>'; }
+    html += '</div>';
+
+    // ── 5. Distributions ──
+    html += `<div class="pdf-section"><h2>5. Distributions (${dists.length} records)</h2>`;
+    if (dists.length) {
+      const totalDistAmt = dists.reduce((s,d) => s + _numVal(d.total_net_amount), 0);
+      html += `<div class="pdf-kpi-grid">${_pdfKpi('Total Distributed', fmtCr(totalDistAmt), dists.length+' distributions')}</div>
+      <table><tr><th>#</th><th>Scheme / LP</th><th>Date</th><th class="r">Amount (Cr)</th><th>Type</th><th class="c">Status</th></tr>
+      ${dists.map((d, i) => `<tr><td>${i+1}</td><td class="b">${esc(d.scheme_name||'—')}</td><td style="font-size:10px;">${d.distribution_date||'—'}</td><td class="r">${_numStr(d.total_net_amount)}</td><td>${esc(d.type_display||d.distribution_type||'—')}</td><td class="c">${esc(d.status_display||d.distribution_status||'—')}</td></tr>`).join('')}
+      </table>`;
+    } else { html += '<p class="pdf-empty">No distributions.</p>'; }
+    html += '</div>';
+
+    // ── 6. Fund P&L ──
+    const plArr = [...navArr].sort((a,b) => (a.nav_date||'') < (b.nav_date||'') ? -1 : 1);
+    html += `<div class="pdf-section" style="page-break-before:always;"><h2>6. Fund P&L (${plArr.length} periods)</h2>`;
+    if (plArr.length) {
+      html += `<table><tr><th>Period</th><th>Scheme</th><th class="r">Unrealized Gains</th><th class="r">Realized Gains</th><th class="r">Mgmt Fee</th><th class="r">Other Liabilities</th><th class="r">Gross Income</th><th class="r">Total Expenses</th><th class="r">Net P&L</th></tr>
+      ${plArr.map(n => {
+        const ur = _numVal(n.unrealized_gains); const rl = _numVal(n.realized_gains);
+        const mf = _numVal(n.management_fee_payable); const ol = _numVal(n.other_liabilities);
+        const gross = ur + rl; const exp = mf + ol; const net = gross - exp;
+        return `<tr><td style="font-size:10px;">${n.nav_date||'—'}</td><td style="font-size:10px;">${esc(n.scheme_name||'—')}</td><td class="r">${ur ? _numStr(ur) : '—'}</td><td class="r">${rl ? _numStr(rl) : '—'}</td><td class="r">${mf ? _numStr(mf) : '—'}</td><td class="r">${ol ? _numStr(ol) : '—'}</td><td class="r">${_numStr(gross)}</td><td class="r">${_numStr(exp)}</td><td class="r b" style="color:${net >= 0 ? '#16a34a' : '#dc2626'}">${_numStr(net)}</td></tr>`; }).join('')}
+      </table>`;
+    } else { html += '<p class="pdf-empty">No P&L data.</p>'; }
+    html += '</div>';
+
+    // ── 7. Fund Ledger ──
+    html += `<div class="pdf-section" style="page-break-before:always;"><h2>7. Fund Ledger (${ledger.length} entries)</h2>`;
+    if (ledger.length) {
+      html += `<table><tr><th>Entry #</th><th>Date</th><th>Description</th><th>Debit Account</th><th>Credit Account</th><th class="r">Amount (₹)</th><th>Ref Type</th><th class="c">Status</th></tr>
+      ${ledger.map(e => `<tr ${e.is_reversed ? 'style="color:#999;text-decoration:line-through;"' : ''}>
+        <td style="font-size:10px;">${esc(e.journal_entry_number||'—')}</td><td style="font-size:10px;">${e.entry_date||'—'}</td><td style="font-size:10px;max-width:150px;">${esc(e.description||'—')}</td><td style="font-size:10px;">${esc(e.debit_account_name||'—')}</td><td style="font-size:10px;">${esc(e.credit_account_name||'—')}</td><td class="r">${_numStr(e.amount)}</td><td style="font-size:10px;">${esc(e.reference_type_display||e.reference_type||'—')}</td><td class="c">${e.is_reversed ? 'REVERSED' : 'POSTED'}</td></tr>`).join('')}
+      </table>`;
+    } else { html += '<p class="pdf-empty">No journal entries.</p>'; }
+    html += '</div>';
+
+    // ── 8. Management Fees ──
+    html += `<div class="pdf-section" style="page-break-before:always;"><h2>8. Management Fee Schedule (${fees.length} periods)</h2>`;
+    if (fees.length) {
+      html += `<table><tr><th>Scheme</th><th>Period</th><th class="r">Fee Basis</th><th class="r">Rate</th><th class="r">Fee Amount</th><th class="r">GST</th><th class="r">Total (incl GST)</th><th>Invoice #</th><th class="c">Status</th></tr>
+      ${fees.map(f => `<tr><td class="b" style="font-size:11px;">${esc(f.scheme_name||'—')}</td><td style="font-size:10px;">${f.period_start||'—'} → ${f.period_end||'—'}</td><td class="r">${_numStr(f.fee_basis_amount)}</td><td class="r">${f.fee_rate ? parseFloat(f.fee_rate).toFixed(4)+'%' : '—'}</td><td class="r b">${_numStr(f.fee_amount)}</td><td class="r">${_numStr(f.gst_amount)}</td><td class="r b">${_numStr(f.total_fee_with_gst)}</td><td style="font-size:10px;">${esc(f.invoice_number||'—')}</td><td class="c">${esc(f.status_display||f.fee_status||'—')}</td></tr>`).join('')}
+      </table>`;
+    } else { html += '<p class="pdf-empty">No fee periods.</p>'; }
+    html += '</div>';
+
+    // ── 9. Chart of Accounts ──
+    html += `<div class="pdf-section" style="page-break-before:always;"><h2>9. Chart of Accounts (${coa.length} accounts)</h2>`;
+    if (coa.length) {
+      html += `<table><tr><th>Code</th><th>Account Name</th><th>Type</th><th>Parent Account</th><th>Description</th><th class="c">Active</th></tr>
+      ${coa.map(a => `<tr><td style="font-family:monospace;font-size:10px;">${esc(a.account_code)}</td><td class="b">${esc(a.account_name)}</td><td>${esc(a.account_type_display||a.account_type)}</td><td style="font-size:10px;">${esc(a.parent_account_name||'—')}</td><td style="font-size:10px;max-width:180px;">${esc(a.description||'—')}</td><td class="c">${a.is_active ? '✓' : '✗'}</td></tr>`).join('')}
+      </table>`;
+    } else { html += '<p class="pdf-empty">No accounts.</p>'; }
+    html += '</div>';
+
+    // Footer
+    html += `<div class="pdf-footer">TrackFundAI &middot; Confidential &middot; ${esc(_ctx.fundName)} &middot; Fund Accounting Report &middot; ${now}</div></div>`;
+
+    const fileName = `TrackFundAI_Accounting_${(_ctx.fundName||'AllFunds').replace(/[^a-zA-Z0-9]/g,'_')}_${new Date().toISOString().slice(0,10)}.pdf`;
+    await _generatePDF(html, fileName);
+
+  } catch(e) {
+    console.error('Accounting PDF error:', e);
+    alert('Error generating Accounting PDF. Please try again.');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '&#128196; Export PDF'; }
+  }
+};
+
+/* ══════════════════════════════════════════════════════════════
+   VALUATIONS PDF — exportValuationReportPDF()
+══════════════════════════════════════════════════════════════ */
+window.exportValuationReportPDF = async function() {
+  const btn = document.getElementById('btn-val-report');
+  if (btn) { btn.disabled = true; btn.innerHTML = '&#9203; Generating…'; }
+
+  try {
+    const schemeIds = _ctx.schemeIds;
+    const fqs = _ctx.fundId ? `?fund=${_ctx.fundId}` : '';
+    const now = new Date().toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' });
+
+    // Fetch data in parallel: investments (for summary + bridge) and valuations API (for methodology/IPEV)
+    const [invs, valData] = await Promise.allSettled([
+      getInvestmentsForContext(schemeIds),
+      Auth.apiGet('/portfolio/valuations/' + fqs),
+    ]);
+
+    const investments = invs.status === 'fulfilled' ? (invs.value || []) : [];
+    const valuations  = valData.status === 'fulfilled' ? (valData.value.valuations || []) : [];
+
+    let html = `<div style="max-width:780px;margin:0 auto;padding:18px;font-family:'Segoe UI',Helvetica,Arial,sans-serif;color:#1a1a2e">${_pdfStyles}`;
+
+    // ── Header ──
+    html += `<div class="pdf-header">
+      <h1>Valuation Report</h1>
+      <p>${esc(_ctx.fundName || 'All Funds')} &middot; Generated ${now}</p>
+      <p style="font-size:11px;color:#888">IPEV Guidelines &middot; IBBI Registered Valuers</p>
+    </div>`;
+
+    // ═══════════ SECTION 1: SUMMARY ═══════════
+    html += `<div class="pdf-section"><h2>1. Valuation Summary &mdash; All Portfolio Companies</h2>`;
+
+    // Summary KPIs
+    let totalCost = 0, totalFV = 0, companyCount = 0;
+    const sorted = [...investments].sort((a, b) =>
+      parseFloat(b.latest_valuation || 0) - parseFloat(a.latest_valuation || 0)
+    );
+    for (const inv of sorted) {
+      const cost = parseFloat(inv.total_invested || 0);
+      const fv   = parseFloat(inv.latest_valuation || 0);
+      if (cost > 0 || fv > 0) companyCount++;
+      totalCost += cost;
+      totalFV   += fv;
+    }
+    const totalGain = totalFV - totalCost;
+    const totalMOIC = totalCost > 0 ? (totalFV / totalCost).toFixed(2) + 'x' : '—';
+
+    html += `<div class="pdf-kpi-grid">
+      ${_pdfKpi('Total Companies', companyCount)}
+      ${_pdfKpi('Total Cost', fmtCr(totalCost))}
+      ${_pdfKpi('Total Fair Value', fmtCr(totalFV))}
+      ${_pdfKpi('Unrealized Gain', (totalGain >= 0 ? '+' : '') + fmtCr(totalGain))}
+      ${_pdfKpi('Portfolio MOIC', totalMOIC)}
+    </div>`;
+
+    // Summary table
+    html += `<table><thead><tr>
+      <th>#</th><th>Company</th><th>Method</th><th class="c">Level</th>
+      <th class="r">Cost (Cr)</th><th class="r">FV (Cr)</th><th class="r">MOIC</th><th>Valuation Date</th>
+    </tr></thead><tbody>`;
+
+    if (sorted.length) {
+      sorted.forEach((inv, i) => {
+        const cost = parseFloat(inv.total_invested || 0);
+        const fv   = parseFloat(inv.latest_valuation || 0);
+        const moic = cost > 0 ? (fv / cost).toFixed(2) + 'x' : '—';
+        const method = inv.instrument_type_display || inv.instrument_type || '—';
+        // Try to find matching valuation record for IPEV level
+        const compName = (inv.company_name || inv.portfolio_company_name || '').toLowerCase();
+        const matchVal = valuations.find(v => (v.company_name || '').toLowerCase() === compName);
+        const level = matchVal && matchVal.ipev_level ? 'L' + matchVal.ipev_level : '—';
+        html += `<tr>
+          <td>${i + 1}</td>
+          <td class="b">${esc(inv.company_name || inv.portfolio_company_name || '—')}</td>
+          <td>${esc(method)}</td>
+          <td class="c">${level}</td>
+          <td class="r">${cost > 0 ? fmtCr(cost) : '—'}</td>
+          <td class="r">${fv > 0 ? fmtCr(fv) : '—'}</td>
+          <td class="r">${moic}</td>
+          <td>${inv.investment_date || '—'}</td>
+        </tr>`;
+      });
+    } else {
+      html += `<tr><td colspan="8" style="text-align:center;color:#999">No valuation records available</td></tr>`;
+    }
+    html += `</tbody></table></div>`;
+
+    // ═══════════ SECTION 2: METHODOLOGY ═══════════
+    html += `<div class="pdf-section" style="page-break-before:always"><h2>2. Methodology Analysis</h2>`;
+
+    // 2a — Methodology Mix (from valuations API if available, else from rendered data)
+    html += `<h3>2.1 Methodology Mix</h3>`;
+    const methodCounts = {};
+    let methodTotal = 0;
+    if (valuations.length) {
+      for (const v of valuations) {
+        const m = v.methodology_display || v.methodology || 'Unknown';
+        methodCounts[m] = (methodCounts[m] || 0) + 1;
+        methodTotal++;
+      }
+    }
+
+    if (methodTotal > 0) {
+      const methodEntries = Object.entries(methodCounts).sort((a, b) => b[1] - a[1]);
+      html += `<table><thead><tr><th>Methodology</th><th class="r">Count</th><th class="r">% of Portfolio</th></tr></thead><tbody>`;
+      for (const [method, count] of methodEntries) {
+        const pct = (count / methodTotal * 100).toFixed(1);
+        html += `<tr><td>${esc(method)}</td><td class="r">${count}</td><td class="r">${pct}%</td></tr>`;
+      }
+      html += `<tr style="font-weight:700;background:#f0f4f8"><td>Total</td><td class="r">${methodTotal}</td><td class="r">100.0%</td></tr>`;
+      html += `</tbody></table>`;
+    } else {
+      // Fallback to static methodology data (same as dashboard renders)
+      const methods = [
+        { name: 'Revenue Multiple', pct: 38 },
+        { name: 'EBITDA Multiple',  pct: 28 },
+        { name: 'DCF',              pct: 18 },
+        { name: 'P/BV Multiple',    pct: 10 },
+        { name: 'Cost Method',      pct: 6 },
+      ];
+      html += `<table><thead><tr><th>Methodology</th><th class="r">% of Portfolio</th></tr></thead><tbody>`;
+      for (const m of methods) {
+        html += `<tr><td>${m.name}</td><td class="r">${m.pct}%</td></tr>`;
+      }
+      html += `</tbody></table>`;
+    }
+
+    // 2b — IPEV Level Classification
+    html += `<h3>2.2 IPEV Level Classification</h3>`;
+    const ipevLabels = { 1: 'Level 1 — Quoted (Exchange Listed)', 2: 'Level 2 — Observable Inputs (Peer Multiples)', 3: 'Level 3 — Unobservable Inputs (DCF / Last Round)' };
+    const ipevCounts = { 1: 0, 2: 0, 3: 0 };
+    let ipevTotal = 0;
+    let ipevFV = { 1: 0, 2: 0, 3: 0 };
+
+    if (valuations.length) {
+      for (const v of valuations) {
+        const lvl = v.ipev_level;
+        if (lvl && ipevCounts.hasOwnProperty(lvl)) {
+          ipevCounts[lvl]++;
+          ipevFV[lvl] += parseFloat(v.fair_value || 0);
+          ipevTotal++;
+        }
+      }
+    }
+
+    if (ipevTotal > 0) {
+      html += `<table><thead><tr><th>IPEV Level</th><th>Description</th><th class="r">Count</th><th class="r">% Mix</th><th class="r">Fair Value (Cr)</th></tr></thead><tbody>`;
+      for (const lvl of [1, 2, 3]) {
+        const pct = ipevTotal > 0 ? (ipevCounts[lvl] / ipevTotal * 100).toFixed(1) : '0.0';
+        html += `<tr>
+          <td class="b">L${lvl}</td>
+          <td>${ipevLabels[lvl]}</td>
+          <td class="r">${ipevCounts[lvl]}</td>
+          <td class="r">${pct}%</td>
+          <td class="r">${fmtCr(ipevFV[lvl])}</td>
+        </tr>`;
+      }
+      html += `<tr style="font-weight:700;background:#f0f4f8">
+        <td colspan="2">Total</td>
+        <td class="r">${ipevTotal}</td>
+        <td class="r">100.0%</td>
+        <td class="r">${fmtCr(ipevFV[1] + ipevFV[2] + ipevFV[3])}</td>
+      </tr>`;
+      html += `</tbody></table>`;
+    } else {
+      html += `<p class="pdf-empty">No IPEV classification data available.</p>`;
+    }
+
+    // Detailed valuations table (from API)
+    if (valuations.length) {
+      html += `<h3>2.3 Detailed Valuation Records</h3>`;
+      html += `<table><thead><tr>
+        <th>#</th><th>Company</th><th>Scheme</th><th>Date</th>
+        <th class="r">Fair Value (Cr)</th><th>Methodology</th><th class="c">IPEV</th>
+        <th class="r">MOIC</th><th class="c">Status</th>
+      </tr></thead><tbody>`;
+      valuations.forEach((v, i) => {
+        const ipev = v.ipev_level ? 'L' + v.ipev_level : '—';
+        html += `<tr>
+          <td>${i + 1}</td>
+          <td class="b">${esc(v.company_name || '—')}</td>
+          <td>${esc(v.scheme_name || '—')}</td>
+          <td>${v.valuation_date ? v.valuation_date.slice(0, 10) : '—'}</td>
+          <td class="r">${fmtCr(v.fair_value)}</td>
+          <td>${esc(v.methodology_display || v.methodology || '—')}</td>
+          <td class="c">${ipev}</td>
+          <td class="r">${v.multiple != null ? v.multiple.toFixed(2) + 'x' : '—'}</td>
+          <td class="c">${esc(v.status || '—')}</td>
+        </tr>`;
+      });
+      html += `</tbody></table>`;
+    }
+
+    html += `</div>`;
+
+    // ═══════════ SECTION 3: VALUE BRIDGE ═══════════
+    html += `<div class="pdf-section" style="page-break-before:always"><h2>3. Value Bridge &mdash; Cost to Fair Value by Sector</h2>`;
+
+    // Aggregate by sector
+    let bridgeTotalCost = 0, bridgeTotalFV = 0;
+    const bySector = {};
+    for (const inv of investments) {
+      const cost = parseFloat(inv.total_invested || 0);
+      const fv   = parseFloat(inv.latest_valuation || inv.current_value || 0);
+      if (!cost && !fv) continue;
+      bridgeTotalCost += cost;
+      bridgeTotalFV   += fv;
+      const sec = inv.sector || 'Other';
+      if (!bySector[sec]) bySector[sec] = { cost: 0, fv: 0 };
+      bySector[sec].cost += cost;
+      bySector[sec].fv   += fv;
+    }
+    const bridgeGain = bridgeTotalFV - bridgeTotalCost;
+    const bridgeGainPct = bridgeTotalCost > 0 ? (bridgeGain / bridgeTotalCost * 100).toFixed(1) + '%' : '—';
+    const bridgeMOIC = bridgeTotalCost > 0 ? (bridgeTotalFV / bridgeTotalCost).toFixed(2) + 'x' : '—';
+
+    // Value bridge KPIs
+    html += `<div class="pdf-kpi-grid">
+      ${_pdfKpi('Total Cost', fmtCr(bridgeTotalCost))}
+      ${_pdfKpi('Fair Value', fmtCr(bridgeTotalFV))}
+      ${_pdfKpi('Unrealized Gain', (bridgeGain >= 0 ? '+' : '') + fmtCr(bridgeGain), bridgeGainPct)}
+      ${_pdfKpi('Portfolio MOIC', bridgeMOIC)}
+      ${_pdfKpi('Sectors Covered', Object.keys(bySector).length)}
+    </div>`;
+
+    // Visual value bridge summary (text-based waterfall)
+    html += `<div style="background:#f8fafc;border:1px solid #d0d5dd;border-radius:8px;padding:14px;margin-bottom:14px">
+      <div style="font-size:12px;font-weight:700;color:#333;margin-bottom:8px">Value Bridge Waterfall (₹ Cr)</div>
+      <table style="border:none">
+        <tr>
+          <td style="border:none;width:100px;font-size:11px;color:#666">Cost Basis</td>
+          <td style="border:none"><div style="background:#2563eb;height:20px;border-radius:3px;width:${bridgeTotalCost > 0 ? Math.min((bridgeTotalCost / Math.max(bridgeTotalCost, bridgeTotalFV) * 100), 100).toFixed(0) : 0}%;min-width:2px"></div></td>
+          <td style="border:none;width:100px;text-align:right;font-size:12px;font-weight:600">${fmtCr(bridgeTotalCost)}</td>
+        </tr>
+        <tr>
+          <td style="border:none;width:100px;font-size:11px;color:#666">${bridgeGain >= 0 ? 'Gain' : 'Loss'}</td>
+          <td style="border:none"><div style="background:${bridgeGain >= 0 ? '#34d399' : '#f87171'};height:20px;border-radius:3px;width:${Math.min(Math.abs(bridgeGain) / Math.max(bridgeTotalCost, bridgeTotalFV) * 100, 100).toFixed(0)}%;min-width:2px"></div></td>
+          <td style="border:none;width:100px;text-align:right;font-size:12px;font-weight:600;color:${bridgeGain >= 0 ? '#16a34a' : '#dc2626'}">${bridgeGain >= 0 ? '+' : ''}${fmtCr(bridgeGain)}</td>
+        </tr>
+        <tr>
+          <td style="border:none;width:100px;font-size:11px;color:#666">Fair Value</td>
+          <td style="border:none"><div style="background:#10b981;height:20px;border-radius:3px;width:${bridgeTotalFV > 0 ? Math.min((bridgeTotalFV / Math.max(bridgeTotalCost, bridgeTotalFV) * 100), 100).toFixed(0) : 0}%;min-width:2px"></div></td>
+          <td style="border:none;width:100px;text-align:right;font-size:12px;font-weight:600">${fmtCr(bridgeTotalFV)}</td>
+        </tr>
+      </table>
+    </div>`;
+
+    // Sector breakdown table
+    const sectorEntries = Object.entries(bySector).sort((a, b) => b[1].fv - a[1].fv);
+
+    html += `<table><thead><tr>
+      <th>#</th><th>Sector</th><th class="r">Cost (Cr)</th><th class="r">FV (Cr)</th>
+      <th class="r">Gain (Cr)</th><th class="r">Gain %</th><th class="r">MOIC</th><th class="r">FV Weight</th>
+    </tr></thead><tbody>`;
+
+    if (sectorEntries.length) {
+      sectorEntries.forEach(([sec, d], i) => {
+        const g = d.fv - d.cost;
+        const gPct = d.cost > 0 ? (g / d.cost * 100).toFixed(1) + '%' : '—';
+        const m = d.cost > 0 ? (d.fv / d.cost).toFixed(2) + 'x' : '—';
+        const wt = bridgeTotalFV > 0 ? (d.fv / bridgeTotalFV * 100).toFixed(1) + '%' : '—';
+        const gColor = g >= 0 ? '#16a34a' : '#dc2626';
+        html += `<tr>
+          <td>${i + 1}</td>
+          <td class="b">${esc(sec)}</td>
+          <td class="r">${fmtCr(d.cost)}</td>
+          <td class="r">${fmtCr(d.fv)}</td>
+          <td class="r" style="color:${gColor}">${g >= 0 ? '+' : ''}${fmtCr(g)}</td>
+          <td class="r" style="color:${gColor}">${gPct}</td>
+          <td class="r">${m}</td>
+          <td class="r">${wt}</td>
+        </tr>`;
+      });
+      // Totals row
+      html += `<tr style="font-weight:700;background:#f0f4f8">
+        <td></td><td>Total</td>
+        <td class="r">${fmtCr(bridgeTotalCost)}</td>
+        <td class="r">${fmtCr(bridgeTotalFV)}</td>
+        <td class="r" style="color:${bridgeGain >= 0 ? '#16a34a' : '#dc2626'}">${bridgeGain >= 0 ? '+' : ''}${fmtCr(bridgeGain)}</td>
+        <td class="r">${bridgeGainPct}</td>
+        <td class="r">${bridgeMOIC}</td>
+        <td class="r">100.0%</td>
+      </tr>`;
+    } else {
+      html += `<tr><td colspan="8" style="text-align:center;color:#999">No sector data available</td></tr>`;
+    }
+    html += `</tbody></table></div>`;
+
+    // Footer
+    html += `<div class="pdf-footer">TrackFundAI &middot; Confidential &middot; ${esc(_ctx.fundName || 'All Funds')} &middot; Valuation Report &middot; ${now}</div></div>`;
+
+    const fileName = `TrackFundAI_Valuations_${(_ctx.fundName || 'AllFunds').replace(/[^a-zA-Z0-9]/g, '_')}_${new Date().toISOString().slice(0, 10)}.pdf`;
+    await _generatePDF(html, fileName);
+
+  } catch(e) {
+    console.error('Valuation Report PDF error:', e);
+    alert('Error generating Valuation Report. Please try again.');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '&#128202; Generate Report'; }
+  }
+};
+
 })();
