@@ -276,7 +276,7 @@
           <div class="v5-panel"><div class="v5-panel-header"><div><div class="v5-panel-title">Exit Register <span id="exits-count" style="font-size:13px;font-weight:400;color:var(--text3);margin-left:8px"></span></div></div><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><input type="text" class="v5-input" placeholder="Search…" id="exits-search" oninput="filterExits()" style="width:150px"><select class="v5-select" id="exits-sector-filter" onchange="filterExits()" style="width:140px"><option value="">All Sectors</option></select></div></div><div class="v5-table-max"><table class="v5-table" id="exits-table"><thead><tr><th style="width:36px;text-align:center">#</th><th>Company</th><th>Sector</th><th>Exit Type</th><th class="td-right">Cost (Cr)</th><th class="td-right">Proceeds (Cr)</th><th class="td-right">MOIC</th><th class="td-right">IRR%</th><th>Exit Date</th></tr></thead><tbody id="exits-tbody"><tr><td colspan="9" class="table-empty">No data</td></tr></tbody></table></div></div>
         </div>
         <div id="pt-kpis" class="v5-subpane">
-          <div class="v5-panel"><div class="v5-panel-header"><div><div class="v5-panel-title">Portfolio KPIs — All Metrics <span id="kpis-count" style="font-size:13px;font-weight:400;color:var(--text3);margin-left:8px"></span></div></div><div style="display:flex;gap:8px;align-items:center"><input type="text" class="v5-input" placeholder="Search…" id="kpis-search" oninput="filterKPIs()" style="width:150px"></div></div><div class="v5-table-max2"><table class="v5-table" id="kpi-trend-table"><thead><tr><th style="width:36px;text-align:center">#</th><th>Company</th><th>Metric</th><th class="td-right">Value</th><th>Period</th><th>Format</th></tr></thead><tbody id="kpi-trend-tbody"><tr><td colspan="6" class="table-empty">Loading…</td></tr></tbody></table></div></div>
+          <div class="v5-panel"><div class="v5-panel-header"><div><div class="v5-panel-title">Portfolio KPIs — Company Matrix <span id="kpis-count" style="font-size:13px;font-weight:400;color:var(--text3);margin-left:8px"></span></div><div class="v5-panel-subtitle">Latest KPI values per company — GMV, Revenue, Margins, Orders &amp; more</div></div><div style="display:flex;gap:8px;align-items:center"><input type="text" class="v5-input" placeholder="Search…" id="kpis-search" oninput="filterKPIs()" style="width:150px"></div></div><div class="v5-table-max2" style="overflow-x:auto"><table class="v5-table" id="kpi-trend-table"><thead><tr><th style="width:36px;text-align:center">#</th><th>Company</th><th class="td-right">GMV (Cr)</th><th class="td-right">REV (Cr)</th><th class="td-right">Gross M%</th><th class="td-right">EBITDA%</th><th class="td-right">Orders</th><th class="td-right">AOV</th><th class="td-right">Returns%</th><th class="td-right">CAC (₹)</th><th class="td-right">Repeat%</th><th class="td-right">Cost (Cr)</th><th class="td-right">FV (Cr)</th></tr></thead><tbody id="kpi-trend-tbody"><tr><td colspan="13" class="table-empty">Loading…</td></tr></tbody></table></div></div>
         </div>
 
         <!-- SaaS Metrics -->
@@ -346,22 +346,14 @@
           <div class="v5-panel">
             <div class="v5-panel-header">
               <div>
-                <div class="v5-panel-title">KPI Submissions <span id="kpi-track-count" style="font-size:13px;font-weight:400;color:var(--text3);margin-left:8px"></span></div>
-                <div class="v5-panel-subtitle">Review KPI data submitted for portfolio companies</div>
+                <div class="v5-panel-title">KPI Tracking — Company Matrix <span id="kpi-track-count" style="font-size:13px;font-weight:400;color:var(--text3);margin-left:8px"></span></div>
+                <div class="v5-panel-subtitle">Latest KPI metrics per portfolio company — semantic extraction via Gemini AI</div>
               </div>
               <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                 <input type="text" class="v5-input" placeholder="Search…" id="kpi-track-search" oninput="filterKPITracking()" style="width:150px">
-                <label style="color:var(--text2);font-size:12px">Status:</label>
-                <select class="v5-select" id="kpi-track-status-filter" onchange="reloadKPITracking()" style="width:140px">
-                  <option value="">All</option>
-                  <option value="submitted">Submitted</option>
-                  <option value="approved">Approved</option>
-                  <option value="rejected">Rejected</option>
-                  <option value="draft">Draft</option>
-                </select>
               </div>
             </div>
-            <div class="v5-table-max2"><table class="v5-table" id="kpi-track-table"><thead><tr><th style="width:36px;text-align:center">#</th><th>Company</th><th>KPI Metric</th><th>Period</th><th class="td-right">Value</th><th>Format</th><th class="td-center">Status</th><th>Submitted By</th><th>Submitted At</th><th>Reviewed By</th></tr></thead><tbody id="kpi-track-tbody"><tr><td colspan="10" class="table-empty">Loading…</td></tr></tbody></table></div>
+            <div class="v5-table-max2" style="overflow-x:auto"><table class="v5-table" id="kpi-track-table"><thead><tr><th style="width:36px;text-align:center">#</th><th>Company</th><th class="td-right">GMV (Cr)</th><th class="td-right">REV (Cr)</th><th class="td-right">Gross M%</th><th class="td-right">EBITDA%</th><th class="td-right">Orders</th><th class="td-right">AOV</th><th class="td-right">Returns%</th><th class="td-right">CAC (₹)</th><th class="td-right">Repeat%</th><th class="td-right">Cost (Cr)</th><th class="td-right">FV (Cr)</th></tr></thead><tbody id="kpi-track-tbody"><tr><td colspan="13" class="table-empty">Loading…</td></tr></tbody></table></div>
           </div>
         </div>
 
@@ -834,6 +826,7 @@
           <div class="v5-header-actions">
             <button class="v5-btn v5-btn-ghost" onclick="showSub('analytics','chatbot')">&#9881; Configure AI</button>
             <button class="v5-btn v5-btn-primary" id="ai-run-analysis-btn" onclick="runAIAnalysis()">&#128302; Run Analysis</button>
+            <button class="v5-btn v5-btn-primary" id="gen-mis-report-btn" onclick="generateComprehensiveMIS()" style="background:linear-gradient(135deg,#6366f1,#8b5cf6)">&#128196; Generate MIS Report</button>
           </div>
         </div>
 

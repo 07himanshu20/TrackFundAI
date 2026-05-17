@@ -6,6 +6,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from config.cache_utils import cached_api_view
 from .models import BudgetVsActual, ConsolidatedMIS, MISAnomalyAlert
 from .services import MISAggregator, AnomalyDetector
 
@@ -39,6 +40,7 @@ class AnomalyAlertSerializer(drf_serializers.ModelSerializer):
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
+@cached_api_view(timeout=600)
 def bva_list(request):
     org = request.organization
     if request.method == 'GET':
@@ -89,6 +91,7 @@ def bva_list(request):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
+@cached_api_view(timeout=600)
 def consolidated_mis(request):
     """Get consolidated MIS for a fund, optionally filtered by period."""
     org = request.organization
@@ -142,6 +145,7 @@ def run_consolidation(request):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
+@cached_api_view(timeout=900)
 def six_month_rollup(request):
     """6-month P&L rollup for sparkline charts."""
     from funds.models import Fund
@@ -162,6 +166,7 @@ def six_month_rollup(request):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
+@cached_api_view(timeout=300)
 def anomaly_alerts(request):
     """List active anomaly alerts for the organization."""
     org = request.organization
@@ -197,10 +202,12 @@ def resolve_anomaly(request, pk):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
+@cached_api_view(timeout=900)
 def mis_submission_status(request):
     """
     Return per-company MIS submission completeness.
     Checks which companies have P&L, Balance Sheet, Cash Flow, and BvA records.
+    Supports optional ?fund= filter to scope to a single fund's companies.
     """
     org = request.organization
     if not org:
@@ -211,19 +218,33 @@ def mis_submission_status(request):
     PL_ITEMS  = {'revenue', 'total_revenue', 'pat', 'ebitda', 'gross_profit'}
     BS_ITEMS  = {'total_assets', 'net_worth', 'total_debt', 'cash_and_equivalents'}
     CF_ITEMS  = {'cash_and_equivalents', 'finance_cost'}
-    BVA_ITEMS = set(dict(BudgetVsActual._meta.get_field('line_item').choices).keys())
 
-    companies = PortfolioCompany.objects.filter(organization=org, is_active=True).order_by('name')
+    fund_id = request.query_params.get('fund')
+
+    companies_qs = PortfolioCompany.objects.filter(
+        organization=org, is_active=True
+    ).order_by('name')
+
+    # If fund filter is provided, only include companies that have investments
+    # or BvA records under that fund
+    if fund_id:
+        from django.db.models import Q
+        companies_qs = companies_qs.filter(
+            Q(investments__scheme__fund_id=fund_id) |
+            Q(bva_records__fund_id=fund_id)
+        ).distinct()
 
     result = []
-    for co in companies:
+    for co in companies_qs:
         qs = BudgetVsActual.objects.filter(portfolio_company=co)
+        if fund_id:
+            qs = qs.filter(fund_id=fund_id)
         submitted_items = set(qs.values_list('line_item', flat=True).distinct())
 
         has_pl  = bool(submitted_items & PL_ITEMS)
         has_bs  = bool(submitted_items & BS_ITEMS)
         has_cf  = bool(submitted_items & CF_ITEMS)
-        has_bva = qs.exists()
+        has_bva = qs.filter(budget_inr__isnull=False).exists()
 
         last_record = qs.order_by('-updated_at').first()
         last_updated = str(last_record.updated_at.date()) if last_record else None

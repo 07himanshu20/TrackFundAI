@@ -30,6 +30,42 @@ def _get_reportlab():
         return False
 
 
+def _draw_watermark(canvas, doc, text='CONFIDENTIAL'):
+    """Draw a diagonal watermark on every page."""
+    canvas.saveState()
+    canvas.setFont('Helvetica-Bold', 60)
+    try:
+        canvas.setFillAlpha(0.06)
+    except AttributeError:
+        pass  # Older ReportLab versions
+    from reportlab.lib import colors
+    canvas.setFillColor(colors.HexColor('#003366'))
+    canvas.translate(doc.pagesize[0] / 2, doc.pagesize[1] / 2)
+    canvas.rotate(45)
+    canvas.drawCentredString(0, 0, text)
+    canvas.restoreState()
+
+
+def _page_footer(canvas, doc, fund_name='', report_type=''):
+    """Draw page footer with fund name and page number."""
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    width = doc.pagesize[0]
+
+    canvas.saveState()
+    canvas.setStrokeColor(colors.HexColor('#D1D5DB'))
+    canvas.setLineWidth(0.5)
+    canvas.line(2 * cm, 1.5 * cm, width - 2 * cm, 1.5 * cm)
+    canvas.setFont('Helvetica', 7)
+    canvas.setFillColor(colors.HexColor('#6B7280'))
+    label = f'{fund_name} — {report_type}' if fund_name else 'TrackFundAI Report'
+    canvas.drawString(2 * cm, 1.0 * cm, f'{label} · Confidential')
+    canvas.drawRightString(width - 2 * cm, 1.0 * cm, f'Page {doc.page}')
+    canvas.restoreState()
+
+    _draw_watermark(canvas, doc)
+
+
 def generate_lp_letter(scheme, period_label: str, period_start: date, period_end: date, user=None):
     """
     Generate a quarterly LP Letter PDF for a scheme.
@@ -199,7 +235,12 @@ def generate_lp_letter(scheme, period_label: str, period_start: date, period_end
     story.append(Paragraph(disclaimer, ParagraphStyle('disclaimer', parent=styles['Normal'],
                                                        fontSize=7, textColor=colors.grey)))
 
-    doc.build(story)
+    _fund_name = fund.name
+
+    def _on_page(canvas, doc):
+        _page_footer(canvas, doc, fund_name=_fund_name, report_type='Quarterly LP Letter')
+
+    doc.build(story, onFirstPage=_on_page, onLaterPages=_on_page)
     pdf_bytes = buf.getvalue()
 
     return _save_generated_report(
@@ -309,7 +350,12 @@ def generate_nav_statement(scheme, period_end: date, user=None):
     ]))
     story.append(t)
 
-    doc.build(story)
+    _fund_name = scheme.fund.name
+
+    def _on_page(canvas, doc):
+        _page_footer(canvas, doc, fund_name=_fund_name, report_type='NAV Statement')
+
+    doc.build(story, onFirstPage=_on_page, onLaterPages=_on_page)
 
     return _save_generated_report(
         organization=scheme.fund.organization,

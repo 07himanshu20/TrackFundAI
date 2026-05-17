@@ -69,6 +69,7 @@ urlpatterns = [
     path('portfolio/investments/',    views.portfolio_investments_list,    name='portfolio-investments-list'),
     path('portfolio/valuations/',     views.portfolio_valuations_list,     name='portfolio-valuations-list'),
     path('portfolio/kpi-tracking/',   views.portfolio_kpi_tracking,        name='portfolio-kpi-tracking'),
+    path('portfolio/kpi-matrix/',    views.portfolio_kpi_matrix,          name='portfolio-kpi-matrix'),
     path('portfolio/exit-scenarios/', views.portfolio_exit_scenarios_list, name='portfolio-exit-scenarios-list'),
     path('portfolio/board-meetings/', views.portfolio_board_meetings_list, name='portfolio-board-meetings-list'),
     path('portfolio/avg-holding/',    views.portfolio_avg_holding,         name='portfolio-avg-holding'),

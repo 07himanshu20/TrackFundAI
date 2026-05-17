@@ -17,6 +17,7 @@ const FundSelector = (() => {
 
   // Persisted context across navigation
   const STORAGE_KEY_FUND   = 'tfai_selected_fund_id';
+  const STORAGE_KEY_FUND_NAME = 'tfai_selected_fund_name';
   const STORAGE_KEY_PERIOD = 'tfai_selected_period';
 
   // Quarter periods covering FY24 and FY25
@@ -114,12 +115,22 @@ const FundSelector = (() => {
     const refreshBtn = document.getElementById('tfai-refresh-btn');
 
     // Restore saved values
-    if (_currentFundId) fundSel.value = _currentFundId;
+    if (_currentFundId) {
+      fundSel.value = _currentFundId;
+      // Ensure fund name is also persisted for chatbot widget
+      const selectedOpt = fundSel.options[fundSel.selectedIndex];
+      if (selectedOpt && selectedOpt.value) {
+        localStorage.setItem(STORAGE_KEY_FUND_NAME, selectedOpt.text);
+      }
+    }
     if (_currentPeriod) periodSel.value = _currentPeriod;
 
     fundSel.addEventListener('change', () => {
       _currentFundId = fundSel.value;
       localStorage.setItem(STORAGE_KEY_FUND, _currentFundId);
+      // Also persist fund name so chatbot widget can read it
+      const selectedOpt = fundSel.options[fundSel.selectedIndex];
+      localStorage.setItem(STORAGE_KEY_FUND_NAME, selectedOpt ? selectedOpt.text : '');
       _dispatch();
     });
 

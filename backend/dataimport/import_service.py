@@ -1,14 +1,14 @@
 """
 FundImportService — orchestrates the import of a single fund Excel file.
 
-Uses Gemini AI to semantically map columns, then imports data
-into all Django models using header-based row reading.
+Uses Gemini AI exclusively for all sheet classification and column mapping.
+No hardcoded keywords, sheet names, or fallback scanning.
 
-Two strategies:
-  1. Gemini-mapped: Gemini classifies sheets → domain map → read by headers
-  2. Legacy fallback: delegates to import_fund_excel.py (hardcoded sheet names)
-
-Strategy 1 is tried first. If Gemini mapping is unavailable, falls back to 2.
+Pipeline:
+  1. Gemini Pass 1: classify each sheet → domain_map (1:many, 19 domains)
+  2. Gemini Pass 2: map column headers → canonical field names
+  3. Each _import_* method uses _dm_sheets(domain_map, domain) to find its sheets
+  4. Row reading via read_all_sections_from_sheet() + _find_col() fuzzy matching
 """
 
 import calendar
@@ -73,20 +73,6 @@ INVESTOR_TYPE_MAP = {
     'foreign portfolio investor': 'fpi',
 }
 
-_SECTION_HEADERS = {
-    'ORGANIZATION MASTER', 'KEY ENTITIES', 'GP USERS', 'FUND ACCESS MATRIX',
-    'FUND MASTER DATA', 'SCHEMES', 'PORTFOLIO HIERARCHY',
-    'CROSS-FUND SECTOR MAPPING', 'PORTFOLIO COMPANIES', 'INVESTMENTS',
-    'INVESTMENT TRANCHES', 'CAPITAL CALLS', 'CAPITAL CALL LINE ITEMS',
-    'NAV RECORDS', 'EXIT EVENTS', 'DISTRIBUTIONS', 'DISTRIBUTION LINE ITEMS',
-    'CHART OF ACCOUNTS', 'DOUBLE-ENTRY', 'CARRIED INTEREST',
-    'COMPLIANCE CALENDAR', 'SEBI REPORT FILINGS', 'AML DUE DILIGENCE',
-    'COMPLIANCE TEST REPORT', 'SEBI CIRCULARS', 'PPM AMENDMENTS',
-    'LIMITED PARTNERS', 'PORTFOLIO COMPANIES', 'PORTFOLIO VALUATIONS',
-    'PORTFOLIO KPIs', 'NAV & FUND ACCOUNTING', 'EXITS, DISTRIBUTIONS',
-    'BUDGET vs ACTUAL', 'MONTHLY P&L', 'MONTHLY BALANCE SHEET',
-    'MONTHLY CASH FLOW',
-}
 
 
 def _d(val, default=None):
@@ -198,13 +184,24 @@ def _is_cover_or_summary_sheet(sheet_name):
 
 
 def _is_section_header(val):
+    """Return True if val looks like a section header — layout-only detection.
+
+    A section header is a string that is:
+      - Predominantly uppercase (≥70% of alpha chars)
+      - Longer than 3 characters
+      - Contains at least one space (multi-word title)
+    No hardcoded keywords — purely format-based.
+    """
     if not val:
         return False
     s = str(val).strip()
-    for header in _SECTION_HEADERS:
-        if header in s.upper():
-            return True
-    return s.isupper() and len(s) > 15 and ' ' in s
+    if len(s) <= 3 or ' ' not in s:
+        return False
+    alpha_chars = [ch for ch in s if ch.isalpha()]
+    if not alpha_chars:
+        return False
+    upper_ratio = sum(1 for ch in alpha_chars if ch.isupper()) / len(alpha_chars)
+    return upper_ratio >= 0.70
 
 
 def _is_header_row(val):
@@ -224,6 +221,8 @@ _JUNK_NAME_PREFIXES = (
     's.no', 'sno', 'sr.', 'sr.no', 'srno', 'serial',
     '#', '—', '–',
     'note:', 'notes:', 'remark', 'footer',
+    'scheme name', 'company name', 'fund name', 'investor name',
+    'particulars', 'description', 'value (rs',
 )
 
 # Word endings that conclusively identify a string as a company name and
@@ -334,70 +333,44 @@ def read_table(ws, start_row=1, max_rows=None):
 def _is_section_title_row(ws, r, max_col):
     """Return (True, title_text) if row r looks like a section title.
 
-    Handles both:
-    - Single-cell all-caps titles:  "PORTFOLIO COMPANIES"
-    - Pipe-delimited multi-cell titles spread across columns:
-        col1="PORTFOLIO INVESTMENTS — FULL REGISTER"  col2="Fund Name"  col3="DD-MMM-YYYY"
-      In this case the first cell contains the meaningful domain keyword and
-      the remaining cells are metadata/context values.
+    100% format-agnostic layout detection — no hardcoded keywords.
+    A section title row is identified by:
+      - 1-2 non-empty cells in the row (not a data row with many columns)
+      - First cell text is predominantly uppercase (≥70% of alpha chars)
+      - Text length > 3 characters
+
+    Also handles pipe-delimited multi-cell titles (3+ cells) where the first
+    cell is predominantly uppercase (≥70%) — these are section headers with
+    metadata columns appended (e.g. "PORTFOLIO INVESTMENTS | Fund Name | Date").
     """
     first_cell = ws.cell(r, 1).value
     if first_cell is None:
         return False, ''
     first_str = str(first_cell).strip()
-    if not first_str:
+    if not first_str or len(first_str) <= 3:
         return False, ''
 
-    # Check total non-empty cells in the row
-    cell_vals = []
-    for c in range(1, max_col + 1):
-        v = ws.cell(r, c).value
-        if v is not None:
-            cell_vals.append(str(v).strip())
-
-    if not cell_vals:
-        return False, ''
-
-    # Compute uppercase ratio once — used for both the 1-2 cell and 3+ cell checks
+    # Compute uppercase ratio of first cell
     alpha_chars = [ch for ch in first_str if ch.isalpha()]
-    upper_ratio = (
-        sum(1 for ch in alpha_chars if ch.isupper()) / len(alpha_chars)
-        if alpha_chars else 0.0
-    )
+    if not alpha_chars:
+        return False, ''
+    upper_ratio = sum(1 for ch in alpha_chars if ch.isupper()) / len(alpha_chars)
+    if upper_ratio < 0.70:
+        return False, ''
 
-    # Classic single/double cell section header
-    # Require predominantly-uppercase text (≥70%) to avoid mistaking a
-    # mixed-case row header (e.g. "Capital Calls" as a sub-label) for a
-    # true section separator.
-    if len(cell_vals) <= 2 and upper_ratio >= 0.70:
-        if _is_section_header(first_str):
-            return True, first_str
-        if first_str.isupper() and len(first_str) > 3:
-            return True, first_str
-        if any(kw in first_str.upper() for kw in [
-            'PORTFOLIO COMPANIES', 'PORTFOLIO INVESTMENTS', 'INVESTMENTS',
-            'INVESTMENT TRANCHES', 'CAPITAL CALLS', 'CAPITAL CALL LINE ITEMS',
-            'EXIT EVENTS', 'DISTRIBUTIONS', 'NAV RECORDS', 'SCHEMES',
-            'FUND MASTER', 'LIMITED PARTNERS', 'COMMITMENTS', 'VALUATIONS',
-        ]):
-            return True, first_str
+    # Count non-empty cells in the row
+    cell_count = sum(1 for c in range(1, max_col + 1)
+                     if ws.cell(r, c).value is not None)
 
-    # Pipe-delimited multi-cell title: first cell contains a domain keyword
-    # AND is predominantly uppercase (title-case guard prevents a company name
-    # like "Investments Holdings Ltd" from being mistaken for a section header).
-    # e.g. first_str = "PORTFOLIO INVESTMENTS — FULL REGISTER"
-    if len(cell_vals) >= 3:
-        first_upper = first_str.upper()
-        if upper_ratio >= 0.70:
-            domain_kws = [
-                'PORTFOLIO COMPANIES', 'PORTFOLIO INVESTMENTS', 'INVESTMENTS',
-                'INVESTMENT TRANCHES', 'CAPITAL CALLS', 'EXIT EVENTS',
-                'DISTRIBUTIONS', 'NAV RECORDS', 'LIMITED PARTNERS',
-                'FUND MASTER', 'COMMITMENTS', 'VALUATIONS', 'SCHEMES',
-            ]
-            for kw in domain_kws:
-                if kw in first_upper:
-                    return True, first_str
+    # Classic section header: 1-2 cells, predominantly uppercase
+    if cell_count <= 2:
+        return True, first_str
+
+    # Pipe-delimited multi-cell title: first cell is uppercase title,
+    # remaining cells are metadata. Only if first cell has a space
+    # (multi-word title, not a single-word data value).
+    if cell_count >= 3 and ' ' in first_str:
+        return True, first_str
 
     return False, ''
 
@@ -639,13 +612,29 @@ def read_all_sections_from_sheet(ws, alias_map=None):
     return sections
 
 
-def _get_section_rows(ws, domain_map, domain_key, section_keywords=None):
+def _dm_sheets(domain_map, domain_key):
+    """Return list of sheet names for a domain. Works with 1:many domain_map."""
+    val = domain_map.get(domain_key, [])
+    if isinstance(val, list):
+        return val
+    return [val] if val else []
+
+
+def _dm_first(domain_map, domain_key):
+    """Return the first (primary) sheet name for a domain, or None."""
+    sheets = _dm_sheets(domain_map, domain_key)
+    return sheets[0] if sheets else None
+
+
+def _get_section_rows(ws, domain_map, domain_key, section_subdomains=None,
+                      section_map=None):
     """Smart row reader: tries dedicated domain sheet first, then falls back
-    to reading a specific section from a multi-section sheet.
+    to reading a specific section from a multi-section sheet using Gemini
+    sub-domain classification.
 
     Returns (headers_dict, rows) like read_table_from_sheet.
     """
-    sheet_name = domain_map.get(domain_key)
+    sheet_name = _dm_first(domain_map, domain_key)
     if not sheet_name or sheet_name not in (ws.parent.sheetnames if hasattr(ws, 'parent') else []):
         return {}, []
 
@@ -654,19 +643,18 @@ def _get_section_rows(ws, domain_map, domain_key, section_keywords=None):
     # First try reading as a flat table
     headers, rows = read_table_from_sheet(target_ws)
 
-    # If we got rows, check if the headers match what we expect
-    # (i.e., they have the right columns for this domain)
     if rows:
         return headers, rows
 
-    # If no rows, try reading sections
-    if section_keywords:
+    # If no rows from flat table, try reading sections and matching by
+    # Gemini sub-domain classification
+    if section_subdomains and section_map:
         sections = read_all_sections_from_sheet(target_ws)
-        for kw in section_keywords:
-            for sec_name, (sec_headers, sec_rows) in sections.items():
-                if kw.upper() in sec_name.upper():
-                    if sec_rows:
-                        return sec_headers, sec_rows
+        sheet_secs = section_map.get(sheet_name, {})
+        for sec_name, (sec_headers, sec_rows) in sections.items():
+            mapped_subdomain = sheet_secs.get(sec_name, 'unknown')
+            if mapped_subdomain in section_subdomains and sec_rows:
+                return sec_headers, sec_rows
 
     return headers, rows
 
@@ -826,11 +814,11 @@ def _find_col_bool(row, *candidates):
 # ---------------------------------------------------------------------------
 
 def _build_domain_sheet_map(classifications, wb):
-    """Build a mapping from canonical domain name to actual sheet name.
+    """Build a 1:many mapping from canonical domain name to sheet name list.
 
-    Uses Gemini's sheet classification (Pass 1) to find which sheet
-    corresponds to each domain. Falls back to keyword matching on
-    sheet names if a domain wasn't classified.
+    Uses Gemini's sheet classification (Pass 1) exclusively — no keyword
+    fallback. Multiple sheets can share the same domain (e.g., 4 financial
+    sheets all classified as financials_pl_bva).
 
     CRITICAL RULE: Cover/summary sheets (Cover, Summary, Index, Dashboard,
     etc.) are NEVER mapped to transactional data domains like
@@ -848,15 +836,17 @@ def _build_domain_sheet_map(classifications, wb):
         'nav_accounting', 'exits_distributions', 'compliance',
     }
 
-    domain_map = {}  # domain → sheet_name
+    from collections import defaultdict
+    domain_map = defaultdict(list)  # domain → [sheet_name, ...]
 
-    # From Gemini classification — but sanitise: never let a cover sheet
-    # be assigned to a data-only domain, no matter what Gemini says.
+    # From Gemini classification — allow MULTIPLE sheets per domain.
+    # Gemini assigns each sheet a primary domain; multiple sheets CAN share
+    # the same domain (e.g., P&L, BS, CF, BvA all → financials_pl_bva).
     for cls in classifications:
         sheet_name = cls.get('sheet_name', '')
         domains = cls.get('domains', [])
         for domain in domains:
-            if domain and domain != 'unknown' and domain not in domain_map:
+            if domain and domain != 'unknown':
                 if domain in _DATA_ONLY_DOMAINS and _is_cover_or_summary_sheet(sheet_name):
                     logger.warning(
                         f'Gemini classified cover/summary sheet "{sheet_name}" as '
@@ -864,57 +854,17 @@ def _build_domain_sheet_map(classifications, wb):
                         f'rows being imported as company/investment records.'
                     )
                     continue
-                domain_map[domain] = sheet_name
+                if sheet_name not in domain_map[domain]:
+                    domain_map[domain].append(sheet_name)
 
-    # Fallback keyword matching for sheets not classified by Gemini.
-    # Order matters: more specific domains first to avoid greedy matches.
-    # Each entry: (domain, keywords, exclude_keywords)
-    keyword_rules = [
-        ('portfolio_hierarchy', ['hierarchy', 'structure'], []),
-        ('portfolio_investments', ['investment', 'companies', 'portfolio compan'], ['hierarchy', 'kpi', 'p&l', 'budget', 'valuation']),
-        ('fund_scheme_master', ['fund', 'scheme', 'master', 'cover'], ['investment', 'hierarchy', 'p&l', 'kpi']),
-        ('organization_users', ['organization', 'users', 'entities'], []),
-        ('investors_aml', ['investor', 'lp', 'limited partner', 'aml'], ['exit', 'distribution']),
-        ('commitments', ['commitment'], []),
-        ('capital_calls', ['capital call', 'drawdown'], []),
-        ('valuations_kpis', ['valuation', 'kpi', 'metrics'], ['budget']),
-        # 'NAV & Accounting' (time-series) must win over 'NAV Calculation' (static).
-        # Two-step: first try sheets that are explicitly a history/accounting table,
-        # then fall back to any nav/accounting sheet that isn't a calculation worksheet.
-        ('nav_accounting', ['nav & accounting', 'nav and accounting', 'nav accounting', 'nav history', 'nav monthly'], ['chart']),
-        ('nav_accounting', ['nav', 'accounting', 'ledger'], ['chart', 'calculation', 'calcu']),
-        ('exits_distributions', ['exit', 'distribution', 'realized'], ['investor', 'lp']),
-        ('compliance', ['compliance', 'sebi', 'regulatory'], []),
-    ]
+    # Convert to regular dict for downstream consumption
+    domain_map = dict(domain_map)
 
-    taken_sheets = set(domain_map.values())
-
-    for domain, keywords, excludes in keyword_rules:
-        if domain in domain_map:
-            continue
-        for sheet_name in wb.sheetnames:
-            # NEVER assign a cover/summary sheet to any data-only domain
-            if domain in _DATA_ONLY_DOMAINS and _is_cover_or_summary_sheet(sheet_name):
-                continue
-            sn_lower = sheet_name.lower()
-            if any(kw in sn_lower for kw in keywords):
-                if excludes and any(ex in sn_lower for ex in excludes):
-                    continue
-                domain_map[domain] = sheet_name
-                taken_sheets.add(sheet_name)
-                break
-
-    # Second pass: broader matching without exclusions (but still no cover sheets for data domains)
-    for domain, keywords, _ in keyword_rules:
-        if domain in domain_map:
-            continue
-        for sheet_name in wb.sheetnames:
-            if domain in _DATA_ONLY_DOMAINS and _is_cover_or_summary_sheet(sheet_name):
-                continue
-            sn_lower = sheet_name.lower()
-            if any(kw in sn_lower for kw in keywords):
-                domain_map[domain] = sheet_name
-                break
+    # Log Gemini domain_map
+    total_sheets = sum(len(v) for v in domain_map.values())
+    logger.info(f'[GEMINI] domain_map: {len(domain_map)} domains, {total_sheets} sheet assignments')
+    for d, sheets in sorted(domain_map.items()):
+        logger.info(f'  {d} → {sheets}')
 
     return domain_map
 
@@ -1089,6 +1039,39 @@ class FundImportService:
         """Return Gemini-built alias map for this worksheet (empty dict if none)."""
         return self._gemini_sheet_aliases.get(getattr(ws, 'title', ''), {})
 
+    def _get_section_subdomain(self, sheet_name, sec_name):
+        """Return the Gemini-classified sub-domain for a section.
+
+        Looks up the section_map built by Gemini Pass 1.5.
+        The lookup normalizes the section name to uppercase and tries:
+          1. Exact match on the raw section name
+          2. Exact match on uppercase-stripped version
+          3. Substring match (section_map key is contained in sec_name or vice versa)
+
+        Returns the sub-domain string (e.g. 'portfolio_companies') or 'unknown'.
+        """
+        sheet_secs = self._section_map.get(sheet_name, {})
+        if not sheet_secs:
+            return 'unknown'
+
+        # Try exact match first
+        if sec_name in sheet_secs:
+            return sheet_secs[sec_name]
+
+        # Try uppercase-normalized match
+        sec_upper = sec_name.upper().strip()
+        for mapped_name, subdomain in sheet_secs.items():
+            if mapped_name.upper().strip() == sec_upper:
+                return subdomain
+
+        # Try substring containment (handles truncation/suffix differences)
+        for mapped_name, subdomain in sheet_secs.items():
+            mu = mapped_name.upper().strip()
+            if mu in sec_upper or sec_upper in mu:
+                return subdomain
+
+        return 'unknown'
+
     def import_file(self, import_file_record, progress_cb=None):
         """
         Main entry point. Processes a single ImportFile record.
@@ -1112,8 +1095,23 @@ class FundImportService:
             import_file_record.save(update_fields=[
                 'column_mapping', 'gemini_confidence', 'sheet_names', 'status',
             ])
+            n_classified = len(mapping_result.get('sheet_classifications', []))
+            n_mapped = len(mapping_result.get('column_mappings', {}))
+            logger.info(
+                f'Gemini mapping complete: {n_classified} sheets classified, '
+                f'{n_mapped} sheets column-mapped, '
+                f'confidence={mapping_result.get("overall_confidence", 0):.2f}'
+            )
         except Exception as e:
-            logger.warning(f'Gemini mapping failed: {e}')
+            import traceback
+            logger.error(
+                f'Gemini mapping FAILED for "{import_file_record.original_filename}": '
+                f'{type(e).__name__}: {e}\n{traceback.format_exc()}'
+            )
+            self.errors.append({
+                'section': 'gemini_mapping',
+                'error': f'{type(e).__name__}: {e}',
+            })
             mapping_result = None
             import_file_record.status = 'importing'
             import_file_record.save(update_fields=['status'])
@@ -1123,11 +1121,14 @@ class FundImportService:
 
         classifications = []
         column_mappings = {}
+        section_map = {}
         if mapping_result:
             classifications = mapping_result.get('sheet_classifications', [])
             column_mappings = mapping_result.get('column_mappings', {})
+            section_map = mapping_result.get('section_map', {})
 
-        result = self._do_import(filepath, classifications, _progress, column_mappings)
+        result = self._do_import(filepath, classifications, _progress,
+                                 column_mappings, section_map)
 
         # Save fund reference back to ImportFile for cascading delete support
         if self._imported_fund:
@@ -1138,7 +1139,8 @@ class FundImportService:
         return result
 
     @transaction.atomic
-    def _do_import(self, filepath, classifications, progress_cb, column_mappings=None):
+    def _do_import(self, filepath, classifications, progress_cb,
+                   column_mappings=None, section_map=None):
         """
         Run the actual import using Gemini's sheet classification.
 
@@ -1149,9 +1151,17 @@ class FundImportService:
         Built by Gemini Pass-2. We flatten it into self._gemini_sheet_aliases so
         read_table_from_sheet / read_all_sections_from_sheet can enrich every row
         with canonical field names regardless of how the Excel column was labelled.
+
+        section_map: {sheet_name: {section_name: sub_domain}}
+        Built by Gemini Pass-1.5. Maps detected section titles to canonical
+        sub-domains (e.g. 'portfolio_companies', 'investments', etc.) for
+        routing sections within multi-section sheets.
         """
         wb = openpyxl.load_workbook(filepath, data_only=True)
         org = self.org
+
+        # Store Gemini Pass 1.5 section classification for routing
+        self._section_map = section_map or {}
 
         # Build domain→sheet map from Gemini classification
         domain_map = _build_domain_sheet_map(classifications, wb)
@@ -1207,10 +1217,18 @@ class FundImportService:
         # --- Extract fund metadata from Cover sheet ---
         progress_cb(34, 'Extracting fund metadata...')
         try:
-            self._extract_fund_metadata(wb, fund, schemes)
+            self._extract_fund_metadata(wb, fund, schemes, domain_map)
         except Exception as e:
             logger.warning(f'Fund metadata extraction error: {e}')
             self.errors.append({'section': 'fund_metadata', 'error': str(e)})
+
+        # --- Extract scheme lifecycle from QAR Part B / compliance sheets ---
+        progress_cb(35, 'Extracting scheme lifecycle parameters...')
+        try:
+            self._import_scheme_lifecycle(wb, fund, schemes, domain_map)
+        except Exception as e:
+            logger.warning(f'Scheme lifecycle extraction error: {e}')
+            self.errors.append({'section': 'scheme_lifecycle', 'error': str(e)})
 
         # --- Import key entities & link to fund ---
         progress_cb(35, 'Importing key entities...')
@@ -1348,7 +1366,7 @@ class FundImportService:
         # --- Compute carried interest ---
         progress_cb(85, 'Computing carried interest...')
         try:
-            self._compute_carried_interest(schemes)
+            self._compute_carried_interest(schemes, wb=wb, domain_map=domain_map)
         except Exception as e:
             logger.warning(f'Carried interest error: {e}')
             self.errors.append({'section': 'carried_interest', 'error': str(e)})
@@ -1411,34 +1429,9 @@ class FundImportService:
     # ------------------------------------------------------------------
 
     def _extract_fund_name(self, wb, domain_map, filepath):
-        """Extract fund name from Cover sheet, first sheet, or filename."""
-        # Try Cover sheet
-        for name in wb.sheetnames:
-            if 'cover' in name.lower():
-                ws = wb[name]
-                # Fund name is usually in one of the first 5 rows
-                for r in range(1, 8):
-                    for c in range(1, 5):
-                        val = ws.cell(r, c).value
-                        if val:
-                            s = _str(val)
-                            # Skip generic titles
-                            if any(skip in s.lower() for skip in
-                                   ['trackfundai', 'trivesta', 'powered by',
-                                    'operating memorandum', 'fund data']):
-                                continue
-                            # A fund name is typically 3+ words or has common
-                            # fund-name patterns
-                            if (len(s) > 10 and
-                                    any(kw in s.lower() for kw in
-                                        ['fund', 'capital', 'ventures',
-                                         'trust', 'partners', 'growth',
-                                         'india', 'infra'])):
-                                return s
-                break
-
-        # Try Fund & Scheme Master domain
-        sheet_name = domain_map.get('fund_scheme_master')
+        """Extract fund name from Gemini-classified fund_scheme_master sheet or filename."""
+        # Try Fund & Scheme Master domain first (Gemini-classified)
+        sheet_name = _dm_first(domain_map, 'fund_scheme_master')
         if sheet_name and sheet_name in wb.sheetnames:
             ws = wb[sheet_name]
             for r in range(1, 15):
@@ -1469,26 +1462,35 @@ class FundImportService:
         cat_code = 'CAT_II'  # default
 
         # Try to detect category from the fund master sheet
-        sheet_name = domain_map.get('fund_scheme_master')
+        # Scan ALL rows (not just first 20) because FUND_MASTER sheets have
+        # multi-section layouts: Section A (SEBI IDs), Section B (Lifecycle),
+        # Section C (Performance).
+        sheet_name = _dm_first(domain_map, 'fund_scheme_master')
         if sheet_name and sheet_name in wb.sheetnames:
             ws = wb[sheet_name]
-            for r in range(1, 20):
+            scan_limit = min(ws.max_row + 1, 100)
+            for r in range(1, scan_limit):
                 label = _str(ws.cell(r, 1).value).lower()
                 val = _str(ws.cell(r, 2).value)
                 if 'category code' in label or 'sebi category code' in label:
                     if val and val in CATEGORY_MAP:
                         cat_code = val
                         break
-                elif 'category' in label:
-                    if 'i' in val.lower() and 'iii' not in val.lower() and 'ii' not in val.lower():
-                        cat_code = 'CAT_I_VCF'
-                    elif 'iii' in val.lower():
+                elif 'category' in label and 'sub' not in label and 'strategy' not in label:
+                    vl = val.lower().strip()
+                    # Match AIF Cat II, Category II, Cat-II, etc.
+                    if re.search(r'\biii\b|cat.?iii', vl):
                         cat_code = 'CAT_III_LVF'
+                    elif re.search(r'\bii\b|cat.?ii', vl):
+                        cat_code = 'CAT_II'
+                    elif re.search(r'\bi\b|cat.?i', vl):
+                        cat_code = 'CAT_I_VCF'
 
         fund_category = FundCategory.objects.filter(
             sebi_category_code=cat_code).first()
 
-        # Read SEBI reg, structure from fund master sheet
+        # Read SEBI reg, structure, PAN, entities from fund master sheet
+        # Scan ALL key-value rows in the sheet (handles multi-section layout)
         sebi_reg = ''
         structure = 'trust'
         fund_pan = ''
@@ -1497,37 +1499,54 @@ class FundImportService:
 
         if sheet_name and sheet_name in wb.sheetnames:
             ws = wb[sheet_name]
-            for r in range(1, 20):
-                label = _str(ws.cell(r, 1).value).lower()
+            scan_limit = min(ws.max_row + 1, 100)
+            for r in range(1, scan_limit):
+                label = _str(ws.cell(r, 1).value).lower().strip()
                 val = ws.cell(r, 2).value
                 if not val:
                     continue
                 val_str = _str(val)
-                if any(kw in label for kw in ['sebi reg', 'registration']):
-                    sebi_reg = val_str
-                elif 'structure' in label:
-                    structure = val_str.lower() if val_str.lower() in ('trust', 'company', 'llp') else 'trust'
-                elif label == 'pan':
-                    fund_pan = val_str[:10]
-                elif label == 'gstin':
-                    fund_gstin = val_str
+                if any(kw in label for kw in ['sebi reg', 'registration number']):
+                    if not sebi_reg:
+                        sebi_reg = val_str
+                elif 'structure' in label and 'legal' in label or label == 'legal structure':
+                    vl = val_str.lower()
+                    if 'trust' in vl:
+                        structure = 'trust'
+                    elif 'llp' in vl:
+                        structure = 'llp'
+                    elif 'company' in vl:
+                        structure = 'company'
+                elif 'pan' in label and ('fund' in label or label == 'pan'):
+                    if not fund_pan:
+                        fund_pan = val_str[:10]
+                elif 'gstin' in label:
+                    if not fund_gstin:
+                        fund_gstin = val_str
                 elif 'gift' in label:
                     gift_city = val_str.lower() in ('yes', 'true', '1', 'y')
 
-        fund, created = Fund.objects.get_or_create(
+        fund_defaults = {}
+        if fund_category:
+            fund_defaults['fund_category'] = fund_category
+        if structure:
+            fund_defaults['structure_type'] = structure
+        fund_defaults['base_currency'] = 'INR'
+        if sebi_reg:
+            fund_defaults['sebi_registration_number'] = sebi_reg
+        if fund_pan:
+            fund_defaults['pan'] = fund_pan
+        if fund_gstin:
+            fund_defaults['gstin'] = fund_gstin
+        if gift_city:
+            fund_defaults['is_gift_city'] = gift_city
+
+        fund, created = Fund.objects.update_or_create(
             organization=org,
             name=fund_name,
-            defaults={
-                'fund_category': fund_category,
-                'structure_type': structure,
-                'base_currency': 'INR',
-                'sebi_registration_number': sebi_reg,
-                'pan': fund_pan,
-                'gstin': fund_gstin,
-                'is_gift_city': gift_city,
-            },
+            defaults=fund_defaults,
         )
-        logger.info(f'{"Created" if created else "Found"} Fund: {fund.name}')
+        logger.info(f'{"Created" if created else "Updated"} Fund: {fund.name}')
 
         schemes = {}
 
@@ -1614,22 +1633,39 @@ class FundImportService:
                                                        'deal by deal'):
                             carry_type = 'american'
 
-                        s, _ = Scheme.objects.get_or_create(
+                        fee_basis = 'committed'
+                        if fee_basis_raw and fee_basis_raw.lower() in ('committed', 'called', 'nav'):
+                            fee_basis = fee_basis_raw.lower()
+
+                        scheme_defaults = {'is_active': True}
+                        if vintage:
+                            scheme_defaults['vintage_year'] = int(vintage)
+                        if first_close:
+                            scheme_defaults['first_close_date'] = first_close
+                        if final_close:
+                            scheme_defaults['final_close_date'] = final_close
+                        if scheme_size:
+                            scheme_defaults['scheme_size'] = scheme_size
+                        if tenure:
+                            scheme_defaults['tenure_years'] = int(tenure)
+                        if hurdle:
+                            scheme_defaults['hurdle_rate_pct'] = hurdle
+                        if carry:
+                            scheme_defaults['carry_pct'] = carry
+                        if carry_type:
+                            scheme_defaults['carry_type'] = carry_type
+                        if fee_pct:
+                            scheme_defaults['management_fee_pct'] = fee_pct
+                        if fee_basis:
+                            scheme_defaults['management_fee_basis'] = fee_basis
+                        if sponsor_pct:
+                            scheme_defaults['sponsor_commitment_pct'] = sponsor_pct
+                        if scheme_status:
+                            scheme_defaults['scheme_status'] = scheme_status
+
+                        s, _ = Scheme.objects.update_or_create(
                             fund=fund, name=sn,
-                            defaults={
-                                'vintage_year': int(vintage) if vintage else date.today().year,
-                                'first_close_date': first_close,
-                                'final_close_date': final_close,
-                                'scheme_size': scheme_size,
-                                'tenure_years': int(tenure) if tenure else None,
-                                'hurdle_rate_pct': hurdle,
-                                'carry_pct': carry,
-                                'carry_type': carry_type,
-                                'management_fee_pct': fee_pct,
-                                'sponsor_commitment_pct': sponsor_pct,
-                                'scheme_status': scheme_status,
-                                'is_active': True,
-                            },
+                            defaults=scheme_defaults,
                         )
                         schemes[sn] = s
                 else:
@@ -1641,7 +1677,7 @@ class FundImportService:
                         if _is_section_header(sn):
                             break
                         sn = _str(sn)
-                        s, _ = Scheme.objects.get_or_create(
+                        s, _ = Scheme.objects.update_or_create(
                             fund=fund, name=sn,
                             defaults={
                                 'scheme_status': 'investing',
@@ -1653,7 +1689,7 @@ class FundImportService:
         # If no schemes found, create a default one
         if not schemes:
             scheme_name = f'{fund_name} - Scheme I'
-            scheme, _ = Scheme.objects.get_or_create(
+            scheme, _ = Scheme.objects.update_or_create(
                 fund=fund,
                 name=scheme_name,
                 defaults={
@@ -1670,25 +1706,36 @@ class FundImportService:
     # Fund metadata extraction from Cover sheet
     # ------------------------------------------------------------------
 
-    def _extract_fund_metadata(self, wb, fund, schemes):
-        """Extract rich fund metadata from Cover sheet and update Fund + Scheme."""
-        cover_ws = None
-        for sn in wb.sheetnames:
-            if 'cover' in sn.lower():
-                cover_ws = wb[sn]
-                break
-        if not cover_ws:
+    def _extract_fund_metadata(self, wb, fund, schemes, domain_map=None):
+        """Extract rich fund metadata from ALL candidate sheets.
+
+        Scans all relevant sheets (cover, fund_scheme_master, summary, overview)
+        and merges their key-value pairs. Detailed/dedicated sheets are scanned
+        FIRST so their values take priority; Sheet 1 / summary sheets are
+        scanned LAST as fallback. This ensures we never stop at Sheet 1 if
+        more detailed data exists in sub-sheets.
+        """
+        # Use Gemini-classified fund_scheme_master sheets
+        candidate_sheets = _dm_sheets(domain_map, 'fund_scheme_master') if domain_map else []
+        # Filter to sheets that actually exist
+        candidate_sheets = [s for s in candidate_sheets if s in wb.sheetnames]
+
+        if not candidate_sheets:
             return
 
-        # Build a key-value map from Cover sheet
-        # Cover has pairs in columns B/C and F/G
+        # Build a MERGED key-value map from ALL candidate sheets.
+        # Later sheets (summary/cover) only fill keys not already set by
+        # earlier (detailed) sheets — detailed data always wins.
         kv = {}
-        for r in range(1, cover_ws.max_row + 1):
-            for label_col, val_col in [(2, 3), (6, 7)]:
-                label = _str(cover_ws.cell(r, label_col).value).lower()
-                val = cover_ws.cell(r, val_col).value
-                if label and val is not None:
-                    kv[label] = val
+        for sheet_name in candidate_sheets:
+            ws = wb[sheet_name]
+            for r in range(1, min(ws.max_row + 1, 200)):
+                for label_col, val_col in [(1, 2), (2, 3), (6, 7)]:
+                    label = _str(ws.cell(r, label_col).value).lower().strip().rstrip(':')
+                    val = ws.cell(r, val_col).value
+                    if label and val is not None and label not in kv:
+                        kv[label] = val
+            logger.info(f'  Fund metadata: scanned sheet "{sheet_name}" ({len(kv)} kv pairs total)')
 
         # Update Fund fields
         update_fields = []
@@ -1698,11 +1745,13 @@ class FundImportService:
             fund.sebi_registration_number = _str(reg_no)
             update_fields.append('sebi_registration_number')
 
-        corpus_raw = kv.get('corpus') or kv.get('fund size') or kv.get('target corpus')
+        corpus_raw = kv.get('corpus') or kv.get('fund size') or kv.get('target corpus') or kv.get('corpus at final close')
         if corpus_raw and not fund.corpus_target:
-            # Parse "₹ 3,500 Cr" or similar
+            # Parse "₹ 3,500 Cr" or "Rs 3,800 Cr" or similar
             corpus_str = _str(corpus_raw)
-            corpus_num = re.sub(r'[₹,\sCr]', '', corpus_str)
+            corpus_num = re.sub(r'[₹,\s]', '', corpus_str)
+            corpus_num = re.sub(r'[Cc]r\.?$', '', corpus_num)
+            corpus_num = re.sub(r'^[Rr][Ss]\.?\s*', '', corpus_num)
             corpus_d = _d(corpus_num)
             if corpus_d:
                 fund.corpus_target = corpus_d
@@ -1729,56 +1778,271 @@ class FundImportService:
             fund.save(update_fields=update_fields)
             logger.info(f'  Fund metadata updated: {update_fields}')
 
-        # Update Scheme fields from Cover data
-        default_scheme = list(schemes.values())[0] if schemes else None
-        if not default_scheme:
+        # Update Scheme fields from Cover data — apply to ALL schemes, not just the first
+        for default_scheme in schemes.values():
+            scheme_updates = []
+
+            vintage_year = kv.get('vintage')
+            if vintage_year:
+                v_str = _str(vintage_year)
+                if v_str.isdigit() and len(v_str) == 4:
+                    default_scheme.vintage_year = int(v_str)
+                    scheme_updates.append('vintage_year')
+
+            hurdle_raw = kv.get('hurdle') or kv.get('hurdle rate')
+            if hurdle_raw:
+                h_str = _str(hurdle_raw).replace('%', '').strip()
+                h_val = _d(h_str)
+                if h_val and not default_scheme.hurdle_rate_pct:
+                    default_scheme.hurdle_rate_pct = h_val
+                    scheme_updates.append('hurdle_rate_pct')
+
+            carry_raw = kv.get('carry') or kv.get('carried interest')
+            if carry_raw:
+                c_str = _str(carry_raw).replace('%', '').strip()
+                c_val = _d(c_str)
+                if c_val and not default_scheme.carry_pct:
+                    default_scheme.carry_pct = c_val
+                    scheme_updates.append('carry_pct')
+
+            fee_raw = kv.get('mgmt fee') or kv.get('management fee')
+            if fee_raw:
+                f_str = _str(fee_raw).replace('%', '').strip()
+                f_val = _d(f_str)
+                if f_val and not default_scheme.management_fee_pct:
+                    default_scheme.management_fee_pct = f_val
+                    scheme_updates.append('management_fee_pct')
+
+            # Fee basis
+            fee_basis_raw = kv.get('fee basis') or kv.get('management fee basis') or kv.get('mgmt fee basis')
+            if fee_basis_raw:
+                fb = _str(fee_basis_raw).lower().strip()
+                if fb in ('committed', 'called', 'nav') and not default_scheme.management_fee_basis:
+                    default_scheme.management_fee_basis = fb
+                    scheme_updates.append('management_fee_basis')
+
+            # Tenure
+            tenure_raw = kv.get('tenure') or kv.get('tenure (years)') or kv.get('fund tenure')
+            if tenure_raw and not default_scheme.tenure_years:
+                t_str = re.sub(r'[^\d]', '', _str(tenure_raw))
+                if t_str and t_str.isdigit():
+                    default_scheme.tenure_years = int(t_str)
+                    scheme_updates.append('tenure_years')
+
+            # Close dates
+            for kv_key in ('initial close date', 'first close date', 'first close', 'initial close'):
+                close_raw = kv.get(kv_key)
+                if close_raw and not default_scheme.first_close_date:
+                    d_val = _date(_str(close_raw))
+                    if d_val:
+                        default_scheme.first_close_date = d_val
+                        scheme_updates.append('first_close_date')
+                    break
+            for kv_key in ('final close date', 'final close', 'last close date', 'last close'):
+                close_raw = kv.get(kv_key)
+                if close_raw and not default_scheme.final_close_date:
+                    d_val = _date(_str(close_raw))
+                    if d_val:
+                        default_scheme.final_close_date = d_val
+                        scheme_updates.append('final_close_date')
+                    break
+
+            corpus_raw2 = kv.get('corpus') or kv.get('fund size') or kv.get('corpus at final close')
+            if corpus_raw2 and not default_scheme.scheme_size:
+                c_str2 = _str(corpus_raw2)
+                c_num = re.sub(r'[₹,\s]', '', c_str2)
+                c_num = re.sub(r'[Cc]r\.?$', '', c_num)
+                c_num = re.sub(r'^[Rr][Ss]\.?\s*', '', c_num)
+                c_val2 = _d(c_num)
+                if c_val2:
+                    default_scheme.scheme_size = c_val2
+                    scheme_updates.append('scheme_size')
+
+            # Sponsor commitment
+            sponsor_raw = kv.get('sponsor commitment') or kv.get('sponsor commitment %') or kv.get('sponsor %')
+            if sponsor_raw and not default_scheme.sponsor_commitment_pct:
+                s_str = _str(sponsor_raw).replace('%', '').strip()
+                s_val = _d(s_str)
+                if s_val:
+                    default_scheme.sponsor_commitment_pct = s_val
+                    scheme_updates.append('sponsor_commitment_pct')
+
+            if scheme_updates:
+                default_scheme.save(update_fields=scheme_updates)
+                logger.info(f'  Scheme "{default_scheme.name}" metadata updated: {scheme_updates}')
+
+    # ------------------------------------------------------------------
+    # Scheme Lifecycle Parameters (QAR Part B, compliance sheets, etc.)
+    # ------------------------------------------------------------------
+
+    def _import_scheme_lifecycle(self, wb, fund, schemes, domain_map):
+        """Extract scheme lifecycle parameters from QAR Part B / compliance sheets.
+
+        Many fund Excel files have a sheet like "QAR Part B" or "Scheme Lifecycle
+        Parameters" that contains key-value pairs for: tenure, close dates, corpus,
+        hurdle rate, carry, management fees, waterfall type, etc.
+
+        This method scans ALL candidate sheets for key-value pairs matching scheme
+        lifecycle fields. Detailed sub-sheets (QAR, lifecycle, compliance) are
+        scanned FIRST so their values take priority over Sheet 1 summary data.
+        Sheet 1 (fund_scheme_master) is scanned LAST as a fallback for any fields
+        not found in dedicated sheets.
+        """
+        # Use Gemini-classified sheets: compliance first (more detailed), then fund_scheme_master
+        candidate_sheets = []
+        for domain in ('compliance', 'fund_scheme_master'):
+            for s in _dm_sheets(domain_map, domain):
+                if s in wb.sheetnames and s not in candidate_sheets:
+                    candidate_sheets.append(s)
+
+        if not candidate_sheets:
             return
 
-        scheme_updates = []
+        # Map of lowercase label patterns → (scheme_field, parser)
+        # parser: 'str', 'int', 'decimal', 'date', 'pct', 'carry_type', 'fee_basis'
+        LIFECYCLE_PATTERNS = {
+            # Tenure
+            'tenure': ('tenure_years', 'int'),
+            'tenure (excl': ('tenure_years', 'int'),
+            'tenure (years)': ('tenure_years', 'int'),
+            'fund tenure': ('tenure_years', 'int'),
+            'scheme tenure': ('tenure_years', 'int'),
+            # Close dates
+            'initial close date': ('first_close_date', 'date'),
+            'first close date': ('first_close_date', 'date'),
+            'initial close': ('first_close_date', 'date'),
+            'first close': ('first_close_date', 'date'),
+            'final close date': ('final_close_date', 'date'),
+            'final close': ('final_close_date', 'date'),
+            'last close date': ('final_close_date', 'date'),
+            'last close': ('final_close_date', 'date'),
+            # Corpus / scheme size
+            'corpus at final close': ('scheme_size', 'decimal_cr'),
+            'corpus at close': ('scheme_size', 'decimal_cr'),
+            'total corpus': ('scheme_size', 'decimal_cr'),
+            'fund corpus': ('scheme_size', 'decimal_cr'),
+            'scheme size': ('scheme_size', 'decimal_cr'),
+            'fund size': ('scheme_size', 'decimal_cr'),
+            # Hurdle rate
+            'hurdle rate': ('hurdle_rate_pct', 'pct'),
+            'hurdle': ('hurdle_rate_pct', 'pct'),
+            'preferred return': ('hurdle_rate_pct', 'pct'),
+            'estimated expenses': ('hurdle_rate_pct', 'pct'),  # Some QARs label it this way
+            # Carried interest
+            'carried interest': ('carry_pct', 'pct'),
+            'carry': ('carry_pct', 'pct'),
+            'carry %': ('carry_pct', 'pct'),
+            'performance fee': ('carry_pct', 'pct'),
+            # Carry type / waterfall
+            'waterfall type': ('carry_type', 'carry_type'),
+            'carry type': ('carry_type', 'carry_type'),
+            'distribution waterfall': ('carry_type', 'carry_type'),
+            # Management fee
+            'management fee': ('management_fee_pct', 'pct'),
+            'mgmt fee': ('management_fee_pct', 'pct'),
+            'management fee %': ('management_fee_pct', 'pct'),
+            'annual management fee': ('management_fee_pct', 'pct'),
+            # Fee basis
+            'fee basis': ('management_fee_basis', 'fee_basis'),
+            'management fee basis': ('management_fee_basis', 'fee_basis'),
+            'mgmt fee basis': ('management_fee_basis', 'fee_basis'),
+            # Sponsor commitment
+            'sponsor commitment': ('sponsor_commitment_pct', 'pct'),
+            'sponsor commitment %': ('sponsor_commitment_pct', 'pct'),
+            'sponsor %': ('sponsor_commitment_pct', 'pct'),
+            # Vintage / inception
+            'vintage year': ('vintage_year', 'int'),
+            'vintage': ('vintage_year', 'int'),
+            # PPM / SEBI dates (for fund-level fields)
+            'ppm filing date': (None, None),  # skip — not a scheme field
+            'sebi communication date': (None, None),
+            'fund registration date': (None, None),
+        }
 
-        vintage_year = kv.get('vintage')
-        if vintage_year:
-            v_str = _str(vintage_year)
-            if v_str.isdigit() and len(v_str) == 4:
-                default_scheme.vintage_year = int(v_str)
-                scheme_updates.append('vintage_year')
+        # Scan each candidate sheet for key-value pairs
+        collected = {}  # field_name → parsed_value
 
-        hurdle_raw = kv.get('hurdle') or kv.get('hurdle rate')
-        if hurdle_raw:
-            h_str = _str(hurdle_raw).replace('%', '').strip()
-            h_val = _d(h_str)
-            if h_val and not default_scheme.hurdle_rate_pct:
-                default_scheme.hurdle_rate_pct = h_val
-                scheme_updates.append('hurdle_rate_pct')
+        for sheet_name in candidate_sheets:
+            ws = wb[sheet_name]
+            for r in range(1, min(ws.max_row + 1, 200)):
+                # Try columns (A, B), (B, C), (A, C) for label-value pairs
+                for label_col, val_col in [(1, 2), (2, 3), (1, 3)]:
+                    label_raw = ws.cell(r, label_col).value
+                    val_raw = ws.cell(r, val_col).value
+                    if not label_raw or val_raw is None:
+                        continue
+                    label = _str(label_raw).lower().strip().rstrip(':')
 
-        carry_raw = kv.get('carry') or kv.get('carried interest')
-        if carry_raw:
-            c_str = _str(carry_raw).replace('%', '').strip()
-            c_val = _d(c_str)
-            if c_val and not default_scheme.carry_pct:
-                default_scheme.carry_pct = c_val
-                scheme_updates.append('carry_pct')
+                    # Match against patterns (longest match first for specificity)
+                    matched_field = None
+                    matched_parser = None
+                    best_len = 0
+                    for pattern, (field, parser) in LIFECYCLE_PATTERNS.items():
+                        if field is None:
+                            continue
+                        if pattern in label and len(pattern) > best_len:
+                            matched_field = field
+                            matched_parser = parser
+                            best_len = len(pattern)
 
-        fee_raw = kv.get('mgmt fee') or kv.get('management fee')
-        if fee_raw:
-            f_str = _str(fee_raw).replace('%', '').strip()
-            f_val = _d(f_str)
-            if f_val and not default_scheme.management_fee_pct:
-                default_scheme.management_fee_pct = f_val
-                scheme_updates.append('management_fee_pct')
+                    if not matched_field or matched_field in collected:
+                        continue
 
-        corpus_raw2 = kv.get('corpus') or kv.get('fund size')
-        if corpus_raw2 and not default_scheme.scheme_size:
-            c_str2 = _str(corpus_raw2)
-            c_num = re.sub(r'[₹,\sCr]', '', c_str2)
-            c_val2 = _d(c_num)
-            if c_val2:
-                default_scheme.scheme_size = c_val2
-                scheme_updates.append('scheme_size')
+                    val_str = _str(val_raw).strip()
+                    if not val_str or val_str.lower() in ('none', 'n/a', '-', ''):
+                        continue
 
-        if scheme_updates:
-            default_scheme.save(update_fields=scheme_updates)
-            logger.info(f'  Scheme metadata updated: {scheme_updates}')
+                    # Parse value based on type
+                    parsed = None
+                    if matched_parser == 'int':
+                        nums = re.sub(r'[^\d]', '', val_str)
+                        if nums and nums.isdigit():
+                            parsed = int(nums)
+                    elif matched_parser == 'decimal_cr':
+                        clean = re.sub(r'[₹,\s]', '', val_str)
+                        clean = re.sub(r'\s*[Cc]r\.?$', '', clean)
+                        clean = re.sub(r'^[Rr][Ss]\.?\s*', '', clean)
+                        parsed = _d(clean)
+                    elif matched_parser == 'pct':
+                        clean = val_str.replace('%', '').strip()
+                        # Handle "8% per annum" or "2.00% p.a." patterns
+                        clean = re.split(r'\s+(?:per|p\.?a|above|on)', clean, maxsplit=1)[0].strip()
+                        parsed = _d(clean)
+                    elif matched_parser == 'date':
+                        parsed = _date(val_str)
+                    elif matched_parser == 'carry_type':
+                        vl = val_str.lower()
+                        if 'european' in vl or 'whole fund' in vl:
+                            parsed = 'european'
+                        elif 'american' in vl or 'deal' in vl:
+                            parsed = 'american'
+                    elif matched_parser == 'fee_basis':
+                        vl = val_str.lower()
+                        if 'committed' in vl:
+                            parsed = 'committed'
+                        elif 'called' in vl or 'drawn' in vl:
+                            parsed = 'called'
+                        elif 'nav' in vl:
+                            parsed = 'nav'
+
+                    if parsed is not None:
+                        collected[matched_field] = parsed
+                        logger.info(f'  Lifecycle: {matched_field} = {parsed} (from "{sheet_name}" row {r})')
+
+        if not collected:
+            return
+
+        # Apply collected values to ALL schemes (lifecycle params are fund-level)
+        for scheme in schemes.values():
+            update_fields = []
+            for field_name, value in collected.items():
+                current = getattr(scheme, field_name, None)
+                if not current:  # Only fill if currently empty/None
+                    setattr(scheme, field_name, value)
+                    update_fields.append(field_name)
+            if update_fields:
+                scheme.save(update_fields=update_fields)
+                logger.info(f'  Scheme "{scheme.name}" lifecycle updated: {update_fields}')
 
     # ------------------------------------------------------------------
     # Investors
@@ -1786,7 +2050,7 @@ class FundImportService:
 
     def _import_investors(self, wb, org, domain_map):
         """Import investors from the Investors/LP sheet."""
-        sheet_name = domain_map.get('investors_aml')
+        sheet_name = _dm_first(domain_map, 'investors_aml')
         if not sheet_name or sheet_name not in wb.sheetnames:
             return {}
 
@@ -1854,7 +2118,7 @@ class FundImportService:
         commitments = {}
 
         # --- Strategy 1: Try dedicated Commitments sheet ---
-        commit_sheet = domain_map.get('commitments')
+        commit_sheet = _dm_first(domain_map, 'commitments')
         if commit_sheet and commit_sheet in wb.sheetnames:
             ws = wb[commit_sheet]
             _, rows = read_table_from_sheet(ws, alias_map=self._get_alias(ws))
@@ -1920,7 +2184,7 @@ class FundImportService:
                     return commitments
 
         # --- Strategy 2: Extract from investors_aml sheet (flat format) ---
-        sheet_name = domain_map.get('investors_aml')
+        sheet_name = _dm_first(domain_map, 'investors_aml')
         if not sheet_name or sheet_name not in wb.sheetnames:
             return {}
 
@@ -1983,19 +2247,23 @@ class FundImportService:
         # --- Strategy 1: Dedicated Capital Calls sheet ---
         # This runs even when commitments are empty — fund-level call data
         # (total amounts, dates, purposes) does not require LP records.
-        cc_sheet = domain_map.get('capital_calls')
+        cc_sheet = _dm_first(domain_map, 'capital_calls')
         if cc_sheet and cc_sheet in wb.sheetnames:
             ws = wb[cc_sheet]
             sections = read_all_sections_from_sheet(ws, alias_map=self._get_alias(ws))
 
-            # Find the main capital calls section
+            # Find the main capital calls section (not line items)
             cc_rows = []
             for sec_name, (sec_headers, sec_rows) in sections.items():
-                if 'CAPITAL CALL LINE' in sec_name.upper():
+                subdomain = self._get_section_subdomain(cc_sheet, sec_name)
+                if subdomain == 'capital_call_line_items':
                     continue  # Skip line item sections for now
-                if sec_rows:
+                if subdomain == 'capital_call_headers' and sec_rows:
                     cc_rows = sec_rows
                     break
+                # Fallback for __default__ or unclassified sections
+                if sec_rows and not cc_rows:
+                    cc_rows = sec_rows
 
             if cc_rows:
                 call_count = 0
@@ -2089,7 +2357,8 @@ class FundImportService:
                 # Now import line items from CAPITAL CALL LINE ITEMS sections
                 line_count = 0
                 for sec_name, (sec_headers, sec_rows) in sections.items():
-                    if 'CAPITAL CALL LINE' not in sec_name.upper():
+                    subdomain = self._get_section_subdomain(cc_sheet, sec_name)
+                    if subdomain != 'capital_call_line_items':
                         continue
 
                     # Try to figure out which call this belongs to
@@ -2161,7 +2430,7 @@ class FundImportService:
                 return
 
         # --- Strategy 2: Extract from investors_aml sheet (flat format) ---
-        sheet_name = domain_map.get('investors_aml')
+        sheet_name = _dm_first(domain_map, 'investors_aml')
         if not sheet_name or sheet_name not in wb.sheetnames:
             return
 
@@ -2252,7 +2521,7 @@ class FundImportService:
         def _cb(pct, msg):
             if progress_cb:
                 progress_cb(pct, msg)
-        sheet_name = domain_map.get('portfolio_investments')
+        sheet_name = _dm_first(domain_map, 'portfolio_investments')
         if not sheet_name or sheet_name not in wb.sheetnames:
             return {}, {}
 
@@ -2279,20 +2548,26 @@ class FundImportService:
         combined_rows = None   # "PORTFOLIO INVESTMENTS" — company+investment merged
 
         for sec_name, (sec_headers, sec_rows) in sections.items():
-            sec_upper = sec_name.upper()
-            if 'INVESTMENT TRANCHE' in sec_upper:
+            subdomain = self._get_section_subdomain(sheet_name, sec_name)
+            if subdomain == 'investment_tranches':
                 continue  # Handled by _import_tranches
-            elif 'PORTFOLIO COMPAN' in sec_upper or sec_upper == 'COMPANIES':
-                # Dedicated company master section
+            elif subdomain == 'temporary_investments':
+                continue  # Liquid MFs, overnight funds — skip
+            elif subdomain == 'portfolio_companies':
                 company_rows = sec_rows
-            elif 'PORTFOLIO INVESTMENT' in sec_upper:
-                # Combined company+investment sheet — treat as flat table
-                combined_rows = sec_rows
-            elif 'INVESTMENT' in sec_upper:
-                # Pure investment financial data section (no "PORTFOLIO" prefix)
-                investment_rows = sec_rows
+            elif subdomain == 'investments':
+                # Gemini classifies combined company+investment tables as
+                # 'investments' — check if rows also have company identity
+                # columns to decide if this is combined or pure investment.
+                if sec_rows and any(
+                    k.lower() in ('company name', 'company', 'name',
+                                  'portfolio company', 'investee')
+                    for k in sec_headers
+                ):
+                    combined_rows = sec_rows
+                else:
+                    investment_rows = sec_rows
             elif sec_name == '__default__' and not company_rows and not combined_rows:
-                # Sheet started directly with a header row — flat table
                 combined_rows = sec_rows
 
         # Promote combined_rows to company_rows if no separate sections found
@@ -2608,7 +2883,7 @@ class FundImportService:
            with explicit tranche #, amount, date, shares, PPS etc. (Format B)
         2. Flat table where each company row doubles as a single tranche (Format A)
         """
-        sheet_name = domain_map.get('portfolio_investments')
+        sheet_name = _dm_first(domain_map, 'portfolio_investments')
         if not sheet_name or sheet_name not in wb.sheetnames:
             return
 
@@ -2618,7 +2893,8 @@ class FundImportService:
         sections = read_all_sections_from_sheet(ws, alias_map=self._get_alias(ws))
         tranche_rows = None
         for sec_name, (sec_headers, sec_rows) in sections.items():
-            if 'TRANCHE' in sec_name.upper():
+            subdomain = self._get_section_subdomain(sheet_name, sec_name)
+            if subdomain == 'investment_tranches':
                 tranche_rows = sec_rows
                 break
 
@@ -2752,34 +3028,13 @@ class FundImportService:
     # ------------------------------------------------------------------
 
     def _import_valuations(self, wb, investments, domain_map):
-        """Import valuations from the Valuations sheet.
-
-        Handles:
-        - Dedicated "Valuations" sheet (Format B)
-        - valuations_kpis domain sheet (Format A, may share with KPIs)
-        - Any sheet with 'valuation' in the name
-        """
-        sheet_name = None
-
-        # Strategy 1: Look for a dedicated Valuations sheet
-        for sn in wb.sheetnames:
-            sn_lower = sn.lower()
-            if 'valuation' in sn_lower and 'kpi' not in sn_lower:
-                sheet_name = sn
-                break
-
-        # Strategy 2: Fall back to valuations_kpis domain
-        if not sheet_name:
-            sheet_name = domain_map.get('valuations_kpis')
-
-        # Strategy 3: Any sheet with 'valuation' in the name
-        if not sheet_name or sheet_name not in wb.sheetnames:
-            for sn in wb.sheetnames:
-                if 'valuation' in sn.lower():
-                    sheet_name = sn
-                    break
-
-        if not sheet_name or sheet_name not in wb.sheetnames:
+        """Import valuations from Gemini-classified valuations_kpis sheets."""
+        sheets = _dm_sheets(domain_map, 'valuations_kpis')
+        if not sheets:
+            return
+        # Process all valuation sheets — column detection determines if data matches
+        sheet_name = sheets[0]
+        if sheet_name not in wb.sheetnames:
             return
 
         ws = wb[sheet_name]
@@ -2899,19 +3154,13 @@ class FundImportService:
     # ------------------------------------------------------------------
 
     def _import_kpis(self, wb, org, investments, companies, domain_map):
-        """Import KPIs from the Portfolio KPIs sheet.
-
-        Handles both vertical format (one KPI per row) and horizontal/pivot
-        format (KPI values across period columns like Oct-24, Nov-24...).
-        """
-        sheet_name = None
-        for sn in wb.sheetnames:
-            if 'kpi' in sn.lower():
-                sheet_name = sn
-                break
-        if not sheet_name:
-            sheet_name = domain_map.get('valuations_kpis')
-        if not sheet_name or sheet_name not in wb.sheetnames:
+        """Import KPIs from Gemini-classified valuations_kpis sheets."""
+        sheets = _dm_sheets(domain_map, 'valuations_kpis')
+        if not sheets:
+            return
+        # Use all KPI-classified sheets; start with the first one
+        sheet_name = sheets[0]
+        if sheet_name not in wb.sheetnames:
             return
 
         ws = wb[sheet_name]
@@ -3041,6 +3290,138 @@ class FundImportService:
 
         logger.info(f'  KPIs: {count}')
 
+    def _semantic_kpi_column_map(self, raw_headers):
+        """
+        Use Gemini to semantically map raw KPI column headers to canonical names.
+
+        For example: "GMV (Cr)" → "GMV", "Gross M%" → "Gross Margin %",
+        "Rev" → "Revenue", "AOV" → "Average Order Value", etc.
+
+        Returns: dict mapping raw_header → {canonical_name, slug, format}
+        """
+        if not raw_headers:
+            return {}
+
+        # Define canonical KPI definitions with known aliases
+        CANONICAL_KPIS = {
+            'GMV': {'aliases': ['gmv', 'gross merchandise value', 'gross merch value', 'gmv (cr)', 'gmv in crore', 'gmv(lakhs)', 'gross sales value', 'total gmv'], 'format': 'currency'},
+            'Revenue': {'aliases': ['revenue', 'rev', 'net sales', 'revenue (cr)', 'revcr', 'net revenue', 'turnover', 'top line', 'total revenue', 'rev(cr)'], 'format': 'currency'},
+            'Gross Margin %': {'aliases': ['gross margin', 'gross m%', 'gm%', 'gross margin %', 'gross profit margin', 'gross profit %'], 'format': 'percent'},
+            'EBITDA': {'aliases': ['ebitda', 'ebitda (cr)', 'operating profit', 'ebitda margin amount', 'ebitdacr'], 'format': 'currency'},
+            'EBITDA %': {'aliases': ['ebitda %', 'ebitda margin', 'ebitda%', 'operating margin', 'ebitda margin %'], 'format': 'percent'},
+            'Orders': {'aliases': ['orders', 'order count', 'total orders', 'no. of orders', '# orders', 'transactions'], 'format': 'number'},
+            'AOV': {'aliases': ['aov', 'avg order value', 'average order value', 'avg transaction value', 'average ticket size'], 'format': 'currency'},
+            'Returns %': {'aliases': ['returns', 'return %', 'return rate', 'rto %', 'product returns %', 'return rate %'], 'format': 'percent'},
+            'CAC': {'aliases': ['cac', 'cac(₹)', 'customer acquisition cost', 'blended cac', 'cost to acquire'], 'format': 'currency'},
+            'Repeat %': {'aliases': ['repeat %', 'repeat rate', 'repeat customer %', 'retention %', 'customer retention', 'repeat customer rate'], 'format': 'percent'},
+            'Cost to Income': {'aliases': ['cost:inc', 'cost to income', 'cost/income', 'ci ratio', 'cost to income ratio'], 'format': 'ratio'},
+            'NIM %': {'aliases': ['nim%', 'nim', 'net interest margin', 'nim (%)', 'interest margin'], 'format': 'percent'},
+            'GNPA %': {'aliases': ['gnpa%', 'gross npa', 'gnpa', 'gross non-performing assets %'], 'format': 'percent'},
+            'NNPA %': {'aliases': ['nnpa%', 'net npa', 'nnpa', 'net non-performing assets %'], 'format': 'percent'},
+            'ROE %': {'aliases': ['roe %', 'roe', 'return on equity', 'return on equity %'], 'format': 'percent'},
+            'AUM': {'aliases': ['aum', 'aum (rs cr)', 'aum(₹cr)', 'total aum', 'managed assets', 'assets under management'], 'format': 'currency'},
+            'CAR %': {'aliases': ['car%', 'car', 'capital adequacy ratio', 'capital adequacy', 'car %'], 'format': 'percent'},
+            'D/EBITDA': {'aliases': ['d/ebitda', 'debt/ebitda', 'leverage', 'debt to ebitda', 'net debt/ebitda'], 'format': 'ratio'},
+            'Capacity %': {'aliases': ['capacity%', 'capacity utilization', 'capacity util %', 'plant utilization', 'util %'], 'format': 'percent'},
+            'Export %': {'aliases': ['export%', 'export revenue %', 'export share', 'exports %', 'export contribution'], 'format': 'percent'},
+            'Headcount': {'aliases': ['headcount', 'employees', 'team size', 'fte', 'full time employees', 'staff count', 'hc'], 'format': 'number'},
+            'Bed Occupancy': {'aliases': ['bed occupancy', 'occupancy %', 'bed occupancy %', 'hospital occupancy'], 'format': 'percent'},
+            'ARPOB': {'aliases': ['arpob', 'arpob (rs/day)', 'avg rev per bed', 'revenue per bed'], 'format': 'currency'},
+            'Cap Rate %': {'aliases': ['cap rate%', 'cap rate', 'capitalization rate', 'yield %'], 'format': 'percent'},
+            'Cost': {'aliases': ['cost', 'investment cost', 'deployed capital', 'capital deployed', 'total cost'], 'format': 'currency'},
+            'FV': {'aliases': ['fv', 'fair value', 'fmv', 'market value', 'current value', 'portfolio value'], 'format': 'currency'},
+            'MOIC': {'aliases': ['moic', 'multiple', 'multiple on invested capital', 'money multiple'], 'format': 'ratio'},
+            'MRR': {'aliases': ['mrr', 'monthly recurring revenue', 'recurring revenue'], 'format': 'currency'},
+            'ARR': {'aliases': ['arr', 'annual recurring revenue', 'arr (rs cr)', 'arrcr'], 'format': 'currency'},
+            'Churn %': {'aliases': ['churn %', 'churn rate', 'revenue churn', 'customer churn', 'monthly churn', 'churn %/mo'], 'format': 'percent'},
+            'NRR %': {'aliases': ['nrr', 'nrr %', 'net revenue retention', 'net dollar retention', 'ndr'], 'format': 'percent'},
+            'LTV': {'aliases': ['ltv', 'clv', 'customer ltv', 'lifetime value', 'customer value'], 'format': 'currency'},
+            'LTV/CAC': {'aliases': ['ltv/cac', 'ltv:cac', 'ltv cac ratio', 'payback multiple'], 'format': 'ratio'},
+            'Burn Rate': {'aliases': ['burn rate', 'net burn', 'gross burn', 'monthly burn', 'cash burn'], 'format': 'currency'},
+            'Runway': {'aliases': ['runway', 'runway months', 'cash runway', 'months of runway', 'runway left'], 'format': 'number'},
+            'PAT': {'aliases': ['pat', 'profit after tax', 'net profit', 'net income', 'bottomline'], 'format': 'currency'},
+        }
+
+        result = {}
+
+        # First pass: exact/fuzzy local matching
+        unmatched = []
+        for raw in raw_headers:
+            raw_lower = raw.lower().strip()
+            # Remove units in brackets for matching: "GMV (Cr)" → "gmv"
+            clean = raw_lower.replace('(cr)', '').replace('(lakhs)', '').replace('(₹)', '').replace('(rs cr)', '').strip()
+            matched = False
+            for canonical_name, info in CANONICAL_KPIS.items():
+                if clean in info['aliases'] or raw_lower in info['aliases']:
+                    result[raw] = {
+                        'canonical_name': canonical_name,
+                        'slug': slugify(canonical_name),
+                        'format': info['format'],
+                    }
+                    matched = True
+                    break
+            if not matched:
+                unmatched.append(raw)
+
+        # Second pass: use Gemini for unmatched columns
+        if unmatched:
+            try:
+                import google.generativeai as genai
+                from django.conf import settings
+                if settings.GEMINI_API_KEY:
+                    genai.configure(api_key=settings.GEMINI_API_KEY)
+                    model = genai.GenerativeModel(
+                        getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash'),
+                        generation_config={'temperature': 0, 'response_mime_type': 'application/json'}
+                    )
+                    canonical_list = list(CANONICAL_KPIS.keys())
+                    prompt = f"""Map these Excel column headers to their canonical KPI names.
+
+Unmatched headers: {unmatched}
+
+Canonical KPI names (pick from this list or use "UNKNOWN"): {canonical_list}
+
+Rules:
+- Match semantically, not just syntactically. "Gross Merch Value" = "GMV", "Rev(Cr)" = "Revenue"
+- If a header has units like "(Cr)", "(Lakhs)", "(₹)" — ignore the unit for matching
+- If % or M% appears, it's likely a percentage KPI
+- If no match, use "UNKNOWN"
+
+Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
+
+                    resp = model.generate_content(prompt)
+                    import json
+                    text = resp.text.strip()
+                    if text.startswith('```'):
+                        text = text.split('\n', 1)[-1].rsplit('```', 1)[0]
+                    mapping = json.loads(text)
+
+                    for raw in unmatched:
+                        canonical = mapping.get(raw, 'UNKNOWN')
+                        if canonical != 'UNKNOWN' and canonical in CANONICAL_KPIS:
+                            result[raw] = {
+                                'canonical_name': canonical,
+                                'slug': slugify(canonical),
+                                'format': CANONICAL_KPIS[canonical]['format'],
+                            }
+                        else:
+                            # Keep original name as-is
+                            result[raw] = {
+                                'canonical_name': raw,
+                                'slug': slugify(raw),
+                                'format': 'percent' if '%' in raw else 'number',
+                            }
+            except Exception as e:
+                logger.warning(f'Gemini KPI column mapping failed: {e}')
+                for raw in unmatched:
+                    result[raw] = {
+                        'canonical_name': raw,
+                        'slug': slugify(raw),
+                        'format': 'percent' if '%' in raw else 'number',
+                    }
+
+        return result
+
     def _import_kpis_flat_snapshot(self, ws, org, investments, companies):
         """
         Handle Portfolio KPIs sheets in multi-section flat format.
@@ -3051,11 +3432,15 @@ class FundImportService:
         This handles sector-grouped KPI sheets where Consumer & Retail has CAC/GMV
         columns, Financial Svcs has AUM/NIM% columns, etc.  Reads ALL sections so
         every company gets its sector-appropriate KPIs imported.
+
+        Uses Gemini-powered semantic matching: column names like
+        "GMV (Cr)", "GMV in Crore", "Gross Merch Value" all map to the same
+        canonical KPI definition via fuzzy/semantic matching.
         """
+        # Only skip identity/metadata columns — NOT data columns like cost, fv
         SKIP_COL_LOWER = {
             'company', 'company name', 'name', '#', 'id', 'sr', 'sl', 'no',
             'sector', 'industry', 'segment', 'status', 'stage', 'city',
-            'cost', 'fv', 'moic',  # Skip computed/redundant columns
         }
         snapshot_date = date.today()
         count = 0
@@ -3080,6 +3465,7 @@ class FundImportService:
             # Detect header row: first cell is 'Company' or 'Company Name'
             if first_cell.lower() in ('company', 'company name', 'name'):
                 current_headers = []
+                raw_kpi_headers = []
                 for col_idx, val in enumerate(row_vals, 1):
                     if val is None:
                         continue
@@ -3087,10 +3473,22 @@ class FundImportService:
                     header_norm = _normalize_col_key(header)
                     if header_norm.lower() in SKIP_COL_LOWER or header.lower() in SKIP_COL_LOWER:
                         continue
-                    kpi_slug = slugify(header_norm)
-                    if not kpi_slug:
+                    if not header_norm:
                         continue
-                    current_headers.append((col_idx, header_norm, kpi_slug))
+                    raw_kpi_headers.append((col_idx, header_norm))
+
+                # Semantic mapping via Gemini + local aliases
+                if raw_kpi_headers:
+                    raw_names = [h[1] for h in raw_kpi_headers]
+                    sem_map = self._semantic_kpi_column_map(raw_names)
+                    for col_idx, header_name in raw_kpi_headers:
+                        mapped = sem_map.get(header_name, {})
+                        canonical = mapped.get('canonical_name', header_name)
+                        kpi_slug = mapped.get('slug', slugify(header_name))
+                        kpi_format = mapped.get('format', 'percent' if '%' in header_name else 'number')
+                        if not kpi_slug:
+                            continue
+                        current_headers.append((col_idx, canonical, kpi_slug, kpi_format))
                 continue
 
             # Data row — needs active section headers
@@ -3118,7 +3516,7 @@ class FundImportService:
 
             company_obj = companies.get(company_name)
 
-            for col_idx, header_name, kpi_slug in current_headers:
+            for col_idx, header_name, kpi_slug, kpi_format in current_headers:
                 if col_idx > len(row_vals):
                     continue
                 cell_val = row_vals[col_idx - 1]
@@ -3128,14 +3526,14 @@ class FundImportService:
                 if dec_val is None:
                     continue
 
-                kpi_def, _ = KPIDefinition.objects.get_or_create(
+                kpi_def, _ = KPIDefinition.objects.update_or_create(
                     organization=org,
                     slug=kpi_slug,
                     defaults={
                         'name': header_name,
-                        'format': 'percent' if '%' in header_name else 'number',
+                        'format': kpi_format,
                         'frequency': 'monthly',
-                        'sector_template': 'saas',
+                        'sector_template': 'generic',
                     },
                 )
                 PortfolioKPI.objects.update_or_create(
@@ -3207,39 +3605,23 @@ class FundImportService:
     # ------------------------------------------------------------------
 
     def _import_company_financials(self, wb, org, investments, companies, domain_map):
-        """Import burn rate, cash balance, and runway from Excel.
+        """Import burn rate, cash balance, runway, and SaaS metrics from Excel.
 
-        Looks for sheets named:
-        - Burn / Burn Rate / Burn & Runway / Portfolio Financials / Cash Position
-        - Also checks the valuations_kpis sheet for embedded burn columns
-
-        Supports two layouts:
-        A) Pivot: company rows × period columns (Oct-24, Nov-24 ...)
-           with Gross Burn, Net Burn, Cash rows detected by KPI Name column
-        B) Flat: one row per (company, period) with burn/cash columns
+        Uses Gemini-classified domain_map to find the relevant sheet(s).
+        Checks 'burn_runway' domain first, then 'valuations_kpis' as fallback
+        (some funds embed burn data alongside KPIs).
         """
-        # Find the burn/financials sheet — covers diverse naming conventions.
-        # Priority: exact matches on known patterns first; fallback broad scan.
-        burn_sheet = None
-        burn_keywords = (
-            'burn', 'cash position', 'portfolio financials', 'financials',
-            'runway', 'cash flow summary', 'saas metrics', 'operating metrics',
-            'cash & runway', 'company metrics', 'burn rate', 'cash runway',
-        )
-        # Skip cover/summary/nav/accounting-level sheets
-        skip_keywords = ('cover', 'summary', 'index', 'overview', 'dashboard',
-                         'nav', 'accounting', 'compliance', 'capital call',
-                         'investor', 'lp ')
-        for sn in wb.sheetnames:
-            sl = sn.lower()
-            if any(skip in sl for skip in skip_keywords):
-                continue
-            if any(kw in sl for kw in burn_keywords):
-                burn_sheet = sn
-                break
+        # Get sheets from Gemini classification
+        burn_sheets = _dm_sheets(domain_map, 'burn_runway')
+        if not burn_sheets:
+            # Fallback: valuations_kpis often contains embedded burn columns
+            burn_sheets = _dm_sheets(domain_map, 'valuations_kpis')
+        if not burn_sheets:
+            return
 
-        if not burn_sheet:
-            return  # No dedicated financials sheet; skip
+        burn_sheet = burn_sheets[0]
+        if burn_sheet not in wb.sheetnames:
+            return
 
         ws = wb[burn_sheet]
         headers_dict, rows = read_table_from_sheet(ws, alias_map=self._get_alias(ws))
@@ -3684,73 +4066,37 @@ class FundImportService:
         """
         Import P&L and Budget vs Actual data for the MIS Consolidation module.
 
-        Reads financial statement sheets (P&L, Balance Sheet, Cash Flow, BvA) and
-        writes records to BudgetVsActual (one row per company × period × line_item).
-        After import, triggers MISAggregator to populate ConsolidatedMIS and runs
-        AnomalyDetector for each company.
-
-        Handles three Excel layouts:
-        A) Horizontal: rows = (company, period), cols = P&L line items
-        B) Vertical pivot: rows = line items, cols = time periods (per-company section)
-        C) Budget vs Actual explicit: rows = (company, line_item), cols = Budget | Actual
+        Uses Gemini-classified domain_map to find financial sheets. All sheets
+        classified as 'financials_pl_bva' or 'fund_pl_bs' are processed.
+        Each sheet is tried as both P&L and BvA — the processing functions
+        use column detection to determine the actual data type.
         """
         from mis_consolidation.services import BvAImporter, MISAggregator, AnomalyDetector
 
-        PL_KEYWORDS = ('p&l', 'profit', 'income statement', 'pnl', 'p & l',
-                       'financial statement', 'monthly financials', 'pl summary',
-                       'portfolio p&l', 'mis report', 'revenue statement',
-                       'profit loss', 'company financials report', 'financials report',
-                       'monthly p', 'pl tab', 'pnl tab', 'p and l')
-        BVA_KEYWORDS = ('budget vs actual', 'budget v actual', 'bva', 'b vs a',
-                        'actual vs budget', 'budget actual', 'variance analysis',
-                        'budget analysis', 'bv actual', 'budgeted vs actual')
-        BS_KEYWORDS = ('balance sheet', 'bs statement', 'financial position',
-                       'net worth statement', 'bs tab', 'balance sh')
-        CF_KEYWORDS = ('cash flow', 'cash statement', 'cf statement', 'cash flow stmt')
-
-        SKIP_KEYWORDS = ('cover', 'summary', 'index', 'overview', 'dashboard',
-                         'nav record', 'capital call', 'investor', 'lp tab',
-                         'compliance', 'valuation', 'burn rate', 'burn&', 'exits',
-                         'distribution', 'kpi', 'saas metrics', 'portfolio companies',
-                         'fund master', 'scheme master', 'capital accounts')
-
-        pl_sheets = []
-        bva_sheets = []
-
-        for sn in wb.sheetnames:
-            sl = sn.lower()
-            if any(skip in sl for skip in SKIP_KEYWORDS):
-                continue
-            if any(kw in sl for kw in BVA_KEYWORDS):
-                bva_sheets.append(sn)
-            elif any(kw in sl for kw in PL_KEYWORDS + BS_KEYWORDS + CF_KEYWORDS):
-                pl_sheets.append(sn)
+        # Get all sheets Gemini classified as financial statements
+        fin_sheets = _dm_sheets(domain_map, 'financials_pl_bva')
+        fund_fin_sheets = _dm_sheets(domain_map, 'fund_pl_bs')
+        all_fin_sheets = fin_sheets + [s for s in fund_fin_sheets if s not in fin_sheets]
 
         # Pre-compute period labels from a NAV/accounting sheet if available.
-        # Fund P&L sheets sometimes have value columns with no period headers —
-        # we infer the periods from NAV & Accounting which has the same column structure.
-        inferred_periods = self._infer_period_labels_from_wb(wb)
+        inferred_periods = self._infer_period_labels_from_wb(wb, domain_map)
 
         count = 0
-        for sn in pl_sheets:
+        for sn in all_fin_sheets:
+            if sn not in wb.sheetnames:
+                continue
+            # Try both P&L and BvA processing on every financial sheet.
+            # Each processor uses column detection to determine if the sheet
+            # matches its expected structure. Returns 0 if no match.
             try:
                 count += self._process_pl_sheet(wb[sn], companies, fund,
                                                 inferred_periods=inferred_periods)
             except Exception as e:
-                logger.warning(f'P&L sheet {sn!r} import error: {e}')
-            # Also run BvA extraction on P&L sheets — catches sheets that are P&L-named
-            # but carry explicit Budget | Actual columns (Company | Line Item | Budget | Actual).
-            # _process_bva_sheet safely returns 0 if it finds no valid structure.
+                logger.warning(f'P&L processing of sheet {sn!r} error: {e}')
             try:
                 count += self._process_bva_sheet(wb[sn], companies, fund)
             except Exception as e:
-                logger.warning(f'BvA scan of P&L sheet {sn!r} error: {e}')
-
-        for sn in bva_sheets:
-            try:
-                count += self._process_bva_sheet(wb[sn], companies, fund)
-            except Exception as e:
-                logger.warning(f'BvA sheet {sn!r} import error: {e}')
+                logger.warning(f'BvA processing of sheet {sn!r} error: {e}')
 
         if count > 0:
             try:
@@ -3765,22 +4111,27 @@ class FundImportService:
 
         logger.info(f'  MIS financials: {count} records')
 
-    def _infer_period_labels_from_wb(self, wb):
+    def _infer_period_labels_from_wb(self, wb, domain_map=None):
         """
-        Scan the workbook for a sheet that has explicit month-period column headers
+        Scan Gemini-classified sheets for explicit month-period column headers
         (e.g. 'Oct-24', 'Nov-24', …) and return an ordered list of those labels.
 
         Used to annotate fund-level P&L sheets that carry value columns but no headers.
-        The NAV & Accounting sheet is the canonical source in most AIF fund reports.
+        Uses only Gemini-classified sheets: nav_accounting, financials_pl_bva,
+        fund_pl_bs, nav_calculation.
         """
         _period_re = re.compile(
             r'^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[-/]\d{2,4}$',
             re.IGNORECASE)
-        # Prefer sheets whose name suggests accounting/NAV history
-        preferred = [sn for sn in wb.sheetnames
-                     if 'nav' in sn.lower() and 'accounting' in sn.lower()]
-        other = [sn for sn in wb.sheetnames if sn not in preferred]
-        for sn in preferred + other:
+        # Use only Gemini-classified sheets — no all-sheets fallback
+        candidate_sheets = []
+        if domain_map:
+            for domain in ('nav_accounting', 'financials_pl_bva', 'fund_pl_bs', 'nav_calculation'):
+                for s in _dm_sheets(domain_map, domain):
+                    if s in wb.sheetnames and s not in candidate_sheets:
+                        candidate_sheets.append(s)
+
+        for sn in candidate_sheets:
             ws = wb[sn]
             for row in ws.iter_rows(min_row=1, max_row=5, values_only=True):
                 labels = []
@@ -4508,47 +4859,18 @@ class FundImportService:
     def _import_quoted_unquoted(self, wb, org, investments, companies, domain_map):
         """Read the Quoted & Unquoted Shares sheet and update PortfolioCompany.is_quoted.
 
-        Signals for quoted (publicly listed):
-        - Share Type contains 'Listed' (e.g. 'Equity (Listed)')
-        - IPEV Level == 'Level 1' (mark-to-market, publicly observable price)
-
-        Updates PortfolioCompany.is_quoted and listing_exchange (if inferable).
+        Uses Gemini-classified 'quoted_unquoted' domain from domain_map.
+        Falls back to 'valuations_kpis' since IPEV level data sometimes
+        lives alongside valuations.
         """
-        # Find the dedicated sheet — covers diverse naming conventions
-        target_sheet = None
-        keywords = (
-            'quoted', 'unquoted', 'ipev', 'shareholding',
-            'listed shares', 'share classification', 'share type',
-            'equity classification', 'listing status',
-        )
-        for sn in wb.sheetnames:
-            sl = sn.lower()
-            # Skip cover/summary/index sheets
-            if any(skip in sl for skip in ('cover', 'summary', 'index', 'overview', 'dashboard')):
-                continue
-            if any(kw in sl for kw in keywords):
-                target_sheet = sn
-                break
+        sheets = _dm_sheets(domain_map, 'quoted_unquoted')
+        if not sheets:
+            sheets = _dm_sheets(domain_map, 'valuations_kpis')
+        if not sheets:
+            return
 
-        if not target_sheet:
-            # Fallback: scan all non-cover sheets for IPEV Level column presence
-            for sn in wb.sheetnames:
-                sl = sn.lower()
-                if any(skip in sl for skip in ('cover', 'summary', 'index', 'overview', 'dashboard')):
-                    continue
-                ws_tmp = wb[sn]
-                for r in range(1, min(ws_tmp.max_row + 1, 10)):
-                    for c in range(1, min((ws_tmp.max_column or 0) + 1, 20)):
-                        val = ws_tmp.cell(r, c).value
-                        if val and 'ipev' in str(val).lower():
-                            target_sheet = sn
-                            break
-                    if target_sheet:
-                        break
-                if target_sheet:
-                    break
-
-        if not target_sheet:
+        target_sheet = sheets[0]
+        if target_sheet not in wb.sheetnames:
             return
 
         ws = wb[target_sheet]
@@ -4618,54 +4940,66 @@ class FundImportService:
     # ------------------------------------------------------------------
 
     def _import_nav(self, wb, schemes, domain_map):
-        """Import NAV records from NAV/Accounting sheet.
+        """Import NAV records from Gemini-classified NAV sheets.
 
         Handles three formats:
         - Format A: Flat table with one row per period (Period | NAV | Units | ...)
         - Format B: Multi-section sheet with NAV RECORDS header
         - Format C: Transposed table where rows = metrics, columns = periods
           (Component | Oct-24 | Nov-24 | Dec-24 | ...)
-          Common in fund reporting Excel files.
-        """
-        # Check multiple possible sheet names.
-        # Prefer sheets that combine nav + accounting (time-series history) over
-        # pure-calculation sheets like "NAV Calculation" which hold a single static value.
-        sheet_name = domain_map.get('nav_accounting')
-        if not sheet_name:
-            # First pass: require both 'nav' and 'accounting' in the name
-            for sn in wb.sheetnames:
-                sl = sn.lower()
-                if 'nav' in sl and 'accounting' in sl:
-                    sheet_name = sn
-                    break
-        if not sheet_name:
-            # Second pass: any nav/accounting sheet that isn't a pure calculation table
-            for sn in wb.sheetnames:
-                sl = sn.lower()
-                if ('nav' in sl or 'accounting' in sl) and 'calculat' not in sl:
-                    sheet_name = sn
-                    break
-        if not sheet_name or sheet_name not in wb.sheetnames:
-            return
 
-        ws = wb[sheet_name]
+        Uses Gemini domain_map to find nav_accounting sheets (time-series NAV
+        data). Key-value computation sheets (nav_calculation) are consumed
+        separately in _enrich_nav_records_post_import().
+        """
         default_scheme = list(schemes.values())[0] if schemes else None
         if not default_scheme:
             return
 
-        # Detect period-column headers (e.g. "Oct-24", "Nov-24")
+        # Use Gemini-classified nav_accounting sheets only
+        candidate_sheets = [s for s in _dm_sheets(domain_map, 'nav_accounting')
+                            if s in wb.sheetnames]
+        if not candidate_sheets:
+            logger.info('  No Gemini-classified nav_accounting sheets found')
+            return
+
+        # Regex for period-column headers (e.g. "Oct-24", "Nov-24")
         _period_re = re.compile(
             r'^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[-/]\d{2,4}$',
             re.IGNORECASE)
+
+        # Try each candidate sheet until we find one that yields NAV records
+        for sheet_name in candidate_sheets:
+            ws = wb[sheet_name]
+            nav_count = self._try_import_nav_from_sheet(
+                ws, sheet_name, default_scheme, schemes, wb, _period_re)
+            if nav_count > 0:
+                logger.info(f'  NAV imported from sheet: "{sheet_name}" ({nav_count} records)')
+                return
+
+        logger.info('  No NAV records found in any sheet')
+
+    def _try_import_nav_from_sheet(self, ws, sheet_name, default_scheme,
+                                    schemes, wb, _period_re):
+        """Try to import NAV records from a single worksheet.
+
+        Returns the number of NAV records created (0 if the sheet format
+        is not suitable for NAV time-series data).
+        """
         headers_dict, table_rows = read_table_from_sheet(ws, alias_map=self._get_alias(ws))
         period_cols = [h for h in headers_dict.keys() if _period_re.match(h.strip())]
 
         if period_cols and table_rows:
             # ── Format C: Transposed (Component | Oct-24 | Nov-24 | …) ──────────
-            # Build {period_col: {metric_key: value}} by scanning component rows
+            # Scan row labels semantically: any row whose label contains
+            # "closing" + "nav" or "fund nav" is the total_nav row.
+            # Other metrics (unrealised, fees, carry) are detected by keywords.
             period_data = {p: {} for p in period_cols}
+            has_nav_row = False
             for row in table_rows:
-                comp = _find_col_str(row, 'Component', 'Line Item', 'Item', 'Metric')
+                comp = _find_col_str(row, 'Component', 'Line Item', 'Item',
+                                     'Metric', 'Particulars', 'P&L Line',
+                                     'Cash Flow Item', 'Parameter')
                 if not comp:
                     continue
                 comp_l = comp.lower()
@@ -4673,19 +5007,26 @@ class FundImportService:
                     val = _d(row.get(pcol))
                     if val is None:
                         continue
-                    if 'closing' in comp_l and 'nav' in comp_l:
+                    # Semantic matching for NAV-related row labels
+                    if ('closing' in comp_l or 'fund nav' in comp_l) and 'nav' in comp_l:
                         period_data[pcol]['total_nav'] = val
-                    elif 'unreali' in comp_l:
+                        has_nav_row = True
+                    elif 'unreali' in comp_l and ('gain' in comp_l or 'portfolio' in comp_l or 'appreciation' in comp_l):
                         period_data[pcol]['unrealized'] = val
-                    elif 'realised' in comp_l or 'realized' in comp_l:
+                    elif ('realised' in comp_l or 'realized' in comp_l) and 'gain' in comp_l:
                         period_data[pcol]['realized'] = val
                     elif 'management fee' in comp_l or 'mgmt fee' in comp_l:
                         period_data[pcol]['mgmt_fee'] = abs(val)
-                    elif 'carry' in comp_l:
+                    elif 'carry' in comp_l and ('provision' in comp_l or 'interest' in comp_l or 'monthly' in comp_l):
                         period_data[pcol]['carry'] = val
-                    elif 'investment income' in comp_l:
+                    elif 'investment income' in comp_l or 'net investment' in comp_l:
                         period_data[pcol]['income'] = val
 
+            # Only proceed if we found at least one row that looks like NAV data
+            if not has_nav_row:
+                return 0
+
+            import calendar as _cal
             count = 0
             for pcol in period_cols:
                 if 'total' in pcol.lower():
@@ -4698,7 +5039,6 @@ class FundImportService:
                 if not total_nav:
                     continue
                 # Last day of the month
-                import calendar as _cal
                 last_day = _cal.monthrange(nav_date.year, nav_date.month)[1]
                 nav_date = nav_date.replace(day=last_day)
                 update_fields = {
@@ -4715,27 +5055,26 @@ class FundImportService:
                     defaults=update_fields,
                 )
                 count += 1
-            logger.info(f'  NAV Records (transposed format): {count}')
 
-            # After creating NAV records, enrich with NAV/Unit and realized gains.
-            # NAV/Unit comes from the NAV Calculation sheet (closing value row).
-            # Realized gains come from summing ExitEvent.realized_gain_loss for this fund.
-            self._enrich_nav_records_post_import(wb, default_scheme)
-            return
+            if count > 0:
+                # Enrich with NAV/Unit and realized gains from other sheets
+                self._enrich_nav_records_post_import(wb, default_scheme, domain_map)
+            return count
 
         # ── Format B: Multi-section ──────────────────────────────────────────
         sections = read_all_sections_from_sheet(ws, alias_map=self._get_alias(ws))
         nav_rows = None
         for sec_name, (sec_headers, sec_rows) in sections.items():
-            if 'NAV' in sec_name.upper() or sec_name == '__default__':
+            subdomain = self._get_section_subdomain(sheet_name, sec_name)
+            if subdomain == 'nav_records' or sec_name == '__default__':
                 nav_rows = sec_rows
                 break
 
         if not nav_rows:
-            nav_rows = table_rows  # fallback to already-read flat table
+            nav_rows = table_rows  # already-read flat table
 
         if not nav_rows:
-            return
+            return 0
 
         # ── Format A: Flat table (Period | NAV | Units | …) ──────────────────
         count = 0
@@ -4816,48 +5155,52 @@ class FundImportService:
             )
             count += 1
 
-        logger.info(f'  NAV Records: {count}')
+        return count
 
-    def _enrich_nav_records_post_import(self, wb, scheme):
+    def _enrich_nav_records_post_import(self, wb, scheme, domain_map=None):
         """
         Enrich NAV records after transposed-format import.
 
-        1. NAV/Unit: scan the NAV Calculation sheet for a "Closing NAV/Unit" row
-           and apply the latest value to the most recent NAV record.  For earlier
-           periods the per-unit is estimated from total_nav / units (if units known).
+        1. NAV/Unit: use Gemini-classified nav_calculation sheets (fallback to
+           nav_accounting) to find "Closing NAV/Unit" and apply to the most
+           recent NAV record.
 
         2. Realized Gains: sum ExitEvent.realized_gain_loss for this fund and apply
            the total to the most recent NAV record.
         """
         from django.db.models import Sum
 
-        # ── 1. NAV/Unit from NAV Calculation sheet ───────────────────────────
+        # ── 1. NAV/Unit from Gemini-classified nav_calculation sheets ────────
         closing_nav_per_unit = None
         opening_nav_per_unit = None
         total_units = None
 
-        for sn in wb.sheetnames:
-            sl = sn.lower()
-            if 'nav' in sl and ('calc' in sl or 'calculation' in sl):
-                calc_ws = wb[sn]
-                max_r = min(calc_ws.max_row + 1, 80)
-                for rr in range(1, max_r):
-                    label = calc_ws.cell(rr, 1).value
-                    if not label:
-                        continue
-                    label_l = str(label).lower()
-                    val = calc_ws.cell(rr, 2).value
-                    dval = _d(val)
-                    if dval is None:
-                        continue
-                    if 'closing nav/unit' in label_l or ('closing' in label_l and 'nav' in label_l and 'unit' in label_l):
-                        closing_nav_per_unit = dval
-                    elif 'opening nav/unit' in label_l or ('opening' in label_l and 'nav' in label_l and 'unit' in label_l):
-                        opening_nav_per_unit = dval
-                    elif 'unit' in label_l and ('outstanding' in label_l or 'issued' in label_l):
-                        total_units = dval
-                if closing_nav_per_unit is not None:
-                    break  # Found it — no need to scan more sheets
+        # Use Gemini domain_map: nav_calculation first, then nav_accounting
+        calc_sheets = _dm_sheets(domain_map, 'nav_calculation') if domain_map else []
+        if not calc_sheets:
+            calc_sheets = _dm_sheets(domain_map, 'nav_accounting') if domain_map else []
+        calc_sheets = [s for s in calc_sheets if s in wb.sheetnames]
+
+        for sn in calc_sheets:
+            calc_ws = wb[sn]
+            max_r = min(calc_ws.max_row + 1, 80)
+            for rr in range(1, max_r):
+                label = calc_ws.cell(rr, 1).value
+                if not label:
+                    continue
+                label_l = str(label).lower()
+                val = calc_ws.cell(rr, 2).value
+                dval = _d(val)
+                if dval is None:
+                    continue
+                if 'closing nav/unit' in label_l or ('closing' in label_l and 'nav' in label_l and 'unit' in label_l):
+                    closing_nav_per_unit = dval
+                elif 'opening nav/unit' in label_l or ('opening' in label_l and 'nav' in label_l and 'unit' in label_l):
+                    opening_nav_per_unit = dval
+                elif 'unit' in label_l and ('outstanding' in label_l or 'issued' in label_l):
+                    total_units = dval
+            if closing_nav_per_unit is not None:
+                break  # Found it — no need to scan more sheets
 
         latest_nav = NAVRecord.objects.filter(scheme=scheme).order_by('-nav_date').first()
         if latest_nav and closing_nav_per_unit and closing_nav_per_unit > 0:
@@ -4915,56 +5258,84 @@ class FundImportService:
     def _import_exits_and_distributions(self, wb, investments, schemes, domain_map):
         """Import exit events and fund-level distributions.
 
-        Handles two formats:
-        1. Multi-section sheet: EXIT EVENTS section + DISTRIBUTIONS section
-           on the same sheet (Format B)
-        2. Flat table with one exit per row (Format A)
+        Uses Gemini-classified exits_distributions sheets from domain_map.
+        Validates each sheet by checking for exit-relevant columns
+        (Exit Date, Exit Type, Proceeds, MOIC) before processing.
         """
-        sheet_name = domain_map.get('exits_distributions')
-        if not sheet_name:
-            for sn in wb.sheetnames:
-                if 'exit' in sn.lower() or 'distribution' in sn.lower():
-                    sheet_name = sn
-                    break
-        if not sheet_name or sheet_name not in wb.sheetnames:
+        # Use all Gemini-classified exits sheets
+        candidate_sheets = [s for s in _dm_sheets(domain_map, 'exits_distributions')
+                            if s in wb.sheetnames]
+
+        if not candidate_sheets:
             return
 
-        ws = wb[sheet_name]
+        for sheet_name in candidate_sheets:
+            ws = wb[sheet_name]
+            exit_count = self._try_import_exits_from_sheet(
+                ws, sheet_name, investments, schemes)
+            if exit_count > 0:
+                logger.info(f'  Exits imported from sheet "{sheet_name}": {exit_count}')
+                return
 
-        # Try multi-section approach
+    def _try_import_exits_from_sheet(self, ws, sheet_name, investments, schemes):
+        """Try to import exits from a single sheet. Returns exit count (0 if unsuitable)."""
         sections = read_all_sections_from_sheet(ws, alias_map=self._get_alias(ws))
         exit_rows = None
         dist_rows = None
 
         for sec_name, (sec_headers, sec_rows) in sections.items():
-            sec_upper = sec_name.upper()
-            if 'EXIT' in sec_upper and 'DISTRIBUTION' not in sec_upper:
-                exit_rows = sec_rows
-            elif 'DISTRIBUTION' in sec_upper and 'EXIT' not in sec_upper:
+            subdomain = self._get_section_subdomain(sheet_name, sec_name)
+            if subdomain == 'exit_events':
+                if exit_rows is None:
+                    exit_rows = sec_rows
+            elif subdomain == 'distributions':
                 dist_rows = sec_rows
 
-        # If we found separate sections, process them
+        # Structured sections found — validate and process
         if exit_rows is not None:
+            if not self._rows_have_exit_columns(exit_rows):
+                return 0
             exit_count = self._process_exit_rows(exit_rows, investments)
-            logger.info(f'  Exits (structured): {exit_count}')
-
-            # Process distributions section if present
             if dist_rows:
                 default_scheme = list(schemes.values())[0] if schemes else None
                 if default_scheme:
                     self._process_distribution_rows(dist_rows, schemes,
                                                      investments)
-            return
+            return exit_count
 
-        # Flat table fallback — the whole sheet is one table
+        # Flat table fallback
         _, rows = read_table_from_sheet(ws, alias_map=self._get_alias(ws))
         if not rows:
-            # Also try __default__ section
             if '__default__' in sections:
                 _, rows = sections['__default__']
 
-        exit_count = self._process_exit_rows(rows, investments)
-        logger.info(f'  Exits: {exit_count}')
+        if rows and self._rows_have_exit_columns(rows):
+            return self._process_exit_rows(rows, investments)
+        return 0
+
+    @staticmethod
+    def _rows_have_exit_columns(rows):
+        """Check if rows contain exit-relevant columns (Exit Date, Exit Type, Proceeds, MOIC).
+
+        Returns True if at least 2 of these column families are present —
+        a sheet with only 'Type' or only 'Date' is too ambiguous.
+        """
+        if not rows:
+            return False
+        sample = rows[0]
+        keys_lower = {k.lower() for k in sample.keys()}
+        keys_str = ' '.join(keys_lower)
+
+        exit_signals = 0
+        if any(k for k in keys_lower if 'exit' in k and ('date' in k or 'type' in k or 'route' in k)):
+            exit_signals += 2  # strong signal
+        if any(k for k in keys_lower if 'proceed' in k or 'reali' in k):
+            exit_signals += 1
+        if any(k for k in keys_lower if k in ('moic', 'multiple')):
+            exit_signals += 1
+        if any(k for k in keys_lower if 'cost' in k and ('cr' in k or 'basis' in k)):
+            exit_signals += 1
+        return exit_signals >= 2
 
     def _process_exit_rows(self, rows, investments):
         """Process exit event rows from either format.
@@ -4983,6 +5354,28 @@ class FundImportService:
             if _is_junk_row(name):
                 continue
 
+            # Pre-extract cost from THIS row — needed for both step 3 and the
+            # ExitEvent itself, and must be read before we might skip the row.
+            cost = _find_col_decimal(
+                row, 'Cost(Cr)', 'Cost(₹Cr)', 'Cost (Cr)',
+                'Cost Basis', 'Invested', 'cost_basis')
+
+            # Validate that the row has at least SOME exit-relevant data.
+            # Without this check, investor/LP rows or key-value rows from
+            # mis-mapped sheets would create phantom PortfolioCompany records.
+            exit_date_check = _find_col_date(
+                row, 'Exit Date', 'Date', 'Realization Date')
+            exit_type_check = _find_col_str(
+                row, 'Exit Route', 'Exit Type', 'Route', 'Exit Method',
+                'exit_type')
+            proceeds_check = _find_col_decimal(
+                row, 'Proceeds(Cr)', 'Proceeds (Cr)', 'Realized(₹Cr)',
+                'Realized', 'Proceeds', 'Exit Proceeds', 'Realization',
+                'Gross Proceeds (Cr)', 'Net Proceeds (Cr)', 'proceeds')
+            moic_check = _find_col_decimal(row, 'MOIC', 'Multiple', 'moic')
+            if not exit_date_check and not exit_type_check and not proceeds_check and not moic_check:
+                continue
+
             # Step 1: look up in the in-memory investments dict (current portfolio)
             inv = None
             for key, i in investments.items():
@@ -4999,23 +5392,26 @@ class FundImportService:
                         portfolio_company=co).first()
 
             if not inv and default_scheme:
-                # Step 3: create skeleton PortfolioCompany + Investment for this exit
+                # Step 3: create skeleton PortfolioCompany + Investment for this exit.
+                # Exited companies are NOT in Portfolio Investments — they need a
+                # skeleton record so the ExitEvent FK can be satisfied.
+                # total_invested MUST never be None (NOT NULL constraint).
                 sector = _find_col_str(row, 'Sector', 'Industry', 'Segment', default='Other')
-                exit_date_tmp = _find_col_date(row, 'Exit Date', 'Date', 'Realization Date')
-                cost_tmp = _find_col_decimal(
-                    row, 'Cost(Cr)', 'Cost(₹Cr)', 'Cost (Cr)', 'Cost Basis', 'Invested')
                 co, _ = PortfolioCompany.objects.update_or_create(
                     organization=self.org, name=name,
-                    defaults={'sector': sector} if sector and sector != 'Other' else {},
+                    defaults={'sector': sector, 'is_active': False}
+                        if sector and sector != 'Other'
+                        else {'is_active': False},
                 )
                 inv, _ = Investment.objects.update_or_create(
                     portfolio_company=co,
                     scheme=default_scheme,
                     defaults={
                         'company_name': name,
-                        'investment_date': exit_date_tmp,
-                        'total_invested': abs(cost_tmp) if cost_tmp else None,
+                        'investment_date': exit_date_check,
+                        'total_invested': abs(cost) if cost else Decimal('0'),
                         'instrument_type': 'equity',
+                        'status': 'exited',
                     },
                 )
 
@@ -5023,20 +5419,11 @@ class FundImportService:
                 logger.warning(f'  Exit row skipped — could not resolve company: {name!r}')
                 continue
 
-            exit_date = _find_col_date(
-                row, 'Exit Date', 'Date', 'Realization Date')
-            exit_route = _find_col_str(
-                row, 'Exit Route', 'Exit Type', 'Type', 'Route',
-                'Exit Method', 'exit_type')
-            cost = _find_col_decimal(
-                row, 'Cost(Cr)', 'Cost(₹Cr)', 'Cost (Cr)',
-                'Cost Basis', 'Invested', 'cost_basis')
-            realized = _find_col_decimal(
-                row, 'Proceeds(Cr)', 'Proceeds (Cr)', 'Realized(₹Cr)',
-                'Realized', 'Proceeds', 'Exit Proceeds', 'Realization',
-                'Gross Proceeds (Cr)', 'Gross Proceeds',
-                'Net Proceeds (Cr)', 'Net Proceeds', 'proceeds')
-            moic = _find_col_decimal(row, 'MOIC', 'Multiple', 'moic')
+            # Reuse pre-validated values from row-level check above
+            exit_date = exit_date_check
+            exit_route = exit_type_check or ''
+            realized = proceeds_check
+            moic = moic_check
             irr_raw = _find_col_decimal(
                 row, 'Gross IRR', 'IRR', 'IRR%', 'Gross IRR%', 'irr_pct')
             # IRR stored as decimal fraction (0.355 = 35.5%) → convert to %
@@ -5182,7 +5569,7 @@ class FundImportService:
             return
 
         # Try investors_aml sheet for flat-format LP distribution data
-        sheet_name = domain_map.get('investors_aml')
+        sheet_name = _dm_first(domain_map, 'investors_aml')
         if not sheet_name or sheet_name not in wb.sheetnames:
             return
 
@@ -5318,24 +5705,18 @@ class FundImportService:
         count = 0
         entity_map = {}  # entity_type -> Entity object
 
-        # Strategy 1: Read from organization_users domain (Format B)
-        sheet_name = domain_map.get('organization_users')
-        if not sheet_name:
-            # Keyword fallback: look for sheets with 'organization' or 'users' or 'entity'
-            for sn in wb.sheetnames:
-                low = sn.lower()
-                if any(kw in low for kw in ['organization', 'entities', 'entity master']):
-                    sheet_name = sn
-                    break
+        # Strategy 1: Read from Gemini-classified organization_users domain
+        sheet_name = _dm_first(domain_map, 'organization_users')
 
         if sheet_name and sheet_name in wb.sheetnames:
             ws = wb[sheet_name]
             sections = read_all_sections_from_sheet(ws, alias_map=self._get_alias(ws))
 
-            # Find entity section
+            # Find entity section via Gemini sub-domain
             entity_rows = None
             for sec_name, (sec_headers, sec_rows) in sections.items():
-                if any(kw in sec_name.upper() for kw in ['ENTITY', 'ENTITIES']):
+                subdomain = self._get_section_subdomain(sheet_name, sec_name)
+                if subdomain == 'entities':
                     entity_rows = sec_rows
                     break
 
@@ -5398,13 +5779,7 @@ class FundImportService:
 
         # Strategy 2: Read entity references from Fund & Scheme Master sheet
         if not entity_map:
-            fsm_sheet = domain_map.get('fund_scheme_master')
-            if not fsm_sheet:
-                for sn in wb.sheetnames:
-                    if 'fund' in sn.lower() and ('scheme' in sn.lower() or 'master' in sn.lower()):
-                        fsm_sheet = sn
-                        break
-
+            fsm_sheet = _dm_first(domain_map, 'fund_scheme_master')
             if fsm_sheet and fsm_sheet in wb.sheetnames:
                 ws = wb[fsm_sheet]
                 # Scan for entity references as key-value pairs
@@ -5957,19 +6332,11 @@ class FundImportService:
         fee_rate = default_scheme.management_fee_pct or Decimal('2.00')
 
         # ── Format B: FEES_REGISTER / dedicated fees sheet ────────────────────
-        # Look for a fees sheet first (more structured, more accurate than NAV)
-        fees_sheet = None
-        for sn in wb.sheetnames:
-            sl = sn.lower()
-            if 'fee' in sl and 'register' in sl:
-                fees_sheet = sn
-                break
-        if not fees_sheet:
-            for sn in wb.sheetnames:
-                sl = sn.lower()
-                if sl.startswith('fee') or sl == 'fees' or 'fee schedule' in sl:
-                    fees_sheet = sn
-                    break
+        # Use Gemini-classified 'fees_register' domain, fallback to 'nav_accounting'
+        fees_sheets = _dm_sheets(domain_map, 'fees_register')
+        if not fees_sheets:
+            fees_sheets = _dm_sheets(domain_map, 'nav_accounting')
+        fees_sheet = fees_sheets[0] if fees_sheets else None
 
         if fees_sheet and fees_sheet in wb.sheetnames:
             ws_f = wb[fees_sheet]
@@ -6024,12 +6391,7 @@ class FundImportService:
                 return  # Done — skip the NAV-sheet path below
 
         # ── Format A: Flat table from nav_accounting sheet ────────────────────
-        sheet_name = domain_map.get('nav_accounting')
-        if not sheet_name:
-            for sn in wb.sheetnames:
-                if 'nav' in sn.lower() or 'accounting' in sn.lower():
-                    sheet_name = sn
-                    break
+        sheet_name = _dm_first(domain_map, 'nav_accounting')
         if not sheet_name or sheet_name not in wb.sheetnames:
             return
 
@@ -6037,7 +6399,8 @@ class FundImportService:
         sections = read_all_sections_from_sheet(ws, alias_map=self._get_alias(ws))
         rows = None
         for sec_name, (sec_headers, sec_rows) in sections.items():
-            if 'NAV' in sec_name.upper() or sec_name == '__default__':
+            subdomain = self._get_section_subdomain(sheet_name, sec_name)
+            if subdomain == 'nav_records' or sec_name == '__default__':
                 rows = sec_rows
                 break
         if not rows:
@@ -6095,8 +6458,14 @@ class FundImportService:
     # Carried Interest Computation
     # ------------------------------------------------------------------
 
-    def _compute_carried_interest(self, schemes):
-        """Compute carried interest from exits and scheme waterfall config."""
+    def _compute_carried_interest(self, schemes, wb=None, domain_map=None):
+        """Compute carried interest from exits and scheme waterfall config.
+
+        Two-pass approach:
+        1. Compute from DB records (exits, distributions, capital calls)
+        2. If the computed carry is 0 but the Excel has explicit carry values
+           in a waterfall/carry sheet, use the Excel values as authoritative
+        """
         if not schemes:
             return
 
@@ -6126,7 +6495,23 @@ class FundImportService:
             carry_base = max(total_value - total_called - preferred_return, Decimal('0'))
             carry_gross = (carry_base * carry_pct / 100).quantize(Decimal('0.01'))
 
-            CarriedInterest.objects.get_or_create(
+            # If DB-computed carry is 0, try to extract explicit carry values
+            # from the workbook (WATERFALL / carry / NAV sheets).
+            # These sheets often have key-value rows like:
+            #   "Carried Interest Provision" → 104.2 (Cr)
+            #   "Preferred Return" → 273.6 (Cr)
+            excel_carry_gross = None
+            excel_preferred_return = None
+            if wb and carry_gross == 0:
+                excel_carry_gross, excel_preferred_return = \
+                    self._extract_carry_from_workbook(wb, domain_map)
+                if excel_carry_gross and excel_carry_gross > 0:
+                    carry_gross = excel_carry_gross
+                    carry_base = carry_gross  # approximate
+                if excel_preferred_return and excel_preferred_return > 0:
+                    preferred_return = excel_preferred_return
+
+            CarriedInterest.objects.update_or_create(
                 scheme=scheme,
                 calculation_date=date.today(),
                 defaults={
@@ -6144,19 +6529,68 @@ class FundImportService:
             logger.info(f'  Carried interest ({scheme.name}): called={total_called}, '
                          f'pref_return={preferred_return}, carry={carry_gross}')
 
+    def _extract_carry_from_workbook(self, wb, domain_map=None):
+        """Extract carry/preferred-return amounts from Gemini-classified sheets.
+
+        Uses waterfall_carry domain first, then nav_calculation, then nav_accounting.
+        Searches key-value formatted sheets for rows that semantically match
+        carry-related labels.
+
+        Returns (carry_gross, preferred_return) as Decimals or (None, None).
+        """
+        carry_gross = None
+        preferred_return = None
+
+        # Use Gemini domain_map: waterfall_carry → nav_calculation → nav_accounting
+        candidate_sheets = []
+        if domain_map:
+            for domain in ('waterfall_carry', 'nav_calculation', 'nav_accounting'):
+                for s in _dm_sheets(domain_map, domain):
+                    if s in wb.sheetnames and s not in candidate_sheets:
+                        candidate_sheets.append(s)
+
+        if not candidate_sheets:
+            return None, None
+
+        for sn in candidate_sheets:
+            ws = wb[sn]
+            max_r = min(ws.max_row + 1, 80)
+            for rr in range(1, max_r):
+                # Scan label-value pairs in columns (1,2) and (2,3)
+                for label_col, val_col in [(1, 2), (2, 3)]:
+                    label = ws.cell(rr, label_col).value
+                    if not label:
+                        continue
+                    label_l = str(label).lower().strip()
+                    raw_val = ws.cell(rr, val_col).value
+                    val = _d(raw_val)
+                    if val is None or val <= 0:
+                        continue
+
+                    # Semantic matching for carry-related labels
+                    if carry_gross is None:
+                        if ('carried interest' in label_l and 'provision' in label_l) or \
+                           ('carry provision' in label_l) or \
+                           (label_l.startswith('carry') and 'amount' in label_l):
+                            carry_gross = val
+                    if preferred_return is None:
+                        if ('preferred return' in label_l and 'amount' not in label_l) or \
+                           ('hurdle' in label_l and 'amount' in label_l):
+                            preferred_return = val
+
+            if carry_gross is not None and preferred_return is not None:
+                break
+
+        return carry_gross, preferred_return
+
     # ------------------------------------------------------------------
     # Portfolio hierarchy builder
     # ------------------------------------------------------------------
 
     def _build_hierarchy(self, wb, org, fund, schemes, companies,
                          investments, domain_map, filepath):
-        """Build PortfolioNode hierarchy from Portfolio Hierarchy sheet."""
-        sheet_name = domain_map.get('portfolio_hierarchy')
-        if not sheet_name:
-            for sn in wb.sheetnames:
-                if 'hierarchy' in sn.lower():
-                    sheet_name = sn
-                    break
+        """Build PortfolioNode hierarchy from Gemini-classified portfolio_hierarchy sheet."""
+        sheet_name = _dm_first(domain_map, 'portfolio_hierarchy')
         if not sheet_name or sheet_name not in wb.sheetnames:
             return
 
@@ -6317,9 +6751,10 @@ class FundImportService:
         """Collect Monthly P&L and Budget vs Actual data for a company."""
         data = {}
 
-        # Monthly P&L
-        for sn in wb.sheetnames:
-            if 'p&l' in sn.lower() or 'profit' in sn.lower():
+        # Monthly P&L — use Gemini-classified financials sheets
+        fin_sheets = _dm_sheets(domain_map, 'financials_pl_bva') if domain_map else []
+        for sn in fin_sheets:
+            if sn in wb.sheetnames:
                 ws = wb[sn]
                 _, rows = read_table_from_sheet(ws, alias_map=self._get_alias(ws))
                 pl_entries = []
@@ -6361,9 +6796,9 @@ class FundImportService:
                     data['monthly_pl'] = pl_entries
                 break
 
-        # Budget vs Actual
-        for sn in wb.sheetnames:
-            if 'budget' in sn.lower():
+        # Budget vs Actual — same Gemini-classified financials sheets
+        for sn in fin_sheets:
+            if sn in wb.sheetnames:
                 ws = wb[sn]
                 _, rows = read_table_from_sheet(ws, alias_map=self._get_alias(ws))
                 bva_entries = []

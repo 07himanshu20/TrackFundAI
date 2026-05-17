@@ -2,6 +2,7 @@
 views.py
 All REST API endpoints for the Analisa Resources MBR dashboard.
 """
+import io
 import os
 import logging
 
@@ -771,11 +772,160 @@ Return JSON:
             'risk_flags': [],
         }
 
+    # Generate watermarked PDF from the report content
+    pdf_url = None
+    report_id = None
+    try:
+        pdf_bytes = _generate_report_pdf(report_content, title, fund_id, org)
+        if pdf_bytes:
+            from reporting.models import GeneratedReport
+            from django.core.files.base import ContentFile
+            report_obj = GeneratedReport.objects.create(
+                organization=org,
+                report_type=report_type,
+                report_format='pdf',
+                file_size=len(pdf_bytes),
+                generated_by=request.user,
+            )
+            fname = f'{title.replace(" ", "_")}_{datetime.date.today()}.pdf'
+            report_obj.file.save(fname, ContentFile(pdf_bytes), save=True)
+            pdf_url = report_obj.file.url
+            report_id = str(report_obj.id)
+    except Exception as e:
+        logger.warning('PDF generation for %s failed: %s', report_type, e)
+
     return Response({
         'report_type': report_type,
         'generated_at': datetime.datetime.now().isoformat(),
+        'pdf_url': pdf_url,
+        'report_id': report_id,
         **report_content,
     })
+
+
+def _generate_report_pdf(report_content, title, fund_id, org):
+    """Generate a watermarked PDF from Gemini-generated JSON report content."""
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import cm
+        from reportlab.lib import colors
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+        from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
+        from reporting.report_generator import _draw_watermark, _page_footer
+    except ImportError:
+        return None
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=2.2 * cm, bottomMargin=2.2 * cm,
+                            leftMargin=2 * cm, rightMargin=2 * cm)
+
+    styles = getSampleStyleSheet()
+    DARK_BLUE = colors.HexColor('#003366')
+    MID_BLUE = colors.HexColor('#0066CC')
+    LIGHT_BG = colors.HexColor('#F5F8FF')
+    GREY = colors.HexColor('#4B5563')
+
+    title_style = ParagraphStyle('title', parent=styles['Heading1'],
+                                  fontSize=20, textColor=DARK_BLUE, spaceAfter=6,
+                                  alignment=TA_CENTER)
+    section_style = ParagraphStyle('section', parent=styles['Heading2'],
+                                    fontSize=13, textColor=DARK_BLUE,
+                                    spaceBefore=14, spaceAfter=6)
+    body_style = ParagraphStyle('body', parent=styles['Normal'],
+                                 fontSize=9, leading=13, alignment=TA_JUSTIFY)
+    small_style = ParagraphStyle('small', parent=styles['Normal'],
+                                  fontSize=8, textColor=GREY)
+
+    story = []
+
+    # Title
+    story.append(Spacer(1, 1.5 * cm))
+    story.append(Paragraph(title, title_style))
+
+    period = report_content.get('period', '')
+    if period:
+        story.append(Paragraph(period, ParagraphStyle(
+            'period', parent=styles['Normal'], fontSize=11,
+            textColor=MID_BLUE, alignment=TA_CENTER)))
+    story.append(Spacer(1, 0.3 * cm))
+    story.append(HRFlowable(width='80%', thickness=1, color=DARK_BLUE, hAlign='CENTER'))
+    story.append(Spacer(1, 0.5 * cm))
+
+    # Summary
+    summary = report_content.get('summary', '')
+    if summary:
+        story.append(Paragraph('Executive Summary', section_style))
+        story.append(Paragraph(summary, body_style))
+        story.append(Spacer(1, 0.3 * cm))
+
+    # Risk flags
+    risk_flags = report_content.get('risk_flags', [])
+    if risk_flags:
+        story.append(Paragraph('Risk Flags', section_style))
+        for flag in risk_flags:
+            story.append(Paragraph(f'  {flag}', ParagraphStyle(
+                'flag', parent=body_style, textColor=colors.HexColor('#DC2626'))))
+        story.append(Spacer(1, 0.3 * cm))
+
+    # Sections
+    for sec in report_content.get('sections', []):
+        heading = sec.get('heading', 'Section')
+        story.append(Paragraph(heading, section_style))
+        rows_data = sec.get('rows', [])
+        if rows_data:
+            table_data = [['Metric', 'Value', 'Note']]
+            for row in rows_data:
+                table_data.append([
+                    row.get('label', ''),
+                    row.get('value', ''),
+                    row.get('note', ''),
+                ])
+            t = Table(table_data, colWidths=[5.5 * cm, 5.5 * cm, 5.5 * cm])
+            t.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), DARK_BLUE),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 8),
+                ('GRID', (0, 0), (-1, -1), 0.4, colors.HexColor('#D1D5DB')),
+                ('PADDING', (0, 0), (-1, -1), 5),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, LIGHT_BG]),
+            ]))
+            story.append(t)
+        story.append(Spacer(1, 0.3 * cm))
+
+    # Highlights
+    highlights = report_content.get('highlights', [])
+    if highlights:
+        story.append(Paragraph('Key Highlights', section_style))
+        for h in highlights:
+            story.append(Paragraph(f'  {h}', body_style))
+        story.append(Spacer(1, 0.3 * cm))
+
+    # Disclaimer
+    story.append(Spacer(1, 1 * cm))
+    story.append(HRFlowable(width='100%', thickness=0.5, color=colors.grey))
+    story.append(Spacer(1, 0.2 * cm))
+    story.append(Paragraph(
+        'This report is generated by TrackFundAI and is classified as CONFIDENTIAL. '
+        'All values are indicative and subject to final audit. '
+        'For authorised recipients only.',
+        small_style
+    ))
+
+    fund_name = ''
+    if fund_id:
+        from funds.models import Fund
+        try:
+            fund_name = Fund.objects.get(pk=fund_id).name
+        except Exception:
+            pass
+
+    def _on_page(canvas, doc):
+        _page_footer(canvas, doc, fund_name=fund_name, report_type=title)
+
+    doc.build(story, onFirstPage=_on_page, onLaterPages=_on_page)
+    return buf.getvalue()
 
 
 def _collect_report_data(org, fund_id, report_type):
@@ -877,3 +1027,97 @@ def _collect_report_data(org, fund_id, report_type):
         logger.error('Report data collection error: %s', e)
 
     return data
+
+
+# ---------------------------------------------------------------------------
+# Comprehensive MIS Report (PDF + on-screen)
+# ---------------------------------------------------------------------------
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def generate_comprehensive_mis_report(request):
+    """
+    POST /api/generate-comprehensive-mis/
+    Body: { "fund_id": "<uuid>" }
+    Returns: JSON with on-screen report data + PDF download URL.
+    """
+    from funds.models import Fund
+    from reporting.comprehensive_mis_report import generate_comprehensive_mis
+    from reporting.models import GeneratedReport
+    from django.core.files.base import ContentFile
+    import datetime
+
+    org = getattr(request, 'organization', None)
+    if not org and request.user and request.user.is_authenticated:
+        from accounts.models import Organization
+        org = Organization.objects.filter(users=request.user).first()
+    if not org:
+        return Response({'detail': 'No organization.'}, status=403)
+
+    fund_id = request.data.get('fund_id')
+    if not fund_id:
+        return Response({'detail': 'fund_id required.'}, status=400)
+
+    try:
+        fund = Fund.objects.get(pk=fund_id, organization=org)
+    except Fund.DoesNotExist:
+        return Response({'detail': 'Fund not found.'}, status=404)
+
+    pdf_bytes, report_data = generate_comprehensive_mis(fund, user=request.user)
+
+    if not pdf_bytes:
+        return Response({
+            'detail': 'Report generation failed. Check server logs.',
+            **report_data,
+        }, status=500)
+
+    # Save PDF to storage
+    report = GeneratedReport.objects.create(
+        organization=org,
+        report_type='comprehensive_mis',
+        report_format='pdf',
+        file_size=len(pdf_bytes),
+        generated_by=request.user,
+    )
+    filename = f'Comprehensive_MIS_{fund.name}_{datetime.date.today()}.pdf'
+    report.file.save(filename, ContentFile(pdf_bytes), save=True)
+
+    return Response({
+        'report_type': 'comprehensive_mis',
+        'title': f'Comprehensive MIS Report — {fund.name}',
+        'generated_at': report_data.get('generated_at', datetime.datetime.now().isoformat()),
+        'total_pages': report_data.get('total_pages', 0),
+        'sections': report_data.get('sections', []),
+        'pdf_url': report.file.url if report.file else None,
+        'report_id': str(report.id),
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def download_report(request, report_id):
+    """
+    GET /api/download-report/<uuid>/
+    Serve a generated report PDF for download.
+    """
+    from reporting.models import GeneratedReport
+    from django.http import FileResponse
+
+    org = getattr(request, 'organization', None)
+    if not org and request.user and request.user.is_authenticated:
+        from accounts.models import Organization
+        org = Organization.objects.filter(users=request.user).first()
+
+    try:
+        report = GeneratedReport.objects.get(pk=report_id, organization=org)
+    except GeneratedReport.DoesNotExist:
+        return Response({'detail': 'Report not found.'}, status=404)
+
+    if not report.file:
+        return Response({'detail': 'Report file not available.'}, status=404)
+
+    return FileResponse(
+        report.file.open('rb'),
+        content_type='application/pdf',
+        as_attachment=True,
+        filename=report.file.name.split('/')[-1],
+    )

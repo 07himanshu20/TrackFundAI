@@ -17,6 +17,8 @@ urlpatterns = [
     path("ai-insights/",     views.ai_insights,         name="ai_insights"),
     path("ai-predictions/",  views.ai_predictions,      name="ai_predictions"),
     path("generate-report/", views.generate_mis_report, name="generate_mis_report"),
+    path("generate-comprehensive-mis/", views.generate_comprehensive_mis_report, name="generate_comprehensive_mis"),
+    path("download-report/<uuid:report_id>/", views.download_report, name="download_report"),
 
     # --- New hierarchical portfolio endpoints ---
     path("portfolio/",                              portfolio_views.portfolio_root,      name="portfolio_root"),

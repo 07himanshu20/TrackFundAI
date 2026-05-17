@@ -364,6 +364,22 @@ def _import_event_generator(job, user):
         'errors': all_errors,
     })
 
+    # Post-import: invalidate Redis cache for all affected funds
+    try:
+        from config.cache_utils import invalidate_fund_cache
+        invalidated_funds = set()
+        for pf in pending_files:
+            if pf.status == 'completed' and pf.fund_id:
+                fund_id_str = str(pf.fund_id)
+                if fund_id_str not in invalidated_funds:
+                    invalidate_fund_cache(user.organization.id, pf.fund_id)
+                    invalidated_funds.add(fund_id_str)
+        if not invalidated_funds:
+            # No specific fund — clear entire org cache
+            invalidate_fund_cache(user.organization.id)
+    except Exception as e:
+        logger.warning(f'Post-import cache invalidation error: {e}')
+
     # Post-import: trigger async NAV/Carry/Fee/RiskScore recomputation
     try:
         from dataimport.tasks import post_import_recalculate
@@ -673,6 +689,13 @@ def delete_imported_file(request, file_id):
             organization=org,
             files__isnull=True,
         ).delete()
+
+    # Invalidate Redis cache for the deleted fund's org
+    try:
+        from config.cache_utils import invalidate_org_cache
+        invalidate_org_cache(org.id)
+    except Exception as e:
+        logger.warning(f'Post-delete cache invalidation error: {e}')
 
     # Reload portfolio cache for this org
     try:

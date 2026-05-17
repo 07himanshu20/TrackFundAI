@@ -13,16 +13,160 @@ Fields include a description to help Gemini understand the semantic meaning.
 SHEET_DOMAINS = {
     'organization_users': 'Organization master data, key entities (manager, trustee, custodian), and GP user accounts',
     'fund_scheme_master': 'Fund master record (name, SEBI registration, category, structure) and scheme details (vintage, close dates, fees, carry)',
-    'investors_aml': 'LP/investor records with KYC status, AML due diligence, bank accounts, and SEBI compliance flags',
+    'investors_aml': (
+        'LP (Limited Partner) / Investor master records — names, types, KYC status, AML due diligence, '
+        'bank accounts, SEBI compliance flags, commitment amounts, drawdown amounts, and distribution amounts '
+        'PAID TO the investors. CRITICAL: A "Distributions" column here means money RETURNED TO the LP — '
+        'it does NOT make this sheet an exits_distributions sheet. The entities on this sheet are INVESTORS '
+        '(sovereign wealth funds, pension funds, DFIs, family offices, insurance companies, corporates) who '
+        'have committed capital to the fund. They are NOT portfolio companies and NOT exit targets.'
+    ),
     'commitments': 'LP commitments to schemes — amounts, close types, dates',
     'capital_calls': 'Capital call events and per-LP line items with payment tracking',
-    'portfolio_investments': 'Portfolio companies, investments (instrument type, ownership), tranches, and board meetings',
+    'portfolio_investments': (
+        'Portfolio companies (investee companies) and their investments — instrument type, ownership %, '
+        'cost/invested amount, fair value, stage, sector. These are companies the fund HAS INVESTED IN. '
+        'CRITICAL: "TEMPORARY INVESTMENTS" sub-sections (liquid mutual funds, overnight funds, money market '
+        'instruments) are NOT portfolio companies — they are treasury/cash management instruments.'
+    ),
     'valuations_kpis': 'Investment valuations (DCF, comparables) and portfolio company KPIs (MRR, burn rate, etc.)',
     'nav_accounting': 'NAV records, chart of accounts, double-entry ledger, carried interest, management fees',
-    'exits_distributions': 'Exit events (IPO, M&A, secondary) and LP distribution payouts with TDS',
+    'exits_distributions': (
+        'Exit events FROM portfolio companies (IPO, M&A, secondary sale, buyback, write-off) and fund-level '
+        'distribution schedules to LPs. CRITICAL: The "Company" column here contains names of portfolio '
+        'companies the fund has EXITED FROM — these are investee companies, NOT investors/LPs. '
+        'This sheet must have exit-specific columns like Exit Date, Exit Type/Route, Proceeds, MOIC. '
+        'A sheet that lists LP/investor names with a "Distributions" column is investors_aml, NOT this domain.'
+    ),
     'compliance': 'SEBI reports (QAR/AAR), compliance calendar, compliance test reports, SEBI circulars, PPM amendments',
     'portfolio_hierarchy': 'Portfolio hierarchy tree: fund > sector > segment > company nodes with cross-fund mapping',
     'financials_pl_bva': 'Company-level P&L (Revenue, COGS, EBITDA, PAT), Balance Sheet, Cash Flow, and Budget vs Actual — monthly or period-based financial statements for portfolio companies',
+    'quoted_unquoted': 'Quoted & Unquoted share classification, IPEV levels, share type (listed vs unlisted), listing exchange details for portfolio companies',
+    'fees_register': 'Management fee schedule, fee register — periodic fee calculations (quarterly/annual), fee basis amounts, GST on fees',
+    'burn_runway': 'Company-level burn rate, cash balance, runway months, SaaS metrics (MRR, ARR, churn, NRR, CAC, LTV) — operational KPIs for portfolio companies',
+    'fund_pl_bs': 'Fund-level P&L and Balance Sheet — consolidated financial statements for the fund entity itself (not individual portfolio companies)',
+    'lp_capital_accounts': 'LP Capital Account statements — per-investor capital account balances, contributions, distributions, carried interest allocations',
+    'nav_calculation': (
+        'NAV Calculation / NAV Computation sheet — step-by-step NAV build-up showing '
+        'Opening NAV, investments at cost, fair value adjustment, unrealised gains, '
+        'realised gains, management fees, operating expenses, Closing NAV, total units '
+        'outstanding, Closing NAV per Unit. This is a KEY-VALUE or line-item sheet with '
+        'labels in column A and values in column B (not a time-series table). '
+        'CRITICAL: This is DIFFERENT from nav_accounting — nav_accounting stores '
+        'period-wise NAV time-series (one row per month/quarter). nav_calculation is '
+        'the single-period computational worksheet that derives the NAV figure.'
+    ),
+    'waterfall_carry': (
+        'Carried Interest Waterfall / Distribution Waterfall — shows the GP/LP economics: '
+        'total capital called, preferred return / hurdle amount, catch-up, carried interest '
+        'provision, GP carry amount, LP share, distribution splits. May also contain '
+        'performance fee calculations, clawback provisions, and waterfall tiers. '
+        'Sheet names often include "Waterfall", "Carry", "Carried Interest", "Performance Fee", '
+        '"GP Economics", "Distribution Waterfall". CRITICAL: This is DIFFERENT from '
+        'exits_distributions (which tracks individual company exit events) and from '
+        'nav_accounting (which tracks periodic NAV values).'
+    ),
+}
+
+# ---------------------------------------------------------------------------
+# Section sub-domain classification — types of data sections within sheets
+# ---------------------------------------------------------------------------
+
+SECTION_SUBDOMAINS = {
+    'portfolio_companies': (
+        'Company master / identity data — portfolio company name, sector, sub-sector, '
+        'stage, city, country, website, founder names, CIN, PAN, incorporation date. '
+        'These rows describe the IDENTITY of companies the fund has invested in. '
+        'They do NOT contain financial investment data (cost, fair value, ownership %). '
+        'Example section headers (ANY language/format): PORTFOLIO COMPANIES, '
+        'INVESTEE COMPANIES, COMPANIES, COMPANY MASTER, COMPANY DETAILS, '
+        'PORTFOLIO COMPANY LIST, FUND HOLDINGS, COMPANY REGISTER'
+    ),
+    'investments': (
+        'Investment financial data — instrument type (equity, CCD, CCPS, SAFE), '
+        'cost/invested amount, fair value, ownership %, IRR, MOIC, investment date, '
+        'investment status. These rows describe the FINANCIAL POSITION of investments, '
+        'not company identity. When company identity + investment data appear in the SAME '
+        'rows (combined format), classify as investments. '
+        'Example headers: INVESTMENTS, INVESTMENT DETAILS, INVESTMENT REGISTER, '
+        'PORTFOLIO INVESTMENTS, DEPLOYED CAPITAL, FUND DEPLOYMENT, INVESTMENT BOOK'
+    ),
+    'investment_tranches': (
+        'Tranche / round / drawdown details — tranche number, tranche amount, tranche date, '
+        'shares acquired, price per share, pre-money valuation, post-money valuation, '
+        'round name (Series A, B, etc.). One row per tranche/round per company. '
+        'Example headers: INVESTMENT TRANCHES, TRANCHES, FUNDING ROUNDS, '
+        'DRAWDOWN TRANCHES, ROUND DETAILS, TRANCHE REGISTER, DEAL HISTORY'
+    ),
+    'temporary_investments': (
+        'Liquid mutual funds, overnight funds, money market instruments, CBLO, '
+        'treasury bills, fixed deposits, commercial paper used for cash management. '
+        'These are NOT portfolio company investments — they are treasury instruments. '
+        'CRITICAL: These rows must be SKIPPED by portfolio import logic. '
+        'Example headers: TEMPORARY INVESTMENTS, TREASURY INVESTMENTS, '
+        'LIQUID INVESTMENTS, CASH INSTRUMENTS, MONEY MARKET, SHORT TERM INVESTMENTS, '
+        'LIQUID FUND HOLDINGS, OVERNIGHT FUNDS'
+    ),
+    'capital_call_headers': (
+        'Capital call event records — call number, call date, call percentage of commitment, '
+        'total call amount, payment due date, purpose (investment, fees, expenses), status. '
+        'One row per capital call event. '
+        'Example headers: CAPITAL CALLS, DRAWDOWNS, CALL SCHEDULE, '
+        'CAPITAL CALL REGISTER, DRAW DOWN SCHEDULE, CAPITAL DRAWDOWNS, CALL NOTICES'
+    ),
+    'capital_call_line_items': (
+        'Per-LP capital call amounts — investor/LP name, called amount for this LP, '
+        'payment status (paid/pending), amount received, cumulative called %, UTR number. '
+        'One row per LP per call. '
+        'Example headers: CAPITAL CALL LINE ITEMS, CALL LINE ITEMS, LP DRAWDOWNS, '
+        'INVESTOR DRAWDOWNS, LP-WISE CAPITAL CALLS, INVESTOR CALL DETAILS'
+    ),
+    'exit_events': (
+        'Exit events from portfolio companies — company name, exit type '
+        '(IPO, M&A, secondary sale, buyback, write-off), exit date, exit valuation, '
+        'proceeds, cost basis, realized gain/loss, MOIC, IRR. '
+        'Example headers: EXIT EVENTS, EXITS, REALIZATIONS, REALIZED INVESTMENTS, '
+        'PORTFOLIO EXITS, EXIT REGISTER, DIVESTMENTS, REALISATIONS'
+    ),
+    'distributions': (
+        'Fund-level distributions to LPs — distribution number, date, type '
+        '(return of capital, STCG, LTCG, dividend, carry), total gross amount, '
+        'TDS, net amount. One row per distribution event. '
+        'Example headers: DISTRIBUTIONS, DISTRIBUTION SCHEDULE, LP DISTRIBUTIONS, '
+        'DISTRIBUTION REGISTER, PAYOUT SCHEDULE, PAYOUTS, DISTRIBUTION EVENTS'
+    ),
+    'nav_records': (
+        'NAV time-series data — NAV date, total NAV, NAV per unit, units outstanding, '
+        'investments at fair value, cash and equivalents. One row per period. '
+        'Example headers: NAV RECORDS, NAV HISTORY, NAV TIME SERIES, '
+        'NET ASSET VALUE, MONTHLY NAV, PERIODIC NAV, NAV & FUND ACCOUNTING'
+    ),
+    'schemes': (
+        'Scheme details within a fund — scheme name, vintage year, first/final close dates, '
+        'scheme size, hurdle rate %, carry %, carry type, tenure, management fee %, fee basis. '
+        'Example headers: SCHEMES, SCHEME DETAILS, FUND SCHEMES, SCHEME MASTER, '
+        'SCHEME INFORMATION, SUB-FUND DETAILS'
+    ),
+    'fund_master': (
+        'Fund identity and metadata — fund name, SEBI registration number, SEBI category code, '
+        'structure (trust/company/LLP), PAN, GSTIN, inception date, corpus target, base currency. '
+        'Example headers: FUND MASTER DATA, FUND DETAILS, FUND INFORMATION, '
+        'FUND MASTER, FUND OVERVIEW, FUND PROFILE'
+    ),
+    'entities': (
+        'Key entities associated with the fund — entity type (manager, trustee, custodian, '
+        'statutory auditor, legal counsel, sponsor, registrar, valuer), entity name, PAN, GSTIN, '
+        'SEBI registration, contact person, email, address. '
+        'Example headers: KEY ENTITIES, ENTITIES, SERVICE PROVIDERS, KEY PERSONNEL, '
+        'FUND ENTITIES, RELATED PARTIES, FUND SERVICE PROVIDERS'
+    ),
+    'valuations': (
+        'Valuation data — company name, valuation date, methodology (DCF, comparables, '
+        'recent transaction, net assets, cost), fair value, enterprise value, cost basis, '
+        'unrealized gain/loss, valuer name. '
+        'Example headers: VALUATIONS, PORTFOLIO VALUATIONS, VALUATION DETAILS, '
+        'FAIR VALUE ASSESSMENT, VALUATION REGISTER, INVESTMENT VALUATIONS'
+    ),
 }
 
 # ---------------------------------------------------------------------------
@@ -219,6 +363,31 @@ VALUATIONS_KPIS_FIELDS = {
     'cac': 'Customer Acquisition Cost — CAC, Customer Acquisition Cost, Blended CAC, Cost to Acquire',
     'ltv': 'Customer Lifetime Value — LTV, CLV, Customer LTV, Lifetime Value, Customer Value',
     'ltv_cac_ratio': 'LTV to CAC ratio — LTV/CAC, LTV:CAC, LTV CAC Ratio, Payback Multiple',
+    # Sector-specific KPIs (Consumer, NBFC, Manufacturing, Real Estate, Healthcare)
+    'gmv': 'Gross Merchandise Value — GMV, GMV (Cr), GMV in Crore, GMV (Lakhs), Gross Merch Value, Total GMV, Gross Sales Value',
+    'revenue': 'Revenue / Net Sales — Revenue, Rev, Net Sales, Revenue (Cr), Rev(Cr), Net Revenue, Turnover, Top Line, Total Revenue',
+    'gross_margin_pct': 'Gross Margin % — Gross Margin, Gross M%, GM%, Gross Margin %, Gross Profit Margin, Gross Profit %',
+    'ebitda_value': 'EBITDA — EBITDA, EBITDA (Cr), Ebitda, Operating Profit, EBITDA Margin Amount',
+    'ebitda_margin_pct': 'EBITDA Margin % — EBITDA %, EBITDA Margin, EBITDA%, Ebitda%, Operating Margin',
+    'orders': 'Number of Orders — Orders, Order Count, Total Orders, No. of Orders, # Orders, Transactions',
+    'aov': 'Average Order Value — AOV, Avg Order Value, Average Order Value, Avg Transaction Value, Average Ticket Size',
+    'returns_pct': 'Return Rate % — Returns, Return %, Return Rate, RTO %, Product Returns %, Return Rate %',
+    'repeat_pct': 'Repeat Customer % — Repeat %, Repeat Rate, Repeat Customer %, Retention %, Customer Retention, Repeat Customer Rate',
+    'cost_to_income': 'Cost to Income Ratio — Cost:Inc, Cost to Income, Cost/Income, CI Ratio, Cost to Income Ratio',
+    'headcount': 'Employee Headcount — Headcount, Employees, Team Size, FTE, Full Time Employees, Staff Count, HC',
+    'nim_pct': 'Net Interest Margin % — NIM%, NIM, Net Interest Margin, NIM (%), Interest Margin',
+    'gnpa_pct': 'Gross NPA % — GNPA%, Gross NPA, GNPA, Gross Non-Performing Assets %',
+    'nnpa_pct': 'Net NPA % — NNPA%, Net NPA, NNPA, Net Non-Performing Assets %',
+    'roe_pct': 'Return on Equity — ROE %, ROE, Return on Equity, ROE %, Return On Equity %',
+    'capacity_utilization': 'Capacity Utilization — Capacity%, Capacity Utilization, Capacity Util %, Plant Utilization, Util %',
+    'export_pct': 'Export Revenue % — Export%, Export Revenue %, Export Share, Exports %, Export Contribution',
+    'bed_occupancy': 'Bed Occupancy Rate — Bed Occupancy, Occupancy %, Bed Occupancy %, Hospital Occupancy',
+    'arpob': 'Average Revenue Per Occupied Bed — ARPOB, ARPOB (Rs/day), Avg Rev Per Bed, Revenue Per Bed',
+    'cap_rate_pct': 'Capitalization Rate — Cap Rate%, Cap Rate, Capitalization Rate, Yield %',
+    'investment_cost': 'Investment Cost / Deployed Capital — Cost, Investment Cost, Deployed Capital, Capital Deployed, Total Cost',
+    'fair_value_holding': 'Fair Value of Holding — FV, Fair Value, FMV, Market Value, Current Value, Portfolio Value',
+    'debt_to_ebitda': 'Debt to EBITDA — D/EBITDA, Debt/EBITDA, Leverage, Debt to EBITDA, Net Debt/EBITDA',
+    'aum_value': 'Assets Under Management — AUM, AUM (Rs Cr), AUM(₹Cr), Total AUM, Managed Assets',
 }
 
 NAV_ACCOUNTING_FIELDS = {
@@ -395,6 +564,86 @@ PORTFOLIO_HIERARCHY_FIELDS = {
 # Master mapping: domain -> canonical fields dict
 # ---------------------------------------------------------------------------
 
+QUOTED_UNQUOTED_FIELDS = {
+    'company_name': 'Portfolio company name',
+    'share_type': 'Share classification: Listed / Unlisted, Quoted / Unquoted, Equity (Listed) etc.',
+    'ipev_level': 'IPEV fair value hierarchy level: Level 1 (market price), Level 2 (observable), Level 3 (unobservable)',
+    'listing_exchange': 'Stock exchange: NSE, BSE, NYSE, NASDAQ, etc.',
+    'isin': 'ISIN code of the listed security',
+    'fair_value': 'Fair value of the holding',
+    'cost': 'Cost / invested amount',
+}
+
+FEES_REGISTER_FIELDS = {
+    'scheme_name': 'Scheme name for the fee record',
+    'fee_period': 'Fee period (Q1 FY25, Q2 FY25, etc.)',
+    'fee_basis_amount': 'Base amount for fee calculation (committed / called / NAV)',
+    'fee_rate': 'Annual fee rate percentage',
+    'fee_amount': 'Calculated management fee amount',
+    'gst_amount': 'GST on management fee',
+    'total_fee': 'Total fee including GST',
+}
+
+BURN_RUNWAY_FIELDS = {
+    'company_name': 'Portfolio company name',
+    'period': 'Reporting period (month/quarter)',
+    'gross_burn': 'Total monthly cash outflow / gross burn rate',
+    'net_burn': 'Net monthly cash burn = outflow minus revenue',
+    'cash_balance': 'Cash and equivalents at period end',
+    'runway_months': 'Months of runway = cash / net burn',
+    'mrr': 'Monthly Recurring Revenue (SaaS)',
+    'arr': 'Annual Recurring Revenue (SaaS)',
+    'churn_rate': 'Monthly or annual churn rate',
+    'nrr': 'Net Revenue Retention / Net Dollar Retention',
+}
+
+FUND_PL_BS_FIELDS = {
+    'line_item': 'Financial line item (Revenue, Expenses, Assets, Liabilities, etc.)',
+    'amount': 'Amount for the line item',
+    'period': 'Reporting period',
+    'statement_type': 'Statement type: pl (profit & loss) or bs (balance sheet)',
+}
+
+LP_CAPITAL_ACCOUNTS_FIELDS = {
+    'investor_name': 'LP / Investor name',
+    'commitment': 'Total commitment amount',
+    'contributions': 'Total contributions / capital called to date',
+    'distributions': 'Total distributions received to date',
+    'carried_interest': 'Carried interest allocation',
+    'ending_balance': 'Ending capital account balance',
+}
+
+NAV_CALCULATION_FIELDS = {
+    'opening_nav': 'Opening NAV / Beginning NAV — total fund NAV at start of period',
+    'investments_at_cost': 'Total investments at cost / deployed capital',
+    'fair_value_adjustment': 'Fair value adjustment / mark-to-market adjustment / FV change',
+    'unrealised_gain_loss': 'Unrealised gain or loss on portfolio',
+    'realised_gain_loss': 'Realised gain or loss from exits',
+    'management_fee': 'Management fee deducted from NAV',
+    'operating_expenses': 'Fund operating expenses / admin expenses / other expenses',
+    'closing_nav': 'Closing NAV / Ending NAV — total fund NAV at end of period',
+    'total_units_outstanding': 'Total units outstanding / units issued',
+    'opening_nav_per_unit': 'Opening NAV per unit',
+    'closing_nav_per_unit': 'Closing NAV per unit / NAV per unit',
+    'income_accrued': 'Income accrued / interest accrued / dividend receivable',
+    'carry_provision': 'Carried interest provision deducted from NAV',
+}
+
+WATERFALL_CARRY_FIELDS = {
+    'total_capital_called': 'Total capital called / total contributions / total drawdowns',
+    'preferred_return_amount': 'Preferred return / hurdle amount — LP preferred return before carry',
+    'catch_up_amount': 'GP catch-up amount — GP share of excess until carry split is reached',
+    'carried_interest_provision': 'Carried interest provision / carry amount / performance fee',
+    'carry_percentage': 'Carry percentage (e.g., 20%)',
+    'hurdle_rate': 'Hurdle rate / preferred return rate (e.g., 8%)',
+    'gp_share': 'GP share / GP distribution amount',
+    'lp_share': 'LP share / LP distribution amount',
+    'clawback_provision': 'GP clawback provision amount',
+    'total_distributions': 'Total distributions to LPs',
+    'net_carry': 'Net carried interest after clawback',
+    'carry_status': 'Carry status: indicative, crystallised, paid',
+}
+
 DOMAIN_FIELDS = {
     'organization_users': ORGANIZATION_USERS_FIELDS,
     'fund_scheme_master': FUND_SCHEME_MASTER_FIELDS,
@@ -408,4 +657,11 @@ DOMAIN_FIELDS = {
     'compliance': COMPLIANCE_FIELDS,
     'portfolio_hierarchy': PORTFOLIO_HIERARCHY_FIELDS,
     'financials_pl_bva': FINANCIALS_PL_BVA_FIELDS,
+    'quoted_unquoted': QUOTED_UNQUOTED_FIELDS,
+    'fees_register': FEES_REGISTER_FIELDS,
+    'burn_runway': BURN_RUNWAY_FIELDS,
+    'fund_pl_bs': FUND_PL_BS_FIELDS,
+    'lp_capital_accounts': LP_CAPITAL_ACCOUNTS_FIELDS,
+    'nav_calculation': NAV_CALCULATION_FIELDS,
+    'waterfall_carry': WATERFALL_CARRY_FIELDS,
 }

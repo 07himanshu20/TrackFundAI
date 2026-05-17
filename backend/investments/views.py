@@ -26,6 +26,7 @@ from accounts.fund_access_helpers import (
     user_has_fund_access, get_accessible_fund_ids, filter_by_fund_access,
 )
 from accounts.permissions import IsGPUser, IsGPAdmin
+from config.cache_utils import cached_api_view, invalidate_fund_cache
 from funds.models import Scheme
 from notifications.helpers import notify_user, notify_org_admins
 
@@ -689,6 +690,7 @@ def board_pack_generate(request, scheme_id):
 
 @api_view(['GET'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def portfolio_burn_runway(request):
     """
     GET /api/portfolio/burn-runway/?fund=<id>
@@ -841,6 +843,7 @@ def portfolio_burn_runway(request):
 
 @api_view(['GET'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def portfolio_exits_summary(request):
     """
     GET /api/portfolio/exits/?fund=<id>
@@ -926,6 +929,7 @@ def portfolio_exits_summary(request):
 
 @api_view(['GET'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def portfolio_kpis_summary(request):
     """
     GET /api/portfolio/kpis/?fund=<id>
@@ -959,6 +963,7 @@ def portfolio_kpis_summary(request):
 
 @api_view(['GET'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def portfolio_saas_metrics(request):
     """
     GET /api/portfolio/saas-metrics/?fund=<id>
@@ -1051,6 +1056,7 @@ def portfolio_saas_metrics(request):
 
 @api_view(['GET'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def portfolio_quoted_unquoted(request):
     """
     GET /api/portfolio/quoted-unquoted/?fund=<id>
@@ -1131,6 +1137,7 @@ def portfolio_quoted_unquoted(request):
 
 @api_view(['GET'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def portfolio_investments_list(request):
     """
     GET /api/portfolio/investments/?fund=<id>
@@ -1177,6 +1184,7 @@ def portfolio_investments_list(request):
 
 @api_view(['GET'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def portfolio_valuations_list(request):
     """
     GET /api/portfolio/valuations/?fund=<id>
@@ -1219,6 +1227,7 @@ def portfolio_valuations_list(request):
 
 @api_view(['GET'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def portfolio_kpi_tracking(request):
     """
     GET /api/portfolio/kpi-tracking/?fund=<id>&status=<status>
@@ -1262,8 +1271,156 @@ def portfolio_kpi_tracking(request):
     return Response({'kpis': kpis, 'count': len(kpis)})
 
 
+# ── Canonical slug → column mapping for KPI matrix ──────────
+_KPI_COL_SLUGS = {
+    'gmv':      ['gmv', 'gmv-rs-cr', 'gmvcr'],
+    'revenue':  ['rev', 'revenue', 'revenue-rs-cr', 'revenuecr'],
+    'gross_m':  ['gross-m', 'gross-margin'],
+    'ebitda':   ['ebitda', 'ebitda-margin'],
+    'orders':   ['orders', 'order-book', 'order-book-rs-cr'],
+    'aov':      ['aov'],
+    'returns':  ['returns'],
+    'cac':      ['cac'],
+    'repeat':   ['repeat'],
+}
+# Reverse: slug → canonical column
+_SLUG_TO_COL = {}
+for _col, _slugs in _KPI_COL_SLUGS.items():
+    for _s in _slugs:
+        _SLUG_TO_COL[_s] = _col
+
+
 @api_view(['GET'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
+def portfolio_kpi_matrix(request):
+    """
+    GET /api/portfolio/kpi-matrix/?fund=<id>
+    Returns one row per company with pivoted KPI columns:
+    GMV, REV, Gross M%, EBITDA, Orders, AOV, Returns, CAC, Repeat%, Cost, FV.
+    Cost comes from Investment.total_invested; FV from latest Valuation.
+    """
+    from collections import defaultdict
+
+    org = request.organization
+    if not org:
+        return Response({'detail': 'No organization.'}, status=403)
+
+    fund_ids = get_accessible_fund_ids(request.user)
+    fund_id = request.query_params.get('fund')
+
+    inv_filter = dict(
+        scheme__fund__organization=org,
+        scheme__fund__id__in=fund_ids,
+    )
+    if fund_id:
+        inv_filter['scheme__fund__id'] = fund_id
+
+    investments = Investment.objects.filter(**inv_filter).select_related(
+        'portfolio_company', 'scheme__fund',
+    )
+
+    # Build company → investment ids and cost
+    company_data = {}  # company_name → {inv_ids, cost, sector, ...}
+    for inv in investments:
+        name = inv.company_name
+        if name not in company_data:
+            company_data[name] = {
+                'inv_ids': [],
+                'cost': 0,
+                'sector': inv.sector or '',
+            }
+        company_data[name]['inv_ids'].append(inv.id)
+        if inv.total_invested:
+            company_data[name]['cost'] += float(inv.total_invested)
+
+    if not company_data:
+        return Response({'companies': [], 'count': 0})
+
+    # Get latest FV per investment from Valuation
+    all_inv_ids = []
+    for cd in company_data.values():
+        all_inv_ids.extend(cd['inv_ids'])
+
+    latest_val_qs = Valuation.objects.filter(
+        investment_id__in=all_inv_ids,
+    ).order_by('investment_id', '-valuation_date')
+
+    inv_fv = {}  # investment_id → latest fair_value
+    for v in latest_val_qs:
+        if v.investment_id not in inv_fv and v.fair_value:
+            inv_fv[v.investment_id] = float(v.fair_value)
+
+    for name, cd in company_data.items():
+        cd['fv'] = sum(inv_fv.get(iid, 0) for iid in cd['inv_ids'])
+
+    # Get KPI data — latest value per company per canonical column
+    all_target_slugs = list(_SLUG_TO_COL.keys())
+    kpi_qs = PortfolioKPI.objects.filter(
+        investment_id__in=all_inv_ids,
+        kpi_definition__slug__in=all_target_slugs,
+    ).select_related('investment', 'kpi_definition').order_by('-period')
+
+    company_kpis = defaultdict(dict)  # company_name → {col: value}
+    for k in kpi_qs:
+        col = _SLUG_TO_COL.get(k.kpi_definition.slug)
+        if not col:
+            continue
+        name = k.investment.company_name
+        if col not in company_kpis[name]:
+            company_kpis[name][col] = float(k.value)
+
+    # Also check for KPIs that have partial slug match (e.g. 'arr-rs-cr' contains 'arr')
+    # Fetch ALL KPIs for these investments and do broader matching
+    remaining_kpi_qs = PortfolioKPI.objects.filter(
+        investment_id__in=all_inv_ids,
+    ).exclude(
+        kpi_definition__slug__in=all_target_slugs,
+    ).select_related('investment', 'kpi_definition').order_by('-period')
+
+    # Broader slug matching: check if any canonical slug is contained in the actual slug
+    for k in remaining_kpi_qs:
+        slug = k.kpi_definition.slug.lower()
+        name = k.investment.company_name
+        for col, col_slugs in _KPI_COL_SLUGS.items():
+            if col in company_kpis.get(name, {}):
+                continue
+            for cs in col_slugs:
+                if cs in slug or slug in cs:
+                    if col not in company_kpis[name]:
+                        company_kpis[name][col] = float(k.value)
+                    break
+
+    # Normalize percent columns: values < 1 are fractions → multiply by 100
+    PCT_COLS = {'gross_m', 'ebitda', 'returns', 'repeat'}
+    for name, kvals in company_kpis.items():
+        for pc in PCT_COLS:
+            v = kvals.get(pc)
+            if v is not None and abs(v) < 1:
+                kvals[pc] = round(v * 100, 2)
+
+    # Assemble response
+    cols = ['gmv', 'revenue', 'gross_m', 'ebitda', 'orders', 'aov', 'returns', 'cac', 'repeat']
+    companies = []
+    for name in sorted(company_data.keys()):
+        cd = company_data[name]
+        row = {
+            'company_name': name,
+            'sector': cd['sector'],
+            'cost': cd['cost'] if cd['cost'] else None,
+            'fv': cd['fv'] if cd.get('fv') else None,
+        }
+        kvals = company_kpis.get(name, {})
+        for c in cols:
+            row[c] = kvals.get(c)
+        companies.append(row)
+
+    return Response({'companies': companies, 'count': len(companies)})
+
+
+@api_view(['GET'])
+@permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def portfolio_exit_scenarios_list(request):
     """
     GET /api/portfolio/exit-scenarios/?fund=<id>
@@ -1307,6 +1464,7 @@ def portfolio_exit_scenarios_list(request):
 
 @api_view(['GET'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def portfolio_board_meetings_list(request):
     """
     GET /api/portfolio/board-meetings/?fund=<id>
@@ -1346,6 +1504,7 @@ def portfolio_board_meetings_list(request):
 
 @api_view(['GET'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=900)
 def portfolio_avg_holding(request):
     """
     GET /api/portfolio/avg-holding/?fund=<id>
@@ -1391,6 +1550,7 @@ def portfolio_avg_holding(request):
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def portfolio_company_list(request):
     """List all portfolio companies for the org, or create one."""
     org = request.organization
@@ -1521,6 +1681,7 @@ def kpi_definition_detail(request, kpi_def_id):
 
 @api_view(['GET'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=900)
 def exit_signal_view(request, company_id):
     """
     AI-powered exit signal analysis for a portfolio company.

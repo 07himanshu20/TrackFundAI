@@ -77,6 +77,7 @@ MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.middleware.common.CommonMiddleware',
     'accounts.middleware.OrganizationMiddleware',
+    'accounts.middleware.CacheInvalidationMiddleware',
 ]
 
 # CORS — allow frontend dev server
@@ -118,6 +119,12 @@ if _db_url:
                 'HOST': m.group(3),
                 'PORT': m.group(4),
                 'NAME': m.group(5),
+                'CONN_MAX_AGE': 600,        # Keep DB connections alive 10 min
+                'CONN_HEALTH_CHECKS': True,  # Verify connection before reuse
+                'OPTIONS': {
+                    'connect_timeout': 10,
+                    'options': '-c statement_timeout=30000',  # 30s query timeout
+                },
             }
         }
     else:
@@ -147,8 +154,24 @@ LOGGING = {
     'root': {'handlers': ['console'], 'level': 'INFO'},
 }
 
-# -- Celery Configuration --
+# -- Redis Cache --
+# Uses the same Redis instance as Celery but a different DB (db=1 for cache, db=0 for Celery)
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+_redis_cache_url = REDIS_URL.rsplit('/', 1)[0] + '/1'  # Use db=1 for cache
+
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': _redis_cache_url,
+        'TIMEOUT': 300,  # Default 5 min TTL
+        'KEY_PREFIX': 'tfai',
+        'OPTIONS': {
+            'db': 1,
+        },
+    }
+}
+
+# -- Celery Configuration --
 CELERY_BROKER_URL = REDIS_URL
 CELERY_RESULT_BACKEND = 'django-db'
 CELERY_CACHE_BACKEND = 'django-cache'

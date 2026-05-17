@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import os
+import time
 from typing import Optional
 
 import openpyxl
@@ -23,6 +24,10 @@ from .canonical_schema import SHEET_DOMAINS, DOMAIN_FIELDS
 logger = logging.getLogger(__name__)
 
 _configured = False
+
+# Retry settings for Gemini API calls
+_MAX_RETRIES = 3
+_RETRY_BACKOFF_BASE = 2  # seconds; exponential: 2, 4, 8
 
 
 def _ensure_configured():
@@ -46,6 +51,72 @@ def _get_model():
             'response_mime_type': 'application/json',
         },
     )
+
+
+def _call_gemini(prompt, context_label=''):
+    """Call Gemini with retry + exponential backoff.
+
+    Retries on transient errors (rate limits, network, server errors).
+    Raises on permanent errors (bad API key, invalid model, etc.).
+    Returns parsed JSON dict.
+    """
+    model = _get_model()
+    last_error = None
+
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            response = model.generate_content(prompt)
+
+            # Check for empty/blocked responses
+            if not response.text:
+                if response.prompt_feedback and response.prompt_feedback.block_reason:
+                    raise ValueError(
+                        f'Gemini blocked prompt ({context_label}): '
+                        f'{response.prompt_feedback.block_reason}'
+                    )
+                raise ValueError(f'Gemini returned empty response ({context_label})')
+
+            result = _parse_json_response(response.text)
+            if attempt > 1:
+                logger.info(
+                    f'Gemini {context_label} succeeded on attempt {attempt}'
+                )
+            return result
+
+        except (json.JSONDecodeError, ValueError) as e:
+            # Non-retryable: bad response format or blocked prompt
+            logger.error(f'Gemini {context_label} non-retryable error: {e}')
+            raise
+
+        except Exception as e:
+            last_error = e
+            err_name = type(e).__name__
+            err_str = str(e)
+
+            # Classify error for retry decision
+            is_rate_limit = '429' in err_str or 'quota' in err_str.lower()
+            is_server_error = any(
+                code in err_str for code in ('500', '502', '503', '504')
+            )
+            is_transient = is_rate_limit or is_server_error or 'timeout' in err_str.lower()
+
+            if not is_transient or attempt == _MAX_RETRIES:
+                logger.error(
+                    f'Gemini {context_label} failed after {attempt} attempt(s): '
+                    f'{err_name}: {err_str}'
+                )
+                raise
+
+            wait = _RETRY_BACKOFF_BASE ** attempt
+            if is_rate_limit:
+                wait = max(wait, 10)  # rate limits need longer backoff
+            logger.warning(
+                f'Gemini {context_label} attempt {attempt} failed ({err_name}), '
+                f'retrying in {wait}s...'
+            )
+            time.sleep(wait)
+
+    raise last_error
 
 
 def _parse_json_response(text):
@@ -154,12 +225,17 @@ def _extract_sheet_previews(filepath):
     that have cross-sheet formula references (e.g. ='Portfolio'!B10) so that
     Gemini sees the actual values rather than blanks.
 
+    IMPORTANT: Do NOT use read_only=True here. In read_only mode, openpyxl
+    returns EmptyCell objects for empty cells — these lack .row and .column
+    attributes, causing AttributeError crashes when we look up the xsheet_cache.
+    We only read max_row=6 per sheet, so memory/performance is not a concern.
+
     Returns {sheet_name: [[row1_values], [row2_values], ...]}
     """
     # Build cross-sheet value cache first (resolves =SheetX!CellRef formulas)
     xsheet_cache = _build_cross_sheet_value_cache(filepath)
 
-    wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
+    wb = openpyxl.load_workbook(filepath, data_only=True)
     previews = {}
     sheet_names = wb.sheetnames
 
@@ -186,9 +262,11 @@ def _extract_sheet_previews(filepath):
 # Pass 1: Sheet Classification
 # ---------------------------------------------------------------------------
 
-PASS1_PROMPT = """You are an AI engineer with 20+ years of experience in automating the finances of companies. You hold 20+ years of experience working with Python, and specialization in extraction, displaying and calculating data and accessing it from Excel/CSV/PDF sheets of multiple formats. You hold 15+ years of hands-on experience in software debugging and creating production-ready softwares and dashboards. You have robust knowledge of a CFO/CA to perform calculations on finance data.
+PASS1_PROMPT = """You are an AI engineer with 20+ years of experience in automating the finances of companies, specializing in Alternative Investment Funds (AIFs), Private Equity, and Venture Capital fund operations. You hold 25+ years of experience as a CA/CFO with deep knowledge of fund accounting, LP/GP economics, capital calls, distributions, carried interest, NAV calculation, and SEBI regulatory compliance for Indian AIFs.
 
-Given the sheet names and first few rows of an AIF (Alternative Investment Fund) Excel workbook, classify each sheet into exactly one data domain.
+You MUST use this financial domain expertise to correctly classify each sheet. The difference between an LP (investor) and a portfolio company (investee) is fundamental — confusing them would be like confusing a bank's depositors with its loan customers.
+
+Given the sheet names and first few rows of an AIF Excel workbook, classify each sheet into its PRIMARY data domain.
 
 Available domains and their descriptions:
 {domains}
@@ -197,8 +275,7 @@ For each sheet, examine:
 1. The sheet name itself
 2. The header row(s) — look for section headers like "FUND MASTER DATA", "INVESTORS", "CAPITAL CALLS", etc.
 3. The data content in sample rows
-
-A single sheet may contain MULTIPLE sections (e.g., "Organization & Users" sheet has both organization master and user list). In that case, classify by the PRIMARY domain or list multiple domains.
+4. The NATURE of entities described (are they investors/LPs or portfolio companies/investees?)
 
 IMPORTANT: Some sheets contain multiple sections separated by section headers (all-caps text like "FUND MASTER DATA", "SCHEMES", "PORTFOLIO COMPANIES"). Identify these multi-section sheets.
 
@@ -212,7 +289,51 @@ When you see cells showing empty values or '#REF!' or formula text, the ACTUAL v
 
 CRITICAL RULES — NEVER VIOLATE:
 
-1. COVER/SUMMARY SHEETS ARE NEVER DATA SHEETS.
+1. ONE PRIMARY DOMAIN PER SHEET.
+   Each sheet must be classified with EXACTLY ONE primary domain. Do NOT assign
+   multiple domains just because a sheet contains a column with a keyword that
+   APPEARS related to another domain.
+
+   A column name is an ATTRIBUTE of the entities on that sheet — it does NOT
+   change the sheet's domain. For example:
+   - An Investors sheet with a "Distributions" column → still investors_aml
+     (Distributions here = money RETURNED TO the LP)
+   - A Portfolio sheet with a "Sector" column → still portfolio_investments
+     (Sector here = the investee company's industry)
+   - A Capital Calls sheet with an "Investor Name" column → still capital_calls
+     (Investor Name here = which LP is being called)
+
+   Only assign a second domain if the sheet genuinely contains TWO SEPARATE
+   data tables (e.g., "Organization & Users" has both org master data AND a
+   separate user list table below it).
+
+2. FUNDAMENTAL DISTINCTION: LPs (INVESTORS) vs PORTFOLIO COMPANIES (INVESTEES).
+   This is the most critical distinction in fund management:
+
+   LPs / INVESTORS (→ investors_aml domain):
+   - These are entities who GIVE money TO the fund
+   - Names are typically: sovereign wealth funds (Temasek, GIC, Mubadala, ADIA),
+     pension funds (CPPIB, OTPP, CalPERS), DFIs (IFC, CDC, NABARD, SIDBI, EDB),
+     insurance companies, family offices, corporates, HNIs
+   - Columns: Commitment, Drawdown, Drawdown%, Distributions, Carry Provision,
+     Demat, PAN, KYC Status, Bank Details, Investor Type
+   - A "Distributions" column on this sheet = money PAID BACK to the LP
+   - This sheet is ALWAYS investors_aml, NEVER exits_distributions
+
+   PORTFOLIO COMPANIES / INVESTEES (→ portfolio_investments or exits_distributions):
+   - These are companies the fund INVESTS money INTO
+   - Names are typically: private companies (e.g., "XYZ Pvt Ltd", "ABC Inc")
+   - For exits: columns include Exit Date, Exit Type/Route (IPO, M&A, Secondary,
+     Buyback), Cost, Proceeds, MOIC, IRR
+   - For active portfolio: columns include Investment Date, Cost, Fair Value,
+     Ownership %, Sector, Stage
+
+   NEVER classify an LP/Investor sheet as exits_distributions, even if it has
+   a "Distributions" column. The word "distribution" has DIFFERENT meanings:
+   - On an Investors sheet: distribution = money returned to LP (an LP attribute)
+   - On an Exits sheet: distribution = fund-level payout schedule after exits
+
+3. COVER/SUMMARY SHEETS ARE NEVER DATA SHEETS.
    Sheets named "Cover", "Summary", "Index", "Contents", "Dashboard", "Overview",
    "Front Page", "Title", "Home", "Intro", "README" etc. are display pages.
    They contain KEY-VALUE metadata pairs (e.g., "Fund Name: ABC Fund",
@@ -227,26 +348,111 @@ CRITICAL RULES — NEVER VIOLATE:
 
    The numbers on cover sheets are often inaccurate, out of date, or
    filled in by hand. The source of truth for all counts and values is
-   ALWAYS the dedicated data sheets (e.g., "Portfolio Investments" sheet
-   for company/investment data).
+   ALWAYS the dedicated data sheets.
 
-2. DERIVE COUNTS FROM DATA SHEETS, NOT COVER SHEETS.
+4. DERIVE COUNTS FROM DATA SHEETS, NOT COVER SHEETS.
    If a Cover sheet says "Portfolio Companies: 13" but the "Portfolio
    Investments" sheet has 110 rows — the correct count is 110.
    Always trust the data sheet row count over any aggregate shown on
    a cover or summary page.
 
-3. A sheet that has a two-column key-value layout (col A = label, col B = value)
+5. A sheet that has a two-column key-value layout (col A = label, col B = value)
    where labels are things like "Fund Name", "Short Code", "Vintage Year",
    "Management Fee", "Hurdle Rate", "Carried Interest", "Domicile" etc.
    is a METADATA sheet, not a data/transaction sheet.
 
-4. FINANCIAL STATEMENT SHEETS (P&L, Budget vs Actual, Balance Sheet):
+6. FINANCIAL STATEMENT SHEETS (P&L, Budget vs Actual, Balance Sheet):
    Sheets with names like "Monthly P&L", "P&L", "Profit Loss", "Income Statement",
    "Budget vs Actual", "BvA", "Financial Statements", "Company Financials",
    "Balance Sheet", "Cash Flow" belong to the "financials_pl_bva" domain.
    These sheets contain company-level financial data (Revenue, EBITDA, PAT etc.)
    for portfolio companies — either one row per company or time-series pivot format.
+
+7. TEMPORARY / TREASURY INVESTMENTS ARE NOT PORTFOLIO COMPANIES.
+   Sections titled "Temporary Investments", "Treasury Investments", "Cash
+   Instruments", "Liquid Fund Holdings" contain liquid mutual funds, overnight
+   funds, money market instruments, etc. These are cash management tools, NOT
+   portfolio company investments. They belong to nav_accounting (as cash
+   equivalents) or fund_scheme_master, NEVER to portfolio_investments.
+
+8. EXITS SHEET VALIDATION:
+   A sheet classified as exits_distributions MUST have columns indicating actual
+   exit events: Exit Date, Exit Type/Route/Method, Proceeds/Realization, MOIC.
+   If a sheet has investor names with commitment/drawdown/distribution columns
+   but NO exit-specific columns (Exit Date, Exit Type, Proceeds, MOIC), it is
+   investors_aml — NOT exits_distributions.
+
+9. GRANULAR DOMAIN CLASSIFICATION:
+   Use the MOST SPECIFIC domain available. Do NOT lump everything into broad domains:
+
+   - "FEES_REGISTER", "Fee Schedule", "Management Fees" → fees_register
+     (NOT nav_accounting — fees_register is the dedicated domain for fee data)
+   - "Quoted & Unquoted Shares", "IPEV Levels", "Share Classification",
+     "Listed vs Unlisted" → quoted_unquoted
+     (NOT valuations_kpis — quoted_unquoted is the dedicated domain)
+   - "SaaS Metrics & Burn", "Burn Rate", "Cash & Runway", "Portfolio Financials",
+     "Operating Metrics" → burn_runway
+     (NOT valuations_kpis — burn_runway is the dedicated domain for burn/SaaS data)
+   - "FUND_PL", "FUND_BS", "Fund P&L", "Fund Balance Sheet" → fund_pl_bs
+     (These are fund-entity-level statements, NOT company-level financials_pl_bva)
+   - "LP Capital Accounts", "Capital Account Statements" → lp_capital_accounts
+     (NOT investors_aml — lp_capital_accounts is the dedicated domain)
+   - "NAV Calculation", "NAV Calc", "NAV Computation", "NAV Build Up",
+     "NAV Working", "Closing NAV" → nav_calculation
+     (This is the single-period computational worksheet that shows how the NAV
+     figure is derived — Opening NAV, adjustments, fees, Closing NAV, NAV/Unit.
+     It is a KEY-VALUE or line-item format, NOT a time-series table.
+     DIFFERENT from nav_accounting which stores period-wise NAV time-series.
+     If a sheet has "NAV" in its name AND contains labels like "Closing NAV/Unit",
+     "Opening NAV", "Units Outstanding", "Fair Value Adjustment", "Management Fee"
+     in column A with single values in column B — it is nav_calculation.)
+   - "Waterfall", "Carry", "Carried Interest", "Carried Interest Waterfall",
+     "Distribution Waterfall", "GP Economics", "Performance Fee",
+     "GP/LP Split", "Carry Calculation" → waterfall_carry
+     (This sheet shows the GP/LP economics: preferred return / hurdle amount,
+     catch-up, carried interest provision, GP carry amount, LP share.
+     It typically has key-value label-pairs like "Total Capital Called",
+     "Preferred Return", "Carried Interest Provision", "GP Share", "LP Share".
+     DIFFERENT from exits_distributions which tracks individual company exits.
+     DIFFERENT from nav_accounting which tracks periodic NAV values.)
+
+10. MULTIPLE SHEETS CAN SHARE THE SAME DOMAIN.
+    If the workbook has 4 financial statement sheets (P&L, BS, CF, BvA), classify
+    ALL of them as financials_pl_bva. If there are 2 NAV sheets, classify BOTH as
+    nav_accounting. Do NOT force different domains just because sheets are separate.
+
+11. NAV CALCULATION vs NAV ACCOUNTING — CRITICAL DISTINCTION.
+    These are two DIFFERENT sheet types that both relate to NAV:
+
+    nav_accounting (TIME-SERIES):
+    - Contains MULTIPLE NAV records across periods (one row per month/quarter)
+    - Columns: Period, NAV Date, Total NAV, Units, NAV/Unit
+    - Used for tracking NAV history over time
+    - Example sheet names: "NAV & Accounting", "NAV Records", "Monthly NAV"
+
+    nav_calculation (SINGLE-PERIOD COMPUTATION):
+    - Contains the NAV BUILD-UP for ONE period — how the NAV was calculated
+    - Key-value format: label in col A, value in col B
+    - Labels include: Opening NAV, Investments at Cost, Fair Value Adjustment,
+      Unrealised Gains, Management Fees, Operating Expenses, Closing NAV,
+      Total Units Outstanding, Closing NAV per Unit, Opening NAV per Unit
+    - Example sheet names: "NAV Calculation", "NAV Calc", "NAV Computation"
+
+    If unsure: if the sheet has MANY rows of period-NAV data → nav_accounting.
+    If the sheet has a computation breakdown → nav_calculation.
+
+12. WATERFALL / CARRY vs OTHER DOMAINS — AVOID CONFUSION.
+    waterfall_carry sheets contain GP/LP economic splits and carry calculations.
+    They are NOT:
+    - exits_distributions (which tracks individual company exit events with
+      Exit Date, Exit Type, Proceeds, MOIC columns)
+    - nav_accounting (which tracks periodic NAV time-series)
+    - investors_aml (which lists LP investor master records)
+
+    A waterfall sheet typically has labels like: "Total Capital Called",
+    "Preferred Return Amount", "Carry Provision", "Carried Interest",
+    "GP Share", "LP Share", "Clawback". These are FUND-LEVEL economics,
+    not individual company exits or LP records.
 
 Sheet data:
 {sheet_data}
@@ -256,7 +462,7 @@ Respond with a JSON object:
   "sheets": [
     {{
       "sheet_name": "exact sheet name",
-      "domains": ["primary_domain", "secondary_domain_if_any"],
+      "domains": ["primary_domain_only"],
       "sections": ["SECTION HEADER 1", "SECTION HEADER 2"],
       "confidence": 0.95
     }}
@@ -301,14 +507,231 @@ def classify_sheets(filepath, progress_cb=None):
         sheet_data='\n'.join(sheet_data_parts),
     )
 
-    model = _get_model()
-    response = model.generate_content(prompt)
-    result = _parse_json_response(response.text)
+    result = _call_gemini(prompt, context_label='Pass1-classify')
+
+    classifications = result.get('sheets', [])
+    logger.info(
+        f'Gemini Pass 1: classified {len(classifications)} sheets '
+        f'from {len(sheet_names)} total'
+    )
+    for cls in classifications:
+        logger.info(
+            f'  Sheet "{cls.get("sheet_name")}" → '
+            f'{cls.get("domains")} (conf={cls.get("confidence", 0):.2f})'
+        )
 
     if progress_cb:
         progress_cb(12, 'Sheet classification complete')
 
-    return result.get('sheets', []), sheet_names
+    return classifications, sheet_names
+
+
+# ---------------------------------------------------------------------------
+# Pass 1.5: Section Classification within Multi-Section Sheets
+# ---------------------------------------------------------------------------
+
+PASS1_5_PROMPT = """You are an AI engineer with 20+ years of experience in Alternative Investment Funds (AIFs), Private Equity, and Venture Capital fund operations across multiple countries. You hold deep expertise in fund accounting, LP/GP economics, capital calls, distributions, carried interest, NAV calculation, and regulatory compliance (SEBI for India, SEC for US, FCA for UK, MAS for Singapore, CSSF for Luxembourg).
+
+You are classifying SECTIONS found within multi-section Excel sheets from a fund data workbook. Each sheet has already been classified to a primary data domain. Now you must classify each section within those sheets to a specific sub-domain.
+
+CRITICAL CONTEXT: Fund Excel files from different managers, countries, and formats use WILDLY DIFFERENT names for the same data concept. Your job is to understand the SEMANTIC MEANING regardless of the exact text. Examples:
+
+PORTFOLIO / COMPANY sections:
+  "PORTFOLIO COMPANIES", "INVESTEE COMPANIES", "COMPANIES", "COMPANY MASTER",
+  "FUND HOLDINGS", "COMPANY REGISTER", "INVESTEE DETAILS" → portfolio_companies
+
+INVESTMENT sections:
+  "INVESTMENTS", "INVESTMENT DETAILS", "INVESTMENT REGISTER", "DEPLOYED CAPITAL",
+  "PORTFOLIO INVESTMENTS", "FUND DEPLOYMENT", "INVESTMENT BOOK" → investments
+
+TRANCHE sections:
+  "INVESTMENT TRANCHES", "TRANCHES", "FUNDING ROUNDS", "DRAWDOWN TRANCHES",
+  "ROUND DETAILS", "TRANCHE REGISTER", "DEAL HISTORY" → investment_tranches
+
+TEMPORARY / TREASURY sections (MUST be identified — these get SKIPPED):
+  "TEMPORARY INVESTMENTS", "TREASURY INVESTMENTS", "LIQUID INVESTMENTS",
+  "CASH INSTRUMENTS", "MONEY MARKET", "OVERNIGHT FUNDS", "LIQUID FUND HOLDINGS",
+  "SHORT TERM INVESTMENTS" → temporary_investments
+
+CAPITAL CALL sections:
+  "CAPITAL CALLS", "DRAWDOWNS", "CALL SCHEDULE", "CAPITAL DRAWDOWNS" → capital_call_headers
+  "CAPITAL CALL LINE ITEMS", "LP DRAWDOWNS", "INVESTOR DRAWDOWNS" → capital_call_line_items
+
+EXIT sections:
+  "EXIT EVENTS", "EXITS", "REALIZATIONS", "DIVESTMENTS", "PORTFOLIO EXITS" → exit_events
+
+DISTRIBUTION sections:
+  "DISTRIBUTIONS", "DISTRIBUTION SCHEDULE", "LP DISTRIBUTIONS", "PAYOUTS" → distributions
+
+NAV sections:
+  "NAV RECORDS", "NAV HISTORY", "NET ASSET VALUE", "MONTHLY NAV" → nav_records
+
+SCHEME sections:
+  "SCHEMES", "SCHEME DETAILS", "FUND SCHEMES", "SUB-FUND DETAILS" → schemes
+
+FUND MASTER sections:
+  "FUND MASTER DATA", "FUND DETAILS", "FUND INFORMATION" → fund_master
+
+ENTITY sections:
+  "KEY ENTITIES", "ENTITIES", "SERVICE PROVIDERS", "FUND ENTITIES" → entities
+
+VALUATION sections:
+  "VALUATIONS", "PORTFOLIO VALUATIONS", "FAIR VALUE ASSESSMENT" → valuations
+
+Available sub-domains and their descriptions:
+{subdomains}
+
+HOW TO CLASSIFY — USE BOTH SECTION NAME AND COLUMN HEADERS:
+
+1. First, look at the section name for semantic meaning
+2. Then, look at the column headers to CONFIRM the classification:
+   - Columns like Company Name, Sector, Stage, City → portfolio_companies
+   - Columns like Instrument, Cost, Fair Value, Ownership% → investments
+   - Columns like Tranche#, Amount, Date, Round, Price/Share → investment_tranches
+   - Columns like Call#, Call Date, Call%, Total Amount → capital_call_headers
+   - Columns like Investor Name, Called Amount, Payment Status → capital_call_line_items
+   - Columns like Exit Type, Exit Date, Proceeds, MOIC → exit_events
+   - Columns like Distribution#, Dist Date, Gross Amount, TDS → distributions
+   - Columns like NAV Date, Total NAV, NAV/Unit, Units → nav_records
+3. If the section name is ambiguous, let the COLUMN HEADERS decide
+4. If column headers are not provided (empty), classify by section name + parent domain
+
+CRITICAL RULES:
+1. "__default__" means the sheet has NO section headers (entire sheet is one flat table).
+   Classify based on columns + parent domain:
+   - parent=portfolio_investments + columns have Cost/FV → investments
+   - parent=capital_calls → capital_call_headers
+   - parent=nav_accounting → nav_records
+   - parent=exits_distributions → exit_events
+   - parent=organization_users + columns have Entity Type → entities
+   - parent=fund_scheme_master → fund_master
+
+2. TEMPORARY INVESTMENTS are critical to detect — if missed, liquid mutual funds
+   get imported as portfolio companies (phantom records). Always check for keywords
+   like "temporary", "treasury", "liquid", "overnight", "money market".
+
+3. A section that appears to be a COMBINED company+investment table (has BOTH
+   company identity columns AND investment financial columns) → classify as "investments"
+
+4. If truly unrecognizable, classify as "unknown" — never guess
+
+Section data:
+{section_data}
+
+Respond with a JSON object:
+{{
+  "classifications": [
+    {{
+      "sheet_name": "exact sheet name",
+      "sections": [
+        {{
+          "section_name": "EXACT SECTION HEADER TEXT",
+          "sub_domain": "one of the sub-domain keys",
+          "confidence": 0.95
+        }}
+      ]
+    }}
+  ]
+}}
+
+Only use sub-domain names from this list: {subdomain_list}
+"""
+
+
+def classify_sections(classifications, sheet_section_data, progress_cb=None):
+    """
+    Pass 1.5: Classify all section headers in a single batched Gemini call.
+
+    Args:
+        classifications: Pass 1 results (list of sheet classification dicts)
+        sheet_section_data: dict mapping sheet_name to list of dicts:
+            [{name: str, columns: list[str]}, ...]
+            where 'name' is the section title text and 'columns' are the
+            column headers found in that section.
+        progress_cb: Optional progress callback
+
+    Returns:
+        {sheet_name: {section_name: sub_domain}}
+    """
+    from .canonical_schema import SECTION_SUBDOMAINS
+
+    if progress_cb:
+        progress_cb(13, 'Classifying sections with AI...')
+
+    # Build sheet → primary domain lookup from Pass 1
+    sheet_domain_lookup = {}
+    for cls in classifications:
+        sname = cls.get('sheet_name', '')
+        domains = cls.get('domains', [])
+        if domains and domains[0] != 'unknown':
+            sheet_domain_lookup[sname] = domains[0]
+
+    # Filter to sheets with sections to classify
+    sections_to_classify = {
+        sname: secs for sname, secs in sheet_section_data.items()
+        if secs and sname in sheet_domain_lookup
+    }
+
+    if not sections_to_classify:
+        logger.info('Gemini Pass 1.5: no multi-section sheets to classify')
+        return {}
+
+    # Build prompt input
+    subdomains_desc = '\n'.join(
+        f'  - {k}: {v}' for k, v in SECTION_SUBDOMAINS.items()
+    )
+    subdomain_list = ', '.join(SECTION_SUBDOMAINS.keys())
+
+    section_data_parts = []
+    for sname, secs in sections_to_classify.items():
+        parent_domain = sheet_domain_lookup.get(sname, 'unknown')
+        section_data_parts.append(
+            f'\n--- Sheet: "{sname}" (parent domain: {parent_domain}) ---'
+        )
+        for sec in secs:
+            cols_str = ', '.join(sec.get('columns', [])[:15]) or '(no columns detected)'
+            section_data_parts.append(
+                f'  Section: "{sec["name"]}"\n    Columns: {cols_str}'
+            )
+
+    prompt = PASS1_5_PROMPT.format(
+        subdomains=subdomains_desc,
+        subdomain_list=subdomain_list,
+        section_data='\n'.join(section_data_parts),
+    )
+
+    result = _call_gemini(prompt, context_label='Pass1.5-sections')
+
+    # Parse result into {sheet_name: {section_name: sub_domain}}
+    section_map = {}
+    for sheet_cls in result.get('classifications', []):
+        sname = sheet_cls.get('sheet_name', '')
+        sheet_secs = {}
+        for sec in sheet_cls.get('sections', []):
+            sec_name = sec.get('section_name', '')
+            sub_domain = sec.get('sub_domain', 'unknown')
+            confidence = sec.get('confidence', 0.0)
+            if sec_name and sub_domain in SECTION_SUBDOMAINS:
+                sheet_secs[sec_name] = sub_domain
+            else:
+                sheet_secs[sec_name] = 'unknown'
+            logger.info(
+                f'  Section "{sec_name}" in "{sname}" → '
+                f'{sub_domain} (conf={confidence:.2f})'
+            )
+        if sheet_secs:
+            section_map[sname] = sheet_secs
+
+    if progress_cb:
+        progress_cb(14, 'Section classification complete')
+
+    total_sections = sum(len(v) for v in section_map.values())
+    logger.info(
+        f'Gemini Pass 1.5: classified {total_sections} sections '
+        f'across {len(section_map)} sheets'
+    )
+
+    return section_map
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +897,8 @@ def map_columns_for_sheet(filepath, sheet_name, domains, sections, progress_cb=N
     # Build cross-sheet cache for this file (resolves =SheetX!CellRef formulas)
     xsheet_cache = _build_cross_sheet_value_cache(filepath)
 
-    wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
+    # Do NOT use read_only=True — EmptyCell objects lack .row/.column attributes
+    wb = openpyxl.load_workbook(filepath, data_only=True)
     ws = wb[sheet_name]
 
     # Read more rows for mapping (up to 20 for context), resolving cross-sheet refs
@@ -518,9 +942,9 @@ def map_columns_for_sheet(filepath, sheet_name, domains, sections, progress_cb=N
         canonical_fields=fields_desc,
     )
 
-    model = _get_model()
-    response = model.generate_content(prompt)
-    result = _parse_json_response(response.text)
+    result = _call_gemini(
+        prompt, context_label=f'Pass2-map({sheet_name}:{primary_domain})'
+    )
 
     return result
 
@@ -529,9 +953,88 @@ def map_columns_for_sheet(filepath, sheet_name, domains, sections, progress_cb=N
 # Main entry point: full two-pass mapping
 # ---------------------------------------------------------------------------
 
+def _detect_sections_lightweight(ws):
+    """Detect section boundaries in a worksheet using layout-only heuristics.
+
+    Returns a list of dicts: [{name: str, columns: [str, ...]}]
+    where 'name' is the section title text (or '__default__' for the first
+    flat-table region with no section header) and 'columns' are the column
+    headers found immediately after that section title.
+
+    Detection is 100% format-agnostic — no keywords. A section title row is
+    identified by:
+      - 1-2 non-empty cells in the row
+      - First cell text is predominantly uppercase (≥70% of alpha chars)
+      - Text length > 3 characters
+    """
+    max_row = ws.max_row or 0
+    max_col = ws.max_column or 0
+    sections = []
+    seen_section = False
+
+    def _get_columns_from_header_row(start_r):
+        """Scan rows starting at start_r to find a header row (≥3 cells)."""
+        for scan_r in range(start_r, min(start_r + 8, max_row + 1)):
+            cells = []
+            for c in range(1, max_col + 1):
+                v = ws.cell(scan_r, c).value
+                if v is not None:
+                    cells.append(str(v).strip())
+            if len(cells) >= 3:
+                return cells[:15]  # cap at 15 columns for prompt size
+        return []
+
+    r = 1
+    while r <= max_row:
+        # Count non-empty cells
+        cell_vals = []
+        for c in range(1, max_col + 1):
+            v = ws.cell(r, c).value
+            if v is not None:
+                cell_vals.append(str(v).strip())
+
+        if not cell_vals:
+            r += 1
+            continue
+
+        first_str = cell_vals[0]
+
+        # Check if this row is a section title: 1-2 cells, mostly uppercase
+        if len(cell_vals) <= 2 and len(first_str) > 3:
+            alpha_chars = [ch for ch in first_str if ch.isalpha()]
+            upper_ratio = (
+                sum(1 for ch in alpha_chars if ch.isupper()) / len(alpha_chars)
+                if alpha_chars else 0.0
+            )
+            if upper_ratio >= 0.70:
+                # This is a section title row
+                cols = _get_columns_from_header_row(r + 1)
+                sections.append({'name': first_str.strip(), 'columns': cols})
+                seen_section = True
+                r += 1
+                continue
+
+        # If no section header seen yet and this row has ≥3 cells, it's a
+        # flat header row → __default__ section
+        if not seen_section and len(cell_vals) >= 3:
+            sections.append({'name': '__default__', 'columns': cell_vals[:15]})
+            seen_section = True
+            # Skip past data rows to look for more sections
+            r += 1
+            continue
+
+        r += 1
+
+    return sections
+
+
 def map_workbook_columns(filepath, progress_cb=None):
     """
-    Full two-pass Gemini column mapping for a fund Excel file.
+    Full three-pass Gemini column mapping for a fund Excel file.
+
+    Pass 1:   Sheet classification → domain map
+    Pass 1.5: Section classification → sub-domain map (within multi-section sheets)
+    Pass 2:   Column mapping → canonical field names
 
     Args:
         filepath: Path to the .xlsx file
@@ -541,12 +1044,45 @@ def map_workbook_columns(filepath, progress_cb=None):
         {
             'sheet_classifications': [...],
             'column_mappings': {sheet_name: mapping_result},
+            'section_map': {sheet_name: {section_name: sub_domain}},
             'overall_confidence': float,
             'sheet_names': [...]
         }
     """
     # Pass 1: Classify sheets
     classifications, sheet_names = classify_sheets(filepath, progress_cb)
+
+    if not classifications:
+        logger.warning(
+            f'Gemini Pass 1 returned 0 classifications for {len(sheet_names)} sheets'
+        )
+
+    # Pass 1.5: Classify sections within multi-section sheets
+    section_map = {}
+    try:
+        wb = openpyxl.load_workbook(filepath, data_only=True)
+        sheet_section_data = {}
+        for cls in classifications:
+            sname = cls.get('sheet_name', '')
+            domains = cls.get('domains', [])
+            if not domains or domains == ['unknown']:
+                continue
+            if sname not in wb.sheetnames:
+                continue
+            ws = wb[sname]
+            detected = _detect_sections_lightweight(ws)
+            if detected:
+                sheet_section_data[sname] = detected
+
+        wb.close()
+
+        if sheet_section_data:
+            section_map = classify_sections(
+                classifications, sheet_section_data, progress_cb
+            )
+            logger.info(f'Gemini Pass 1.5 section_map: {section_map}')
+    except Exception as e:
+        logger.warning(f'Gemini Pass 1.5 section classification failed: {e}')
 
     if progress_cb:
         progress_cb(15, 'Mapping columns with AI...')
@@ -597,6 +1133,7 @@ def map_workbook_columns(filepath, progress_cb=None):
     return {
         'sheet_classifications': classifications,
         'column_mappings': column_mappings,
+        'section_map': section_map,
         'overall_confidence': round(avg_confidence, 2),
         'sheet_names': sheet_names,
     }

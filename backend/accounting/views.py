@@ -8,6 +8,7 @@ from rest_framework.response import Response
 from accounts.audit import log_audit
 from accounts.fund_access_helpers import get_accessible_fund_ids, user_has_fund_access
 from accounts.permissions import IsGPUser
+from config.cache_utils import cached_api_view, invalidate_fund_cache
 from funds.models import Scheme
 from .models import (
     ChartOfAccounts, NAVRecord, CarriedInterest,
@@ -26,6 +27,7 @@ from .serializers import (
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=900)
 def chart_of_accounts_list(request):
     org = request.organization
     if not org:
@@ -79,6 +81,7 @@ def chart_of_accounts_detail(request, account_id):
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def nav_record_list(request):
     org = request.organization
     if not org:
@@ -141,6 +144,7 @@ def nav_record_detail(request, nav_id):
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def carried_interest_list(request):
     org = request.organization
     if not org:
@@ -199,6 +203,7 @@ def carried_interest_detail(request, carry_id):
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=300)
 def fund_ledger_list(request):
     org = request.organization
     if not org:
@@ -252,6 +257,7 @@ def fund_ledger_detail(request, entry_id):
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def management_fee_list(request):
     org = request.organization
     if not org:
@@ -311,6 +317,7 @@ def management_fee_detail(request, fee_id):
 
 @api_view(['GET'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def financial_statements(request, scheme_id, stmt_type):
     """Compute financial statements from ledger entries.
 
@@ -639,6 +646,7 @@ def compute_fee(request, scheme_id):
 
 @api_view(['GET'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def trial_balance(request, scheme_id):
     """Return a trial balance for a scheme as of a given date.
 

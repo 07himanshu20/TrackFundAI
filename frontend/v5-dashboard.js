@@ -5,6 +5,9 @@
 ============================================================ */
 'use strict';
 
+/* ── Global helpers ─────────────────────────────────────────── */
+function showToast(msg, type) { if (typeof Toast !== 'undefined') Toast.show(msg, type); }
+
 /* ── Fund Context State ─────────────────────────────────────── */
 // _ctx is the single source of truth for current fund/period selection.
 // All loaders read _ctx.fundId and _ctx.schemeIds to filter API calls.
@@ -377,6 +380,19 @@ async function onContextChange(detail) {
     schemeIds:    [],
   };
 
+  // Persist fund context to localStorage + dispatch event so chatbot widget
+  // (and any other listener) always knows the currently selected fund.
+  localStorage.setItem('tfai_selected_fund_id', newFundId || '');
+  localStorage.setItem('tfai_selected_fund_name', _ctx.fundName);
+  document.dispatchEvent(new CustomEvent('tfai:context-change', {
+    detail: {
+      fundId:   newFundId,
+      fundName: _ctx.fundName,
+      period:   _ctx.period,
+    },
+    bubbles: true,
+  }));
+
   // Resolve scheme IDs for new fund
   if (newFundId) {
     _ctx.schemeIds = await resolveSchemeIds(newFundId);
@@ -567,9 +583,9 @@ async function loadOverview() {
       } catch (e) { /* silent — no IRR data available */ }
     }
 
-    // Update KPI cards
-    if ($('kv-cos'))  $('kv-cos').textContent  = totalCos || '—';
-    if ($('ks-cos'))  $('ks-cos').textContent  = `${active} Active · ${inactive} Inactive`;
+    // Update KPI cards — show ACTIVE portfolio count as primary (matches Excel Portfolio Investments sheet)
+    if ($('kv-cos'))  $('kv-cos').textContent  = active || '—';
+    if ($('ks-cos'))  $('ks-cos').textContent  = inactive > 0 ? `+ ${inactive} Exited` : 'Active portfolio';
     if ($('kt-cos'))  $('kt-cos').textContent  = totalCos > 0 ? `${active} active in this fund` : '—';
     if ($('kv-fv'))   $('kv-fv').textContent   = fmtCr(fvCr);
     if ($('ks-fv'))   $('ks-fv').textContent   = `vs Cost ${fmtCr(costCr)} Cr`;
@@ -583,11 +599,11 @@ async function loadOverview() {
 
     // Subtitle
     const sub = $('ov-subtitle');
-    if (sub) sub.textContent = `${totalCos} Portfolio Companies · ${_ctx.fundName} · All figures in ₹ Crore`;
+    if (sub) sub.textContent = `${active} Active Portfolio Companies` + (inactive > 0 ? ` · ${inactive} Exited` : '') + ` · ${_ctx.fundName} · All figures in ₹ Crore`;
 
     // Sidebar company count
     const sbCos = $('sb-cos');
-    if (sbCos) sbCos.textContent = totalCos;
+    if (sbCos) sbCos.textContent = active;
 
     // Alert strip — fetch real anomaly alerts, hide if none
     const alertEl  = $('alert-strip');
@@ -1171,31 +1187,33 @@ async function loadKPIs() {
   const tbody = $('kpi-trend-tbody');
   try {
     const qs = _ctx.fundId ? `?fund=${_ctx.fundId}` : '';
-    const data = await Auth.apiGet(`/portfolio/kpis/${qs}`);
-    const kpis = data.kpis || [];
+    const data = await Auth.apiGet(`/portfolio/kpi-matrix/${qs}`);
+    const companies = data.companies || [];
 
     if (!tbody) return;
-    if ($('kpis-count')) $('kpis-count').textContent = `(${kpis.length} records)`;
-    const fmtVal = (v, fmt) => {
-      if (v == null) return '—';
-      if (fmt === 'currency') return fmtCr(v);
-      if (fmt === 'percent')  return v.toFixed(2) + '%';
-      if (fmt === 'ratio')    return v.toFixed(2) + 'x';
-      return Number(v).toLocaleString('en-IN');
-    };
-    tbody.innerHTML = kpis.map((k, i) => `<tr data-search="${esc(((k.company_name||'')+' '+(k.kpi_name||'')).toLowerCase())}">
+    if ($('kpis-count')) $('kpis-count').textContent = `(${companies.length} companies)`;
+    const _p = v => v != null ? Number(v).toFixed(1) + '%' : '—';
+    const _n = v => v != null ? Number(v).toLocaleString('en-IN', {maximumFractionDigits: 2}) : '—';
+    tbody.innerHTML = companies.map((c, i) => `<tr data-search="${esc((c.company_name||'').toLowerCase())}">
       <td class="row-num td-center" style="color:var(--text3);font-size:12px">${i + 1}</td>
-      <td class="td-bold">${esc(k.company_name || '—')}</td>
-      <td>${esc(k.kpi_name || '—')}</td>
-      <td class="td-right">${fmtVal(k.value, k.format)}</td>
-      <td>${k.period || '—'}</td>
-      <td><span style="color:var(--text3);font-size:11px">${esc(k.format || '—')}</span></td>
-    </tr>`).join('') || '<tr><td colspan="6" class="table-empty">No KPI data imported yet. Upload a file with a Portfolio KPIs sheet.</td></tr>';
+      <td class="td-bold">${esc(c.company_name || '—')}</td>
+      <td class="td-right">${c.gmv != null ? fmtCr(c.gmv) : '—'}</td>
+      <td class="td-right">${c.revenue != null ? fmtCr(c.revenue) : '—'}</td>
+      <td class="td-right">${_p(c.gross_m)}</td>
+      <td class="td-right">${_p(c.ebitda)}</td>
+      <td class="td-right">${_n(c.orders)}</td>
+      <td class="td-right">${_n(c.aov)}</td>
+      <td class="td-right">${_p(c.returns)}</td>
+      <td class="td-right">${_n(c.cac)}</td>
+      <td class="td-right">${_p(c.repeat)}</td>
+      <td class="td-right">${c.cost != null ? fmtCr(c.cost) : '—'}</td>
+      <td class="td-right">${c.fv != null ? fmtCr(c.fv) : '—'}</td>
+    </tr>`).join('') || '<tr><td colspan="13" class="table-empty">No KPI data imported yet. Upload a file with a Portfolio KPIs sheet.</td></tr>';
   } catch(e) {
-    if (tbody) tbody.innerHTML = '<tr><td colspan="6" class="table-empty">No KPI data.</td></tr>';
+    if (tbody) tbody.innerHTML = '<tr><td colspan="13" class="table-empty">No KPI data.</td></tr>';
   }
 }
-function filterKPIs() { _filterTableRows('kpi-trend-tbody','kpis-search',null,null,'kpis-count','records'); }
+function filterKPIs() { _filterTableRows('kpi-trend-tbody','kpis-search',null,null,'kpis-count','companies'); }
 
 async function loadSaasMetrics() {
   const tbody = $('saas-tbody');
@@ -1470,46 +1488,33 @@ async function loadPortfolioKPITracking() {
   const tbody = $('kpi-track-tbody');
   if (!tbody) return;
   try {
-    const statusFilter = $('kpi-track-status-filter') ? $('kpi-track-status-filter').value : '';
-    let url = '/portfolio/kpi-tracking/';
-    const params = [];
-    if (_ctx.fundId) params.push(`fund=${_ctx.fundId}`);
-    if (statusFilter) params.push(`status=${statusFilter}`);
-    if (params.length) url += '?' + params.join('&');
+    const qs = _ctx.fundId ? `?fund=${_ctx.fundId}` : '';
+    const data = await Auth.apiGet(`/portfolio/kpi-matrix/${qs}`);
+    const companies = data.companies || [];
 
-    const data = await Auth.apiGet(url);
-    const rows = data.kpis || [];
-
-    if ($('kpi-track-count')) $('kpi-track-count').textContent = `(${rows.length} records)`;
-    const statusColor = { draft: 'var(--text3)', submitted: '#f59e0b', approved: '#22c55e', rejected: '#ef4444' };
-    tbody.innerHTML = rows.map((k, i) => {
-      let valStr = '—';
-      const val = k.value;
-      if (val != null) {
-        if (k.format === 'currency') valStr = fmtCr(val);
-        else if (k.format === 'percent') valStr = val.toFixed(2) + '%';
-        else if (k.format === 'ratio') valStr = val.toFixed(2) + 'x';
-        else valStr = val.toLocaleString('en-IN');
-      }
-      const color = statusColor[k.status] || 'var(--text3)';
-      return `<tr data-search="${esc(((k.company_name||'')+' '+(k.kpi_name||'')).toLowerCase())}">
-        <td class="row-num td-center" style="color:var(--text3);font-size:12px">${i + 1}</td>
-        <td class="td-bold">${esc(k.company_name)}</td>
-        <td>${esc(k.kpi_name)}</td>
-        <td style="font-size:12px">${k.period ? k.period.slice(0,7) : '—'}</td>
-        <td class="td-right">${esc(valStr)}</td>
-        <td style="font-size:11px;color:var(--text3)">${esc(k.format)}</td>
-        <td class="td-center"><span style="font-size:11px;font-weight:600;color:${color}">${esc(k.status)}</span></td>
-        <td style="font-size:12px;color:var(--text3)">${esc(k.submitted_by || '—')}</td>
-        <td style="font-size:11px;color:var(--text3)">${k.submitted_at ? k.submitted_at.slice(0,10) : '—'}</td>
-        <td style="font-size:12px;color:var(--text3)">${esc(k.reviewed_by || '—')}</td>
-      </tr>`;
-    }).join('') || '<tr><td colspan="10" class="table-empty">No KPI submissions found.</td></tr>';
+    if ($('kpi-track-count')) $('kpi-track-count').textContent = `(${companies.length} companies)`;
+    const _p = v => v != null ? Number(v).toFixed(1) + '%' : '—';
+    const _n = v => v != null ? Number(v).toLocaleString('en-IN', {maximumFractionDigits: 2}) : '—';
+    tbody.innerHTML = companies.map((c, i) => `<tr data-search="${esc((c.company_name||'').toLowerCase())}">
+      <td class="row-num td-center" style="color:var(--text3);font-size:12px">${i + 1}</td>
+      <td class="td-bold">${esc(c.company_name || '—')}</td>
+      <td class="td-right">${c.gmv != null ? fmtCr(c.gmv) : '—'}</td>
+      <td class="td-right">${c.revenue != null ? fmtCr(c.revenue) : '—'}</td>
+      <td class="td-right">${_p(c.gross_m)}</td>
+      <td class="td-right">${_p(c.ebitda)}</td>
+      <td class="td-right">${_n(c.orders)}</td>
+      <td class="td-right">${_n(c.aov)}</td>
+      <td class="td-right">${_p(c.returns)}</td>
+      <td class="td-right">${_n(c.cac)}</td>
+      <td class="td-right">${_p(c.repeat)}</td>
+      <td class="td-right">${c.cost != null ? fmtCr(c.cost) : '—'}</td>
+      <td class="td-right">${c.fv != null ? fmtCr(c.fv) : '—'}</td>
+    </tr>`).join('') || '<tr><td colspan="13" class="table-empty">No KPI data found. Upload a fund Excel file to extract KPI metrics.</td></tr>';
   } catch(e) {
-    if (tbody) tbody.innerHTML = '<tr><td colspan="10" class="table-empty">No data.</td></tr>';
+    if (tbody) tbody.innerHTML = '<tr><td colspan="13" class="table-empty">No data.</td></tr>';
   }
 }
-function filterKPITracking() { _filterTableRows('kpi-track-tbody','kpi-track-search',null,null,'kpi-track-count','records'); }
+function filterKPITracking() { _filterTableRows('kpi-track-tbody','kpi-track-search',null,null,'kpi-track-count','companies'); }
 
 /* ── Portfolio: Exit Scenarios ─────────────────────────────── */
 async function loadPortfolioExitScenarios() {
@@ -2677,9 +2682,14 @@ async function loadFinancials() {
   const tbody = $('fin-pl-tbody');
   if (!tbody) return;
   try {
+    // Guard: always scope to selected fund to avoid loading cross-fund BvA data
+    if (!_ctx.fundId) {
+      tbody.innerHTML = '<tr><td colspan="7" class="table-empty">Select a fund to view financials.</td></tr>';
+      if ($('fin-pl-count')) $('fin-pl-count').textContent = '';
+      return;
+    }
     // Fetch BvA records and pivot to per-company P&L (latest period per company)
-    let plUrl = '/mis/bva/';
-    if (_ctx.fundId) plUrl += `?fund=${_ctx.fundId}`;
+    const plUrl = `/mis/bva/?fund=${_ctx.fundId}`;
     const data = await Auth.apiGet(plUrl);
     let arr  = data.results || data || [];
 
@@ -3732,7 +3742,8 @@ async function loadAIInsights() {
 
 async function loadMISReports() {
   try {
-    const data = await Auth.apiGet('/mis/submission-status/');
+    const fundParam = _ctx.fundId ? `?fund=${_ctx.fundId}` : '';
+    const data = await Auth.apiGet(`/mis/submission-status/${fundParam}`);
     const arr  = Array.isArray(data) ? data : (data.results || []);
     const tbody = $('mis-status-tbody');
     if (!tbody) return;
@@ -3749,10 +3760,11 @@ async function loadMISReports() {
       <td class="td-center">${tick(co.has_bva)}</td>
       <td style="font-size:10px;color:var(--text3)">${co.last_updated || '—'}</td>
       <td class="td-center"><span class="v5-status ${co.status === 'active' ? 'active' : 'pending'}">${esc(co.status || 'pending')}</span></td>
-    </tr>`).join('') || '<tr><td colspan="7" class="table-empty">No companies found. Import fund data first.</td></tr>';
+    </tr>`).join('') || '<tr><td colspan="7" class="table-empty">No companies found for this fund. Import a fund Excel file with P&L / Balance Sheet / Cash Flow / Budget vs Actual sheets.</td></tr>';
   } catch(e) {
+    console.error('MIS Submission Status error:', e);
     const tb = $('mis-status-tbody');
-    if (tb) tb.innerHTML = '<tr><td colspan="7" class="table-empty">No MIS data available.</td></tr>';
+    if (tb) tb.innerHTML = '<tr><td colspan="7" class="table-empty">Failed to load MIS data. Check server connection.</td></tr>';
   }
 }
 
@@ -3793,6 +3805,11 @@ function _showReportModal(report) {
   const highlightsHtml = (report.highlights || []).map(h => `<li style="margin-bottom:4px;font-size:11px">${esc(h)}</li>`).join('');
   const flagsHtml = (report.risk_flags || []).map(f => `<div class="v5-insight-card red" style="margin-bottom:6px;font-size:11px">${esc(f)}</div>`).join('');
 
+  // PDF download button
+  const pdfBtnHtml = report.report_id
+    ? `<button class="v5-btn v5-btn-ghost" style="font-size:11px;padding:6px 14px;margin-right:8px;background:rgba(5,150,105,0.1);color:#059669;border-color:#059669" onclick="window.open('/api/download-report/${esc(report.report_id)}/','_blank')">&#128229; Download PDF</button>`
+    : '';
+
   const overlay = document.createElement('div');
   overlay.id = 'report-modal-overlay';
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
@@ -3800,12 +3817,155 @@ function _showReportModal(report) {
     <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;max-width:760px;width:100%;max-height:85vh;overflow-y:auto;padding:28px;position:relative">
       <button onclick="document.getElementById('report-modal-overlay').remove()" style="position:absolute;top:16px;right:16px;background:none;border:none;color:var(--text3);font-size:18px;cursor:pointer">&#10005;</button>
       <div style="font-size:16px;font-weight:700;color:var(--text);margin-bottom:4px">${esc(report.title || 'Report')}</div>
-      <div style="font-size:10px;color:var(--text3);margin-bottom:16px">${esc(report.period || '')} &nbsp;·&nbsp; Generated ${new Date(report.generated_at || Date.now()).toLocaleString('en-IN')}</div>
+      <div style="font-size:10px;color:var(--text3);margin-bottom:12px">${esc(report.period || '')} &nbsp;·&nbsp; Generated ${new Date(report.generated_at || Date.now()).toLocaleString('en-IN')} &nbsp;·&nbsp; CONFIDENTIAL</div>
+      <div style="margin-bottom:16px">${pdfBtnHtml}</div>
       ${report.summary ? `<div class="v5-insight-card blue" style="margin-bottom:16px;font-size:12px">${esc(report.summary)}</div>` : ''}
       ${flagsHtml ? `<div style="margin-bottom:16px">${flagsHtml}</div>` : ''}
       ${sectionsHtml}
       ${highlightsHtml ? `<div style="margin-top:16px"><div style="font-size:12px;font-weight:600;margin-bottom:8px">Key Highlights</div><ul style="padding-left:16px">${highlightsHtml}</ul></div>` : ''}
     </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+}
+
+// ── Comprehensive MIS Report ───────────────────────────────────────────
+async function generateComprehensiveMIS() {
+  const btn = document.getElementById('gen-mis-report-btn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '&#9203; Generating Report…'; }
+
+  try {
+    if (!_ctx.fundId) {
+      showToast('Please select a fund first.', 'error');
+      return;
+    }
+
+    const result = await Auth.apiPost('/generate-comprehensive-mis/', {
+      fund_id: _ctx.fundId
+    });
+
+    _showComprehensiveMISModal(result);
+  } catch(e) {
+    showToast('MIS Report generation failed: ' + (e.message || e), 'error');
+    console.error('Comprehensive MIS error:', e);
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '&#128196; Generate MIS Report'; }
+  }
+}
+
+async function _downloadMISPdf(reportId, fileName) {
+  try {
+    const blob = await Auth.apiGetBlob(`/download-report/${reportId}/`);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName || 'Comprehensive_MIS_Report.pdf';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    showToast('PDF downloaded successfully!', 'success');
+  } catch(e) {
+    showToast('PDF download failed: ' + (e.message || e), 'error');
+  }
+}
+
+function _renderMISTable(headers, rows) {
+  if (!rows || !rows.length) return '<div style="padding:12px;font-size:11px;color:var(--text3)">No data available.</div>';
+  const thHtml = headers.map(h => `<th style="padding:8px 10px;font-size:10px;font-weight:700;color:#fff;background:#003366;text-align:left;border:1px solid #1a4d80">${esc(h)}</th>`).join('');
+  const trHtml = rows.map((row, idx) => {
+    const bg = idx % 2 === 0 ? 'rgba(255,255,255,0.02)' : 'rgba(99,102,241,0.03)';
+    const tds = row.map(cell => `<td style="padding:6px 10px;font-size:10px;color:var(--text);border:1px solid var(--border-soft,rgba(255,255,255,0.06))">${esc(cell)}</td>`).join('');
+    return `<tr style="background:${bg}">${tds}</tr>`;
+  }).join('');
+  return `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;margin:6px 0"><thead><tr>${thHtml}</tr></thead><tbody>${trHtml}</tbody></table></div>`;
+}
+
+function _renderSection(sec) {
+  const type = sec.type || 'kv';
+  let bodyHtml = '';
+
+  if (type === 'kv_and_text') {
+    // Executive summary text + KV rows
+    if (sec.text) bodyHtml += `<div style="padding:10px 14px;font-size:11px;color:var(--text);line-height:1.7;border-bottom:1px solid var(--border-soft,rgba(255,255,255,0.06))">${esc(sec.text)}</div>`;
+    bodyHtml += (sec.rows || []).map(row => `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 14px;border-bottom:1px solid var(--border-soft,rgba(255,255,255,0.06))">
+        <span style="font-size:10px;color:var(--text3)">${esc(row.label)}</span>
+        <span style="font-size:11px;font-weight:600;color:var(--text)">${esc(row.value)}</span>
+      </div>`).join('');
+  } else if (type === 'table') {
+    bodyHtml += _renderMISTable(sec.headers || [], sec.table_rows || []);
+  } else if (type === 'multi_table') {
+    const subs = sec.sub_sections || [];
+    if (!subs.length) {
+      bodyHtml += '<div style="padding:12px;font-size:11px;color:var(--text3)">No data available.</div>';
+    }
+    for (const sub of subs) {
+      bodyHtml += `<div style="padding:8px 14px 2px;font-size:11px;font-weight:700;color:var(--accent,#6366f1)">${esc(sub.sub_heading)}</div>`;
+      bodyHtml += _renderMISTable(sub.headers || [], sub.table_rows || []);
+    }
+  }
+
+  // Summary line
+  if (sec.summary) {
+    bodyHtml += `<div style="padding:8px 14px;font-size:10px;font-weight:600;color:var(--accent,#6366f1);border-top:1px solid var(--border-soft,rgba(255,255,255,0.06));background:rgba(99,102,241,0.04)">${esc(sec.summary)}</div>`;
+  }
+
+  return `
+    <div style="margin-bottom:24px;background:var(--card-inner,rgba(255,255,255,0.03));border:1px solid var(--border);border-radius:10px;overflow:hidden">
+      <div style="font-size:13px;font-weight:700;color:var(--text);padding:12px 14px;border-bottom:1px solid var(--border);background:rgba(99,102,241,0.06)">${esc(sec.heading)}</div>
+      ${bodyHtml}
+    </div>`;
+}
+
+function _showComprehensiveMISModal(report) {
+  const existing = document.getElementById('comprehensive-mis-overlay');
+  if (existing) existing.remove();
+
+  const sections = report.sections || [];
+  const sectionsHtml = sections.map(sec => _renderSection(sec)).join('');
+
+  const reportId = report.report_id || '';
+  const fileName = `Comprehensive_MIS_Report_${_ctx.fundName || 'Fund'}.pdf`;
+  const pdfBtnHtml = reportId
+    ? `<button class="v5-btn v5-btn-primary" style="font-size:12px;padding:8px 18px;background:linear-gradient(135deg,#059669,#10b981)" onclick="_downloadMISPdf('${esc(reportId)}','${esc(fileName)}')">&#128229; Download PDF (${report.total_pages || '25+'} pages)</button>`
+    : '';
+
+  const overlay = document.createElement('div');
+  overlay.id = 'comprehensive-mis-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.8);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
+  overlay.innerHTML = `
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:14px;max-width:1100px;width:100%;max-height:92vh;overflow-y:auto;padding:32px;position:relative">
+      <button onclick="document.getElementById('comprehensive-mis-overlay').remove()" style="position:absolute;top:16px;right:16px;background:none;border:none;color:var(--text3);font-size:20px;cursor:pointer;z-index:1">&#10005;</button>
+
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">
+        <div style="font-size:28px">&#128196;</div>
+        <div>
+          <div style="font-size:18px;font-weight:700;color:var(--text)">${esc(report.title || 'Comprehensive MIS Report')}</div>
+          <div style="font-size:10px;color:var(--text3)">Generated ${new Date(report.generated_at || Date.now()).toLocaleString('en-IN')} &nbsp;·&nbsp; ${report.total_pages || '25+'} pages &nbsp;·&nbsp; CONFIDENTIAL</div>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:10px;margin:16px 0 20px;position:sticky;top:0;z-index:2;background:var(--card);padding:8px 0">
+        ${pdfBtnHtml}
+        <button class="v5-btn v5-btn-ghost" style="font-size:12px;padding:8px 18px" onclick="document.getElementById('comprehensive-mis-overlay').remove()">Close</button>
+      </div>
+
+      <div style="border-top:1px solid var(--border);padding-top:16px">
+        ${sectionsHtml}
+      </div>
+
+      <div style="margin-top:24px;padding:16px;border-top:1px solid var(--border);border-radius:8px;background:rgba(0,51,102,0.06)">
+        <div style="font-size:10px;color:var(--text3);line-height:1.7">
+          <strong>DISCLAIMER:</strong> This report has been generated automatically by TrackFundAI based on
+          fund data uploaded by the fund manager. All financial figures are as reported in the uploaded MIS files
+          and have not been independently audited. Valuations are based on IPEV guidelines. Past performance is
+          not indicative of future results. This report is classified as <strong>CONFIDENTIAL</strong> and is
+          intended solely for authorised fund managers, Limited Partners (LPs), and their designated advisors.
+          All amounts in Indian Rupees (INR), expressed in Crores (Cr) unless otherwise stated.
+        </div>
+      </div>
+    </div>`;
+
   document.body.appendChild(overlay);
   overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
 }
@@ -4230,7 +4390,10 @@ async function sendAIChat(text) {
     const token  = Auth.getToken();
     const apiBase = (window.location.port === '8000' || !window.location.port) ? '' : 'http://127.0.0.1:8000';
     const payload = { query: q };
-    if (_ctx.fundId) payload.fund_id = _ctx.fundId;
+    if (_ctx.fundId) {
+      payload.fund_id = _ctx.fundId;
+      if (_ctx.fundName) payload.fund_name = _ctx.fundName;
+    }
     const res    = await fetch(`${apiBase}/api/chatbot/query/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },

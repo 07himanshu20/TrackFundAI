@@ -9,6 +9,7 @@ from rest_framework.response import Response
 from accounts.audit import log_audit
 from accounts.fund_access_helpers import get_accessible_fund_ids, user_has_fund_access
 from accounts.permissions import IsGPUser
+from config.cache_utils import cached_api_view, invalidate_fund_cache
 from notifications.helpers import notify_user
 from .models import (
     BankAccount, Investor, Commitment, CapitalCall,
@@ -31,6 +32,7 @@ from .serializers import (
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def investor_list(request):
     org = request.organization
     if not org:
@@ -146,6 +148,7 @@ def bank_account_detail(request, account_id):
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def commitment_list(request):
     org = request.organization
     if not org:
@@ -214,6 +217,7 @@ def commitment_detail(request, commitment_id):
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=300)
 def capital_call_list(request):
     org = request.organization
     if not org:
@@ -308,6 +312,7 @@ def capital_call_line_item_list(request, call_id):
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=300)
 def distribution_list(request):
     org = request.organization
     if not org:
@@ -402,6 +407,7 @@ def distribution_line_item_list(request, distribution_id):
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def lp_capital_account_list(request):
     org = request.organization
     if not org:
@@ -890,6 +896,7 @@ def allot_units(request, scheme_id):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
+@cached_api_view(timeout=600)
 def lp_dashboard(request):
     """
     LP portal dashboard — returns the logged-in LP's capital account summary

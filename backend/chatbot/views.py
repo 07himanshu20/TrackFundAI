@@ -32,11 +32,15 @@ def chat_query(request):
     company = None
     fund_id = request.data.get('fund_id')
     company_id = request.data.get('company_id')
+    fund_name_override = request.data.get('fund_name')
 
     if fund_id:
         try:
             from funds.models import Fund
-            fund = Fund.objects.get(pk=fund_id, organization=org)
+            fund = Fund.objects.select_related(
+                'fund_category', 'manager_entity', 'trustee_entity',
+                'custodian_entity', 'auditor_entity', 'sponsor_entity',
+            ).get(pk=fund_id, organization=org)
         except Exception:
             pass
 
@@ -48,7 +52,10 @@ def chat_query(request):
             pass
 
     handler = ChatbotHandler(organization=org, user=request.user)
-    result = handler.handle(query, fund=fund, company=company)
+    result = handler.handle(
+        query, fund=fund, company=company,
+        fund_name_override=fund_name_override,
+    )
 
     return Response(result)
 

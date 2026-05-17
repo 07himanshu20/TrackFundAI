@@ -292,11 +292,12 @@
     <div class="chat-messages" id="chat-messages"></div>
 
     <div class="chat-suggestions" id="chat-suggestions">
+      <div class="suggestion-chip">Which fund is selected?</div>
+      <div class="suggestion-chip">Fund SEBI registration</div>
       <div class="suggestion-chip">Portfolio summary</div>
+      <div class="suggestion-chip">Total corpus &amp; NAV</div>
+      <div class="suggestion-chip">Top companies by FV</div>
       <div class="suggestion-chip">Compliance status</div>
-      <div class="suggestion-chip">Fund performance</div>
-      <div class="suggestion-chip">Latest NAV</div>
-      <div class="suggestion-chip">Top risks</div>
     </div>
 
     <div class="chat-input-area">
@@ -318,6 +319,45 @@
   let isOpen = false;
   let isLoading = false;
   let historyLoaded = false;
+
+  // Track currently selected fund — captured from tfai:context-change event
+  // fired by fund-selector.js every time the user changes the fund dropdown.
+  let _activeFundId   = null;
+  let _activeFundName = null;
+
+  // Listen for fund context changes (most reliable source of truth)
+  document.addEventListener('tfai:context-change', (e) => {
+    const d = e.detail || {};
+    _activeFundId   = d.fundId || null;
+    _activeFundName = (d.fundName && d.fundName !== 'All Funds') ? d.fundName : null;
+  });
+
+  // Also try to bootstrap from DOM/localStorage on load (in case event already fired)
+  setTimeout(() => {
+    if (!_activeFundId) {
+      // Try FundSelector's dropdown (other pages)
+      const sel = document.getElementById('tfai-fund-select');
+      if (sel && sel.value) {
+        _activeFundId   = sel.value;
+        _activeFundName = sel.options[sel.selectedIndex]?.text || null;
+      }
+    }
+    if (!_activeFundId) {
+      // Try the main dashboard's legacy dropdown (index.html uses id="fund-selector-nav")
+      const navSel = document.getElementById('fund-selector-nav');
+      if (navSel && navSel.value) {
+        _activeFundId   = navSel.value;
+        _activeFundName = navSel.options[navSel.selectedIndex]?.text || null;
+      }
+    }
+    if (!_activeFundId) {
+      _activeFundId   = localStorage.getItem('tfai_selected_fund_id') || null;
+      _activeFundName = localStorage.getItem('tfai_selected_fund_name') || null;
+    }
+    if (_activeFundId) {
+      console.log('[TFAI Chatbot] Bootstrap fund context:', _activeFundId, _activeFundName);
+    }
+  }, 2000); // Wait for fund-selector to mount and v5-dashboard to initialize
 
   /* ── Toggle panel ─────────────────────────────────────────── */
   btn.addEventListener('click', () => {
@@ -486,8 +526,26 @@
     appendTyping();
 
     const payload = { query };
-    const fundId = localStorage.getItem('tfai_active_fund');
-    if (fundId) payload.fund_id = fundId;
+    // Use the fund context captured from tfai:context-change event (primary)
+    // or fall back to DOM / localStorage if event hasn't fired yet
+    let fundId = _activeFundId;
+    let fundName = _activeFundName;
+    if (!fundId) {
+      const sel = document.getElementById('tfai-fund-select');
+      if (sel && sel.value) {
+        fundId = sel.value;
+        fundName = sel.options[sel.selectedIndex]?.text || null;
+      }
+    }
+    if (!fundId) {
+      fundId = localStorage.getItem('tfai_selected_fund_id') || null;
+      fundName = localStorage.getItem('tfai_selected_fund_name') || null;
+    }
+    if (fundId) {
+      payload.fund_id = fundId;
+      if (fundName) payload.fund_name = fundName;
+    }
+    console.log('[TFAI Chatbot] Fund context:', { fundId, fundName });
 
     try {
       const res = await fetch(`${API}/chatbot/query/`, {

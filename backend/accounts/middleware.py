@@ -38,3 +38,42 @@ class _OrgDescriptor:
 
 
 _SENTINEL = object()
+
+
+class CacheInvalidationMiddleware:
+    """Auto-clear Redis cache when any write operation succeeds.
+
+    After a POST/PUT/PATCH/DELETE returns 2xx, this middleware invalidates
+    the org-level API cache so subsequent GET requests fetch fresh data.
+
+    Fund-specific invalidation happens in the import service (more targeted).
+    This middleware provides a safety net for all other write endpoints.
+    """
+
+    # Paths that don't modify fund data — skip invalidation for these
+    _SKIP_PATHS = {
+        '/api/auth/',
+        '/api/chatbot/',
+        '/api/notifications/',
+    }
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+
+        # Only invalidate on successful write operations
+        if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
+            if 200 <= response.status_code < 300:
+                path = request.path
+                if not any(path.startswith(skip) for skip in self._SKIP_PATHS):
+                    org = getattr(request, '_cached_organization', None)
+                    if org:
+                        try:
+                            from config.cache_utils import invalidate_org_cache
+                            invalidate_org_cache(org.id)
+                        except Exception:
+                            pass  # Cache invalidation is best-effort
+
+        return response
