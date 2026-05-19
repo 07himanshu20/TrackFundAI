@@ -65,7 +65,10 @@ def _call_gemini(prompt, context_label=''):
 
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
-            response = model.generate_content(prompt)
+            response = model.generate_content(
+                prompt,
+                request_options={'timeout': 60},
+            )
 
             # Check for empty/blocked responses
             if not response.text:
@@ -215,6 +218,332 @@ def _build_cross_sheet_value_cache(filepath):
             pass
 
     return cache
+
+
+# ---------------------------------------------------------------------------
+# Pass 3: Semantic Value Interpretation functions
+# These replace ALL hardcoded keyword dictionaries in import_service.py.
+# ---------------------------------------------------------------------------
+
+_classification_cache = {}
+
+
+def clear_classification_cache():
+    """Clear the module-level classification cache.
+
+    Call at the start of each import to prevent stale classifications
+    from a previous import session.
+    """
+    _classification_cache.clear()
+
+
+def classify_labels(labels, category_key, canonical_options, context=''):
+    """Classify a batch of text labels into canonical categories via Gemini.
+
+    Works for ANY language — German, Japanese, French, Hindi, Arabic, etc.
+    Uses the canonical_options descriptions for semantic matching.
+
+    Args:
+        labels: list of unique text labels to classify
+        category_key: string key for caching (e.g., 'pl_line_items')
+        canonical_options: dict {canonical_key: description}
+        context: optional domain context string for the prompt
+
+    Returns:
+        dict {original_label: canonical_key_or_None}
+    """
+    if not labels:
+        return {}
+
+    unique_labels = list(set(l for l in labels if l and str(l).strip()))
+    if not unique_labels:
+        return {}
+
+    cache_key = ('classify', category_key, frozenset(unique_labels))
+    if cache_key in _classification_cache:
+        return _classification_cache[cache_key]
+
+    options_text = '\n'.join(
+        f'  "{k}": {v}' for k, v in canonical_options.items()
+    )
+    labels_text = '\n'.join(f'  - "{l}"' for l in unique_labels)
+    context_line = f'\nDOMAIN CONTEXT: {context}\n' if context else ''
+
+    prompt = f"""You are a financial data classifier for an Alternative Investment Fund (AIF) Excel file.
+You have 20+ years of experience in fund accounting, LP/GP economics, and financial reporting.
+
+TASK: Classify each label below into exactly one canonical category.
+{context_line}
+CANONICAL CATEGORIES (pick the BEST match for each label):
+{options_text}
+
+LABELS TO CLASSIFY:
+{labels_text}
+
+RULES:
+1. Match SEMANTICALLY, not syntactically. Handle ANY language — German, Japanese, French, Hindi, Arabic, Indonesian, etc.
+2. Ignore units/suffixes in brackets: (Cr), (Lakhs), ($M), (₹), (Mn), (Rs), (in '000s)
+3. Ignore trailing %, #, or special characters when matching
+4. If a label clearly does not match ANY category, return null for it
+5. Be case-insensitive. "EBITDA" = "ebitda" = "Ebitda"
+6. Handle abbreviations: "Rev" = Revenue, "D&A" = Depreciation & Amortisation, "GP" = Gross Profit
+7. Handle partial matches: "Emp Cost" = Employee Cost, "Mktg" = Marketing
+
+Return a JSON object mapping each label to its canonical key (or null):
+{{"label_text": "canonical_key", "other_label": null, ...}}"""
+
+    try:
+        result = _call_gemini(prompt, context_label=f'Pass3-classify-{category_key}')
+
+        valid_keys = set(canonical_options.keys())
+        normalized = {}
+        for label in unique_labels:
+            key = result.get(label)
+            if key and key in valid_keys:
+                normalized[label] = key
+            else:
+                normalized[label] = None
+
+        _classification_cache[cache_key] = normalized
+        logger.info(
+            f'[GEMINI Pass3] classify_labels({category_key}): '
+            f'{len(unique_labels)} labels → '
+            f'{sum(1 for v in normalized.values() if v)} classified'
+        )
+        return normalized
+
+    except Exception as e:
+        logger.warning(f'Gemini classify_labels failed for {category_key}: {e}')
+        return {l: None for l in unique_labels}
+
+
+def classify_enum_values(values, enum_key, enum_options, context=''):
+    """Classify text values into a closed set of enum choices via Gemini.
+
+    Unlike classify_labels, this ALWAYS returns a valid enum value (never null).
+    Every value MUST map to the closest matching option.
+
+    Args:
+        values: list of unique text values to classify
+        enum_key: string key for caching (e.g., 'exit_type')
+        enum_options: dict {enum_value: description}
+        context: optional domain context
+
+    Returns:
+        dict {original_value: enum_key}
+    """
+    if not values:
+        return {}
+
+    unique_values = list(set(v for v in values if v and str(v).strip()))
+    if not unique_values:
+        return {}
+
+    cache_key = ('enum', enum_key, frozenset(unique_values))
+    if cache_key in _classification_cache:
+        return _classification_cache[cache_key]
+
+    options_text = '\n'.join(
+        f'  "{k}": {v}' for k, v in enum_options.items()
+    )
+    values_text = '\n'.join(f'  - "{v}"' for v in unique_values)
+    context_line = f'\nDOMAIN CONTEXT: {context}\n' if context else ''
+
+    prompt = f"""You are a financial data classifier for an Alternative Investment Fund (AIF) Excel file.
+
+TASK: Classify each value below into exactly one of the allowed enum options.
+{context_line}
+ALLOWED OPTIONS (you MUST pick one for each value — never return null):
+{options_text}
+
+VALUES TO CLASSIFY:
+{values_text}
+
+RULES:
+1. Every value MUST map to one of the listed options. Never return null.
+2. If unsure, pick the CLOSEST matching option.
+3. Match SEMANTICALLY across ANY language — German, Japanese, French, Hindi, etc.
+4. Be case-insensitive.
+5. Handle abbreviations and partial matches.
+
+Return a JSON object mapping each value to its enum key:
+{{"value_text": "enum_key", ...}}"""
+
+    try:
+        result = _call_gemini(prompt, context_label=f'Pass3-enum-{enum_key}')
+
+        valid_keys = set(enum_options.keys())
+        default_key = list(enum_options.keys())[0]
+        normalized = {}
+        for value in unique_values:
+            key = result.get(value)
+            if key and key in valid_keys:
+                normalized[value] = key
+            else:
+                normalized[value] = default_key
+
+        _classification_cache[cache_key] = normalized
+        logger.info(
+            f'[GEMINI Pass3] classify_enum({enum_key}): '
+            f'{len(unique_values)} values classified'
+        )
+        return normalized
+
+    except Exception as e:
+        logger.warning(f'Gemini classify_enum failed for {enum_key}: {e}')
+        default_key = list(enum_options.keys())[0]
+        return {v: default_key for v in unique_values}
+
+
+def extract_structured_metadata(label_value_pairs, field_definitions, context=''):
+    """Extract structured metadata from label-value pairs via Gemini.
+
+    Replaces LIFECYCLE_PATTERNS and fund metadata extraction.
+    Works for ANY language.
+
+    Args:
+        label_value_pairs: list of (label_str, value_str) tuples
+        field_definitions: dict {field_name: {desc: str, type: str}}
+        context: optional domain context
+
+    Returns:
+        dict {field_name: raw_value_string}
+    """
+    if not label_value_pairs:
+        return {}
+
+    # Accept both dict and list-of-tuples
+    if isinstance(label_value_pairs, dict):
+        label_value_pairs = list(label_value_pairs.items())
+
+    filtered = [(l, v) for l, v in label_value_pairs
+                 if l and str(l).strip() and v is not None and str(v).strip()]
+    if not filtered:
+        return {}
+
+    cache_key = ('metadata', context, frozenset((l, str(v)) for l, v in filtered))
+    if cache_key in _classification_cache:
+        return _classification_cache[cache_key]
+
+    fields_text = '\n'.join(
+        f'  "{k}": {fd["desc"]} (type: {fd["type"]})'
+        for k, fd in field_definitions.items()
+    )
+    pairs_text = '\n'.join(
+        f'  "{l}" → "{v}"' for l, v in filtered[:100]
+    )
+    context_line = f'\nDOMAIN CONTEXT: {context}\n' if context else ''
+
+    prompt = f"""You are a financial data extractor for an Alternative Investment Fund (AIF) Excel file.
+You have deep knowledge of fund structures, SEBI regulations, and fund accounting.
+
+TASK: Extract structured metadata from these key-value pairs found in Excel cells.
+{context_line}
+TARGET FIELDS (extract into these canonical fields):
+{fields_text}
+
+LABEL-VALUE PAIRS FROM EXCEL:
+{pairs_text}
+
+RULES:
+1. Match labels SEMANTICALLY — handle ANY language (German, Japanese, French, Hindi, etc.)
+2. Return the raw value text as-is from the Excel cell — do NOT convert units or parse dates
+3. For enum-type fields (carry_type, fee_basis, structure_type), return the canonical value:
+   - carry_type: "european" or "american"
+   - fee_basis: "committed", "called", or "nav"
+   - structure_type: "trust", "llp", or "company"
+4. For bool-type fields (is_gift_city), return "true" or "false"
+5. Skip pairs that do not match any target field
+6. If multiple pairs match the same field, use the most specific/detailed one
+
+Return a JSON object with only the matched fields:
+{{"field_name": "raw_value_from_excel", ...}}"""
+
+    try:
+        result = _call_gemini(prompt, context_label=f'Pass3-metadata-{context}')
+
+        valid_fields = set(field_definitions.keys())
+        cleaned = {k: str(v) for k, v in result.items()
+                   if k in valid_fields and v is not None and str(v).strip()}
+
+        _classification_cache[cache_key] = cleaned
+        logger.info(
+            f'[GEMINI Pass3] extract_metadata({context}): '
+            f'{len(filtered)} pairs → {len(cleaned)} fields extracted'
+        )
+        return cleaned
+
+    except Exception as e:
+        logger.warning(f'Gemini metadata extraction failed ({context}): {e}')
+        return {}
+
+
+def detect_currency_and_unit(headers, sample_values=None, sheet_name=''):
+    """Detect currency and numeric unit from sheet context via Gemini.
+
+    Args:
+        headers: list of column header strings
+        sample_values: optional list of sample numeric value strings
+        sheet_name: sheet name for context
+
+    Returns:
+        dict {currency: 'INR', unit_multiplier: 10000000, unit_label: 'Cr'}
+    """
+    default_result = {'currency': 'INR', 'unit_multiplier': 10000000, 'unit_label': 'Cr'}
+
+    if not headers:
+        return default_result
+
+    headers_text = ', '.join(f'"{h}"' for h in headers if h)
+    samples_text = ', '.join(str(v) for v in (sample_values or [])[:20])
+
+    cache_key = ('currency', sheet_name, frozenset(str(h) for h in headers if h))
+    if cache_key in _classification_cache:
+        return _classification_cache[cache_key]
+
+    prompt = f"""Detect the currency and numeric unit used in this financial spreadsheet sheet.
+
+Sheet name: "{sheet_name}"
+Column headers: {headers_text}
+Sample values: {samples_text or 'N/A'}
+
+Detect:
+1. Currency: INR, USD, EUR, GBP, JPY, SGD, AED, CHF, etc.
+2. Numeric unit (what multiplier the numbers represent):
+   - "Cr" or "Crore" or "Crores" → multiplier 10000000
+   - "Lakhs" or "Lacs" or "Lac" → multiplier 100000
+   - "Mn" or "Million" or "M" → multiplier 1000000
+   - "Bn" or "Billion" or "B" → multiplier 1000000000
+   - "K" or "Thousands" or "'000s" → multiplier 1000
+   - No unit indicator → multiplier 1
+
+Look for clues in:
+- Column headers containing: "(Cr)", "(₹Cr)", "($M)", "(Rs. Lakhs)", "(in '000s)", "(Mn)"
+- Currency symbols: ₹, $, €, £, ¥
+- Sheet name patterns
+- If no currency clue found, default to INR
+- If no unit clue found, look at sample value magnitudes to infer
+
+Return JSON: {{"currency": "INR", "unit_multiplier": 10000000, "unit_label": "Cr"}}"""
+
+    try:
+        result = _call_gemini(prompt, context_label=f'Pass3-currency-{sheet_name}')
+
+        output = {
+            'currency': result.get('currency', 'INR'),
+            'unit_multiplier': int(result.get('unit_multiplier', 10000000)),
+            'unit_label': result.get('unit_label', 'Cr'),
+        }
+        _classification_cache[cache_key] = output
+        logger.info(
+            f'[GEMINI Pass3] currency({sheet_name}): '
+            f'{output["currency"]} in {output["unit_label"]}'
+        )
+        return output
+
+    except Exception as e:
+        logger.warning(f'Gemini currency detection failed for {sheet_name}: {e}')
+        return default_result
 
 
 def _extract_sheet_previews(filepath):
@@ -884,7 +1213,8 @@ Rules:
 """
 
 
-def map_columns_for_sheet(filepath, sheet_name, domains, sections, progress_cb=None):
+def map_columns_for_sheet(filepath, sheet_name, domains, sections,
+                          progress_cb=None, xsheet_cache=None, wb=None):
     """
     Pass 2: For a classified sheet, map its columns to canonical fields.
 
@@ -892,13 +1222,22 @@ def map_columns_for_sheet(filepath, sheet_name, domains, sections, progress_cb=N
     ='Portfolio'!B10) are resolved to their actual values before sending
     to Gemini — preventing blank cells from confusing the AI column mapper.
 
+    Args:
+        xsheet_cache: Pre-built cross-sheet cache (optional; built if None)
+        wb: Pre-opened workbook (optional; opened if None)
+
     Returns: dict with section-level column mappings
     """
-    # Build cross-sheet cache for this file (resolves =SheetX!CellRef formulas)
-    xsheet_cache = _build_cross_sheet_value_cache(filepath)
+    # Use pre-built cache or build one (for backwards compat / standalone calls)
+    if xsheet_cache is None:
+        xsheet_cache = _build_cross_sheet_value_cache(filepath)
 
-    # Do NOT use read_only=True — EmptyCell objects lack .row/.column attributes
-    wb = openpyxl.load_workbook(filepath, data_only=True)
+    # Use pre-opened workbook or open one
+    close_wb = False
+    if wb is None:
+        wb = openpyxl.load_workbook(filepath, data_only=True)
+        close_wb = True
+
     ws = wb[sheet_name]
 
     # Read more rows for mapping (up to 20 for context), resolving cross-sheet refs
@@ -911,7 +1250,9 @@ def map_columns_for_sheet(filepath, sheet_name, domains, sections, progress_cb=N
         rows.append(row_vals)
         if i >= 19:
             break
-    wb.close()
+
+    if close_wb:
+        wb.close()
 
     if not rows:
         return {'sections': [], 'overall_confidence': 0.0}
@@ -1088,6 +1429,10 @@ def map_workbook_columns(filepath, progress_cb=None):
         progress_cb(15, 'Mapping columns with AI...')
 
     # Pass 2: Map columns for each classified sheet
+    # Build cross-sheet cache and open workbook ONCE (not per-sheet)
+    xsheet_cache = _build_cross_sheet_value_cache(filepath)
+    wb_pass2 = openpyxl.load_workbook(filepath, data_only=True)
+
     column_mappings = {}
     total_confidence = 0.0
     mapped_count = 0
@@ -1107,7 +1452,8 @@ def map_workbook_columns(filepath, progress_cb=None):
 
         try:
             mapping = map_columns_for_sheet(
-                filepath, sheet_name, domains, sections, progress_cb
+                filepath, sheet_name, domains, sections, progress_cb,
+                xsheet_cache=xsheet_cache, wb=wb_pass2,
             )
             column_mappings[sheet_name] = {
                 'domains': domains,
@@ -1124,6 +1470,11 @@ def map_workbook_columns(filepath, progress_cb=None):
                 'error': str(e),
                 'overall_confidence': 0.0,
             }
+
+    try:
+        wb_pass2.close()
+    except Exception:
+        pass
 
     avg_confidence = total_confidence / mapped_count if mapped_count > 0 else 0.0
 

@@ -326,6 +326,8 @@ def _import_event_generator(job, user):
             yield _sse_event({
                 'event': 'file_error',
                 'file': import_file.original_filename,
+                'file_index': file_idx,
+                'total_files': total_files,
                 'error': str(err),
             })
         else:

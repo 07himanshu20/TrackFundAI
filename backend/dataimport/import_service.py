@@ -59,19 +59,6 @@ CATEGORY_MAP = {
     'CAT_III_LVF': ('Category III AIF', 'Long-Short Equity Fund', True),
 }
 
-INVESTOR_TYPE_MAP = {
-    'insurance': 'insurance', 'pension': 'pension', 'huf': 'huf',
-    'trust': 'trust', 'individual': 'individual', 'fund_of_funds': 'fund_of_funds',
-    'fpi': 'fpi', 'company': 'company', 'nri': 'nri', 'family_office': 'family_office',
-    'endowment': 'endowment', 'llp': 'llp', 'sovereign': 'sovereign', 'bank': 'bank',
-    # Extended mappings for varied Excel data
-    'domestic pension': 'pension', 'bilateral dfi': 'company',
-    'sovereign wealth fund': 'sovereign', 'corporate': 'company',
-    'hnwi': 'individual', 'high net worth': 'individual',
-    'family trust': 'trust', 'private trust': 'trust',
-    'endowment fund': 'endowment', 'fund of funds': 'fund_of_funds',
-    'foreign portfolio investor': 'fpi',
-}
 
 
 
@@ -158,28 +145,39 @@ def _bool(val):
 # No data import function should read companies, investments, or any
 # transactional data from these sheets. Source of truth is always the
 # dedicated data sheets (Portfolio Investments, Investors & LPs, etc.).
-_COVER_SHEET_NAMES = {
-    'cover', 'summary', 'index', 'contents', 'table of contents',
-    'toc', 'overview', 'dashboard', 'readme', 'read me', 'intro',
-    'introduction', 'about', 'instructions', 'guide', 'help',
-    'front page', 'front sheet', 'title', 'home',
-}
-
-def _is_cover_or_summary_sheet(sheet_name):
+def _is_cover_or_summary_sheet(sheet_name, ws=None):
     """Return True if this sheet name indicates a cover/summary page.
+
+    Uses layout-based detection (no hardcoded keywords):
+    - Very few non-empty rows → likely a cover page
+    - No row with 4+ non-empty cells (no tabular data) → likely a cover page
 
     Cover sheets may have fund statistics (company count, total FV, etc.)
     that look like real data but are just display aggregates — often
     computed by hand and prone to errors. We always derive statistics
     from the actual data sheets instead.
     """
-    sn = sheet_name.lower().strip()
-    # Exact match or starts-with match
-    if sn in _COVER_SHEET_NAMES:
+    if ws is None:
+        return False
+    max_row = ws.max_row or 0
+    max_col = ws.max_column or 0
+    if max_row < 3:
         return True
-    for kw in _COVER_SHEET_NAMES:
-        if sn.startswith(kw):
-            return True
+    non_empty_rows = 0
+    has_tabular_row = False
+    scan_limit = min(max_row + 1, 30)
+    for r in range(1, scan_limit):
+        cell_count = sum(
+            1 for c in range(1, min(max_col + 1, 20))
+            if ws.cell(r, c).value is not None
+        )
+        if cell_count >= 1:
+            non_empty_rows += 1
+        if cell_count >= 4:
+            has_tabular_row = True
+            break
+    if non_empty_rows < 5 and not has_tabular_row:
+        return True
     return False
 
 
@@ -214,47 +212,16 @@ def _is_header_row(val):
 
 # Prefixes that identify non-data rows masquerading as data:
 # subtotal lines, grand-total lines, repeated header rows, separator labels.
-_JUNK_NAME_PREFIXES = (
-    'subtotal', 'sub-total', 'sub total',
-    'total', 'grand total', 'grand-total', 'grandtotal',
-    'sum total', 'sum', 'average', 'avg', 'mean',
-    's.no', 'sno', 'sr.', 'sr.no', 'srno', 'serial',
-    '#', '—', '–',
-    'note:', 'notes:', 'remark', 'footer',
-    'scheme name', 'company name', 'fund name', 'investor name',
-    'particulars', 'description', 'value (rs',
-)
-
-# Word endings that conclusively identify a string as a company name and
-# prevent false-positive junk detection on names like "Total Fitness Pvt Ltd"
-# or "Summary Holdings Ltd".
-_COMPANY_NAME_SUFFIXES = (
-    ' ltd', ' ltd.', ' limited', ' pvt', ' pvt.',
-    ' private limited', ' private', ' inc', ' inc.',
-    ' corp', ' corp.', ' corporation', ' llp', ' lp',
-    ' enterprises', ' holdings', ' group', ' solutions',
-    ' technologies', ' tech', ' systems', ' services',
-    ' ventures', ' capital', ' finance', ' fintech',
-    ' industries', ' infratech', ' infra',
-)
-
-
 def _is_junk_row(name):
-    """Return True if *name* looks like a subtotal, total, header, or serial-
-    number row — NOT a real portfolio company name.
+    """Return True if *name* is obviously junk based on format alone.
 
-    Catches patterns like:
-      - "Subtotal — Consumer & Retail"
-      - "Grand Total"
-      - "Total (25 companies)"
-      - "S.No" / "#"  (repeated column header within data area)
-      - "25"           (plain integer — row counter or summary value)
-      - "—"            (dash placeholder)
+    Format-based checks (universal, language-independent):
+      - Empty / None / whitespace-only
+      - Dash/placeholder characters: —, –, -, #, *
+      - Purely numeric: serial numbers, counts, aggregated values
 
-    IMPORTANT: names ending with recognised company suffixes (e.g. "Pvt Ltd",
-    "Limited", "Inc") are NEVER junk, regardless of what they start with.
-    This prevents false positives on "Total Fitness Pvt Ltd" or
-    "Summary Holdings Ltd".
+    For semantic junk detection (subtotals, totals, headers, notes),
+    use FundImportService._classify_junk_names() which classifies via Gemini.
     """
     if not name:
         return True
@@ -267,16 +234,6 @@ def _is_junk_row(name):
         return True
     except ValueError:
         pass
-    n_lower = n.lower()
-    # A name that ends with a known company suffix is always a real company —
-    # never flag it as junk even if its prefix matches a suspicious keyword.
-    for suffix in _COMPANY_NAME_SUFFIXES:
-        if n_lower.endswith(suffix):
-            return False
-    # Check against known junk prefixes (case-insensitive)
-    for prefix in _JUNK_NAME_PREFIXES:
-        if n_lower.startswith(prefix):
-            return True
     return False
 
 
@@ -672,13 +629,13 @@ def _find_col(row, *candidates):
     before a less-specific one (e.g. 'Name') even if 'Name' would match earlier
     in a looser pass.
 
-    Pass 1 — Exact case-sensitive:        "Company Name" == "Company Name"
-    Pass 2 — Exact case-insensitive:      "company name" == "Company Name"
-    Pass 3 — Key ends with candidate:     "Company Name" ends with "Name"
-              (covers typical label suffixes without matching mid-words)
-    Pass 4 — Candidate ends with key:     "HQ City" key, candidate "City"
-    Pass 5 — Loose substring (last resort, only for single-word candidates
-              whose length ≥ 4 to avoid false positives on short tokens)
+    Pass 1   — Exact case-sensitive:       "Company Name" == "Company Name"
+    Pass 1.5 — Normalised (space↔underscore, case-insensitive):
+               "Company Name" matches "company_name" from Gemini alias map
+    Pass 2   — Exact case-insensitive:     "company name" == "Company Name"
+    Pass 3   — Key ends with candidate:    "Company Name" ends with "Name"
+    Pass 4   — Candidate ends with key:    "HQ City" key, candidate "City"
+    Pass 5   — Loose substring (guarded)
     """
     # Pass 1 — exact case-sensitive
     for c in candidates:
@@ -688,6 +645,15 @@ def _find_col(row, *candidates):
     # Build lowercase lookup once
     row_lower = {k.lower(): v for k, v in row.items()}
 
+    # Pass 1.5 — normalised: treat spaces, underscores, and hyphens as equivalent.
+    # This bridges English candidates ("Company Name") with Gemini canonical
+    # field names ("company_name") added by the alias map.
+    row_norm = {k.replace(' ', '_').replace('-', '_'): v for k, v in row_lower.items()}
+    for c in candidates:
+        cn = c.lower().replace(' ', '_').replace('-', '_')
+        if cn in row_norm:
+            return row_norm[cn]
+
     # Pass 2 — exact case-insensitive
     for c in candidates:
         cl = c.lower()
@@ -695,35 +661,26 @@ def _find_col(row, *candidates):
             return row_lower[cl]
 
     # Pass 3 — the column header ends with the candidate phrase (word-boundary)
-    # e.g. key="Company Name", candidate="Name" → "company name".endswith(" name") ✓
-    # e.g. key="Scheme Name", candidate="Company Name" → no match ✓
     for c in candidates:
         cl = c.lower()
         for key_l, val in row_lower.items():
             if key_l == cl:
                 return val
-            # Must be a word boundary: key ends with " <candidate>"
             if key_l.endswith(' ' + cl) or key_l.endswith('-' + cl):
                 return val
 
-    # Pass 4 — the candidate ends with the column header (candidate is more specific)
-    # e.g. candidate="HQ City", key="City" → "hq city".endswith("city") but also
-    # we only trigger this if key is a meaningful suffix of candidate
+    # Pass 4 — the candidate ends with the column header
     for c in candidates:
         cl = c.lower()
         for key_l, val in row_lower.items():
             if cl.endswith(' ' + key_l) or cl.endswith('-' + key_l):
                 return val
 
-    # Pass 5 — loose substring, guarded: only for multi-word candidates or
-    # single words with length ≥ 8 (avoids false matches on short tokens
-    # like "Sector" (6 chars) matching "Investor Sector" or "Sector Group").
-    # Multi-word candidates (e.g. "Company Name") are allowed through since
-    # the word boundary check makes them precise enough.
+    # Pass 5 — loose substring, guarded
     for c in candidates:
         cl = c.lower()
         if len(c.split()) == 1 and len(c) < 8:
-            continue  # too short/ambiguous for loose matching
+            continue
         for key_l, val in row_lower.items():
             if cl in key_l or key_l in cl:
                 return val
@@ -847,11 +804,13 @@ def _build_domain_sheet_map(classifications, wb):
         domains = cls.get('domains', [])
         for domain in domains:
             if domain and domain != 'unknown':
-                if domain in _DATA_ONLY_DOMAINS and _is_cover_or_summary_sheet(sheet_name):
+                ws_check = wb[sheet_name] if sheet_name in wb.sheetnames else None
+                if domain in _DATA_ONLY_DOMAINS and _is_cover_or_summary_sheet(sheet_name, ws_check):
                     logger.warning(
                         f'Gemini classified cover/summary sheet "{sheet_name}" as '
-                        f'data domain "{domain}" — overriding to prevent metadata '
-                        f'rows being imported as company/investment records.'
+                        f'data domain "{domain}" — overriding (layout detection: '
+                        f'no tabular data) to prevent metadata rows being imported '
+                        f'as company/investment records.'
                     )
                     continue
                 if sheet_name not in domain_map[domain]:
@@ -1034,6 +993,58 @@ class FundImportService:
         self.counts = {}
         self._imported_fund = None
         self._gemini_sheet_aliases = {}  # {sheet_name: {excel_col: canonical_field}}
+        self._pl_line_item_map = {}     # {label: canonical_pl_category} — populated per sheet
+        self._junk_name_cache = {}      # {name: row_type} — populated per section
+
+    # ------------------------------------------------------------------
+    # Pass 3 helpers: Gemini-powered value classification
+    # ------------------------------------------------------------------
+
+    def _classify_labels(self, labels, category_key, context=''):
+        """Classify text labels into canonical categories via Gemini.
+
+        Returns {label: canonical_key_or_None}.
+        """
+        from .gemini_column_mapper import classify_labels
+        from .canonical_schema import CANONICAL_VALUE_CATEGORIES
+        options = CANONICAL_VALUE_CATEGORIES.get(category_key, {})
+        if not options:
+            logger.warning(f'Unknown category_key: {category_key}')
+            return {}
+        return classify_labels(list(labels), category_key, options, context)
+
+    def _classify_enum(self, values, enum_key, context=''):
+        """Classify text values into a closed enum set via Gemini.
+
+        Returns {value: enum_key}. Never returns None — always picks closest match.
+        """
+        from .gemini_column_mapper import classify_enum_values
+        from .canonical_schema import CANONICAL_ENUM_TYPES
+        options = CANONICAL_ENUM_TYPES.get(enum_key, {})
+        if not options:
+            logger.warning(f'Unknown enum_key: {enum_key}')
+            return {}
+        return classify_enum_values(list(values), enum_key, options, context)
+
+    def _classify_junk_names(self, names):
+        """Classify a batch of names as real entities vs junk rows via Gemini.
+
+        Returns a set of names that are junk (subtotals, totals, headers, serials).
+        Real entity names are NOT in the returned set.
+        """
+        unique_names = list(set(n for n in names if n and str(n).strip()))
+        if not unique_names:
+            return set()
+
+        row_type_map = self._classify_labels(unique_names, 'row_type',
+                                              context='Entity names vs junk rows')
+        junk_types = {'subtotal', 'total', 'header', 'serial', 'note'}
+        junk_set = set()
+        for name, rtype in row_type_map.items():
+            if rtype in junk_types:
+                junk_set.add(name)
+            self._junk_name_cache[name] = rtype
+        return junk_set
 
     def _get_alias(self, ws) -> dict:
         """Return Gemini-built alias map for this worksheet (empty dict if none)."""
@@ -1081,6 +1092,10 @@ class FundImportService:
         def _progress(pct, msg):
             if progress_cb:
                 progress_cb(pct, msg)
+
+        # Clear Pass 3 classification cache for fresh import
+        from .gemini_column_mapper import clear_classification_cache
+        clear_classification_cache()
 
         # Step 1: Gemini column mapping (two-pass)
         _progress(5, 'Reading workbook...')
@@ -1428,20 +1443,39 @@ class FundImportService:
     # Extract fund name
     # ------------------------------------------------------------------
 
+    def _extract_fund_identity(self, wb, domain_map):
+        """Extract fund identity metadata from fund_scheme_master sheet via Gemini.
+
+        Returns dict with keys: fund_name, sebi_registration_number, category,
+        structure_type, fund_pan, fund_gstin, is_gift_city (all optional).
+        """
+        sheet_name = _dm_first(domain_map, 'fund_scheme_master')
+        if not sheet_name or sheet_name not in wb.sheetnames:
+            return {}
+        ws = wb[sheet_name]
+        # Collect all label-value pairs from the sheet
+        kv_pairs = {}
+        scan_limit = min(ws.max_row + 1, 100)
+        for r in range(1, scan_limit):
+            label = _str(ws.cell(r, 1).value).strip()
+            val = ws.cell(r, 2).value
+            if label and val is not None:
+                kv_pairs[label] = _str(val).strip()
+        if not kv_pairs:
+            return {}
+        from .gemini_column_mapper import extract_structured_metadata
+        from .canonical_schema import CANONICAL_METADATA_FIELDS
+        field_defs = CANONICAL_METADATA_FIELDS.get('fund_identity', {})
+        return extract_structured_metadata(kv_pairs, field_defs,
+                                           context='Fund identity metadata from AIF fund master sheet')
+
     def _extract_fund_name(self, wb, domain_map, filepath):
         """Extract fund name from Gemini-classified fund_scheme_master sheet or filename."""
-        # Try Fund & Scheme Master domain first (Gemini-classified)
-        sheet_name = _dm_first(domain_map, 'fund_scheme_master')
-        if sheet_name and sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-            for r in range(1, 15):
-                label = _str(ws.cell(r, 1).value).lower()
-                if 'fund name' in label:
-                    return _str(ws.cell(r, 2).value)
-
+        identity = self._extract_fund_identity(wb, domain_map)
+        if identity.get('fund_name'):
+            return identity['fund_name']
         # Fallback: extract from filename
         basename = os.path.basename(filepath)
-        # Remove prefix like "Mock_06_" and extension
         name = re.sub(r'^Mock_\d+_', '', basename)
         name = re.sub(r'\.xlsx?$', '', name, flags=re.IGNORECASE)
         name = name.replace('_', ' ')
@@ -1459,72 +1493,40 @@ class FundImportService:
         - Cover sheet with basic fund info
         - Auto-creates default scheme if no explicit scheme data found
         """
-        cat_code = 'CAT_II'  # default
+        # Use Gemini-extracted fund identity metadata
+        identity = self._extract_fund_identity(wb, domain_map)
 
-        # Try to detect category from the fund master sheet
-        # Scan ALL rows (not just first 20) because FUND_MASTER sheets have
-        # multi-section layouts: Section A (SEBI IDs), Section B (Lifecycle),
-        # Section C (Performance).
-        sheet_name = _dm_first(domain_map, 'fund_scheme_master')
-        if sheet_name and sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-            scan_limit = min(ws.max_row + 1, 100)
-            for r in range(1, scan_limit):
-                label = _str(ws.cell(r, 1).value).lower()
-                val = _str(ws.cell(r, 2).value)
-                if 'category code' in label or 'sebi category code' in label:
-                    if val and val in CATEGORY_MAP:
-                        cat_code = val
-                        break
-                elif 'category' in label and 'sub' not in label and 'strategy' not in label:
-                    vl = val.lower().strip()
-                    # Match AIF Cat II, Category II, Cat-II, etc.
-                    if re.search(r'\biii\b|cat.?iii', vl):
-                        cat_code = 'CAT_III_LVF'
-                    elif re.search(r'\bii\b|cat.?ii', vl):
-                        cat_code = 'CAT_II'
-                    elif re.search(r'\bi\b|cat.?i', vl):
-                        cat_code = 'CAT_I_VCF'
+        # Determine AIF category from Gemini extraction or CATEGORY_MAP code
+        cat_code = 'CAT_II'  # default
+        cat_raw = identity.get('category', '')
+        if cat_raw:
+            if cat_raw in CATEGORY_MAP:
+                cat_code = cat_raw
+            else:
+                cl = str(cat_raw).lower().strip()
+                if re.search(r'\biii\b|cat.?iii', cl):
+                    cat_code = 'CAT_III_LVF'
+                elif re.search(r'\bii\b|cat.?ii', cl):
+                    cat_code = 'CAT_II'
+                elif re.search(r'\bi\b|cat.?i', cl):
+                    cat_code = 'CAT_I_VCF'
 
         fund_category = FundCategory.objects.filter(
             sebi_category_code=cat_code).first()
 
-        # Read SEBI reg, structure, PAN, entities from fund master sheet
-        # Scan ALL key-value rows in the sheet (handles multi-section layout)
-        sebi_reg = ''
-        structure = 'trust'
-        fund_pan = ''
-        fund_gstin = ''
-        gift_city = False
+        sebi_reg = identity.get('sebi_registration_number', '')
+        fund_pan = identity.get('fund_pan', '')[:10] if identity.get('fund_pan') else ''
+        fund_gstin = identity.get('fund_gstin', '')
+        gift_city_raw = identity.get('is_gift_city', '')
+        gift_city = str(gift_city_raw).lower() in ('yes', 'true', '1', 'y') if gift_city_raw else False
 
-        if sheet_name and sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-            scan_limit = min(ws.max_row + 1, 100)
-            for r in range(1, scan_limit):
-                label = _str(ws.cell(r, 1).value).lower().strip()
-                val = ws.cell(r, 2).value
-                if not val:
-                    continue
-                val_str = _str(val)
-                if any(kw in label for kw in ['sebi reg', 'registration number']):
-                    if not sebi_reg:
-                        sebi_reg = val_str
-                elif 'structure' in label and 'legal' in label or label == 'legal structure':
-                    vl = val_str.lower()
-                    if 'trust' in vl:
-                        structure = 'trust'
-                    elif 'llp' in vl:
-                        structure = 'llp'
-                    elif 'company' in vl:
-                        structure = 'company'
-                elif 'pan' in label and ('fund' in label or label == 'pan'):
-                    if not fund_pan:
-                        fund_pan = val_str[:10]
-                elif 'gstin' in label:
-                    if not fund_gstin:
-                        fund_gstin = val_str
-                elif 'gift' in label:
-                    gift_city = val_str.lower() in ('yes', 'true', '1', 'y')
+        # Structure type: Gemini extracts as enum
+        structure = 'trust'
+        struct_raw = identity.get('structure_type', '')
+        if struct_raw:
+            struct_result = self._classify_enum([struct_raw], 'structure_type',
+                                                context='Legal structure of AIF fund')
+            structure = struct_result.get(struct_raw, 'trust')
 
         fund_defaults = {}
         if fund_category:
@@ -1551,6 +1553,7 @@ class FundImportService:
         schemes = {}
 
         # Check for explicit scheme data in SCHEMES section
+        sheet_name = _dm_first(domain_map, 'fund_scheme_master')
         if sheet_name and sheet_name in wb.sheetnames:
             ws = wb[sheet_name]
             schemes_start = find_section_rows(ws, 'SCHEMES')
@@ -1620,22 +1623,21 @@ class FundImportService:
                         status_raw = _find_col_str(
                             row_data, 'Status', 'Scheme Status',
                             default='Investing')
-                        status_map = {
-                            'investing': 'investing', 'fundraising': 'fundraising',
-                            'harvesting': 'harvesting', 'closed': 'closed',
-                            'winding up': 'winding_up',
-                        }
-                        scheme_status = status_map.get(
-                            status_raw.lower(), 'investing')
+                        scheme_status_result = self._classify_enum(
+                            [status_raw], 'scheme_status',
+                            context='Scheme/fund lifecycle status')
+                        scheme_status = scheme_status_result.get(
+                            status_raw, 'investing')
 
-                        carry_type = 'european'
-                        if carry_type_raw.lower() in ('american', 'deal-by-deal',
-                                                       'deal by deal'):
-                            carry_type = 'american'
+                        carry_type_result = self._classify_enum(
+                            [carry_type_raw], 'carry_type',
+                            context='Waterfall/carry type') if carry_type_raw else {}
+                        carry_type = carry_type_result.get(carry_type_raw, 'european')
 
-                        fee_basis = 'committed'
-                        if fee_basis_raw and fee_basis_raw.lower() in ('committed', 'called', 'nav'):
-                            fee_basis = fee_basis_raw.lower()
+                        fee_basis_result = self._classify_enum(
+                            [fee_basis_raw], 'fee_basis',
+                            context='Management fee calculation basis') if fee_basis_raw else {}
+                        fee_basis = fee_basis_result.get(fee_basis_raw, 'committed')
 
                         scheme_defaults = {'is_active': True}
                         if vintage:
@@ -1723,32 +1725,50 @@ class FundImportService:
         if not candidate_sheets:
             return
 
-        # Build a MERGED key-value map from ALL candidate sheets.
-        # Later sheets (summary/cover) only fill keys not already set by
-        # earlier (detailed) sheets — detailed data always wins.
-        kv = {}
+        # Build a MERGED key-value map from ALL candidate sheets (raw labels preserved).
+        kv = {}  # {raw_label: raw_value}
         for sheet_name in candidate_sheets:
             ws = wb[sheet_name]
             for r in range(1, min(ws.max_row + 1, 200)):
                 for label_col, val_col in [(1, 2), (2, 3), (6, 7)]:
-                    label = _str(ws.cell(r, label_col).value).lower().strip().rstrip(':')
+                    label = _str(ws.cell(r, label_col).value).strip().rstrip(':')
                     val = ws.cell(r, val_col).value
                     if label and val is not None and label not in kv:
                         kv[label] = val
             logger.info(f'  Fund metadata: scanned sheet "{sheet_name}" ({len(kv)} kv pairs total)')
 
+        if not kv:
+            return
+
+        # Use Gemini to extract fund identity fields
+        from .gemini_column_mapper import extract_structured_metadata
+        from .canonical_schema import CANONICAL_METADATA_FIELDS
+
+        kv_str = {k: _str(v).strip() for k, v in kv.items() if v is not None}
+
+        # Extract fund identity
+        fund_fields = CANONICAL_METADATA_FIELDS.get('fund_identity', {})
+        fund_identity = extract_structured_metadata(
+            kv_str, fund_fields,
+            context='Fund identity metadata from cover/master sheet')
+
+        # Extract scheme lifecycle
+        scheme_fields = CANONICAL_METADATA_FIELDS.get('scheme_lifecycle', {})
+        scheme_lifecycle = extract_structured_metadata(
+            kv_str, scheme_fields,
+            context='Scheme lifecycle parameters from cover/master sheet')
+
         # Update Fund fields
         update_fields = []
 
-        reg_no = kv.get('reg no.') or kv.get('sebi reg') or kv.get('registration')
+        reg_no = fund_identity.get('sebi_registration_number')
         if reg_no and not fund.sebi_registration_number:
-            fund.sebi_registration_number = _str(reg_no)
+            fund.sebi_registration_number = str(reg_no)
             update_fields.append('sebi_registration_number')
 
-        corpus_raw = kv.get('corpus') or kv.get('fund size') or kv.get('target corpus') or kv.get('corpus at final close')
+        corpus_raw = scheme_lifecycle.get('scheme_size')
         if corpus_raw and not fund.corpus_target:
-            # Parse "₹ 3,500 Cr" or "Rs 3,800 Cr" or similar
-            corpus_str = _str(corpus_raw)
+            corpus_str = str(corpus_raw)
             corpus_num = re.sub(r'[₹,\s]', '', corpus_str)
             corpus_num = re.sub(r'[Cc]r\.?$', '', corpus_num)
             corpus_num = re.sub(r'^[Rr][Ss]\.?\s*', '', corpus_num)
@@ -1757,9 +1777,9 @@ class FundImportService:
                 fund.corpus_target = corpus_d
                 update_fields.append('corpus_target')
 
-        vintage_raw = kv.get('vintage') or kv.get('inception')
+        vintage_raw = scheme_lifecycle.get('vintage_year')
         if vintage_raw:
-            vintage_str = _str(vintage_raw)
+            vintage_str = str(vintage_raw)
             if not fund.inception_date:
                 vintage_date = _date(vintage_str)
                 if vintage_date:
@@ -1769,87 +1789,82 @@ class FundImportService:
                     fund.inception_date = date(int(vintage_str), 1, 1)
                     update_fields.append('inception_date')
 
-        pan_raw = kv.get('pan')
+        pan_raw = fund_identity.get('fund_pan')
         if pan_raw and not fund.pan:
-            fund.pan = _str(pan_raw)[:10]
+            fund.pan = str(pan_raw)[:10]
             update_fields.append('pan')
 
         if update_fields:
             fund.save(update_fields=update_fields)
             logger.info(f'  Fund metadata updated: {update_fields}')
 
-        # Update Scheme fields from Cover data — apply to ALL schemes, not just the first
+        # Update Scheme fields from Cover data — apply to ALL schemes
         for default_scheme in schemes.values():
             scheme_updates = []
 
-            vintage_year = kv.get('vintage')
-            if vintage_year:
-                v_str = _str(vintage_year)
+            if vintage_raw:
+                v_str = str(vintage_raw)
                 if v_str.isdigit() and len(v_str) == 4:
                     default_scheme.vintage_year = int(v_str)
                     scheme_updates.append('vintage_year')
 
-            hurdle_raw = kv.get('hurdle') or kv.get('hurdle rate')
+            hurdle_raw = scheme_lifecycle.get('hurdle_rate_pct')
             if hurdle_raw:
-                h_str = _str(hurdle_raw).replace('%', '').strip()
+                h_str = str(hurdle_raw).replace('%', '').strip()
                 h_val = _d(h_str)
                 if h_val and not default_scheme.hurdle_rate_pct:
                     default_scheme.hurdle_rate_pct = h_val
                     scheme_updates.append('hurdle_rate_pct')
 
-            carry_raw = kv.get('carry') or kv.get('carried interest')
+            carry_raw = scheme_lifecycle.get('carry_pct')
             if carry_raw:
-                c_str = _str(carry_raw).replace('%', '').strip()
+                c_str = str(carry_raw).replace('%', '').strip()
                 c_val = _d(c_str)
                 if c_val and not default_scheme.carry_pct:
                     default_scheme.carry_pct = c_val
                     scheme_updates.append('carry_pct')
 
-            fee_raw = kv.get('mgmt fee') or kv.get('management fee')
+            fee_raw = scheme_lifecycle.get('management_fee_pct')
             if fee_raw:
-                f_str = _str(fee_raw).replace('%', '').strip()
+                f_str = str(fee_raw).replace('%', '').strip()
                 f_val = _d(f_str)
                 if f_val and not default_scheme.management_fee_pct:
                     default_scheme.management_fee_pct = f_val
                     scheme_updates.append('management_fee_pct')
 
-            # Fee basis
-            fee_basis_raw = kv.get('fee basis') or kv.get('management fee basis') or kv.get('mgmt fee basis')
+            fee_basis_raw = scheme_lifecycle.get('management_fee_basis')
             if fee_basis_raw:
-                fb = _str(fee_basis_raw).lower().strip()
-                if fb in ('committed', 'called', 'nav') and not default_scheme.management_fee_basis:
+                fb_result = self._classify_enum([str(fee_basis_raw)], 'fee_basis',
+                                                context='Management fee basis')
+                fb = fb_result.get(str(fee_basis_raw))
+                if fb and not default_scheme.management_fee_basis:
                     default_scheme.management_fee_basis = fb
                     scheme_updates.append('management_fee_basis')
 
-            # Tenure
-            tenure_raw = kv.get('tenure') or kv.get('tenure (years)') or kv.get('fund tenure')
+            tenure_raw = scheme_lifecycle.get('tenure_years')
             if tenure_raw and not default_scheme.tenure_years:
-                t_str = re.sub(r'[^\d]', '', _str(tenure_raw))
+                t_str = re.sub(r'[^\d]', '', str(tenure_raw))
                 if t_str and t_str.isdigit():
                     default_scheme.tenure_years = int(t_str)
                     scheme_updates.append('tenure_years')
 
-            # Close dates
-            for kv_key in ('initial close date', 'first close date', 'first close', 'initial close'):
-                close_raw = kv.get(kv_key)
-                if close_raw and not default_scheme.first_close_date:
-                    d_val = _date(_str(close_raw))
-                    if d_val:
-                        default_scheme.first_close_date = d_val
-                        scheme_updates.append('first_close_date')
-                    break
-            for kv_key in ('final close date', 'final close', 'last close date', 'last close'):
-                close_raw = kv.get(kv_key)
-                if close_raw and not default_scheme.final_close_date:
-                    d_val = _date(_str(close_raw))
-                    if d_val:
-                        default_scheme.final_close_date = d_val
-                        scheme_updates.append('final_close_date')
-                    break
+            fc_raw = scheme_lifecycle.get('first_close_date')
+            if fc_raw and not default_scheme.first_close_date:
+                d_val = _date(str(fc_raw))
+                if d_val:
+                    default_scheme.first_close_date = d_val
+                    scheme_updates.append('first_close_date')
 
-            corpus_raw2 = kv.get('corpus') or kv.get('fund size') or kv.get('corpus at final close')
+            lc_raw = scheme_lifecycle.get('final_close_date')
+            if lc_raw and not default_scheme.final_close_date:
+                d_val = _date(str(lc_raw))
+                if d_val:
+                    default_scheme.final_close_date = d_val
+                    scheme_updates.append('final_close_date')
+
+            corpus_raw2 = scheme_lifecycle.get('scheme_size') or corpus_raw
             if corpus_raw2 and not default_scheme.scheme_size:
-                c_str2 = _str(corpus_raw2)
+                c_str2 = str(corpus_raw2)
                 c_num = re.sub(r'[₹,\s]', '', c_str2)
                 c_num = re.sub(r'[Cc]r\.?$', '', c_num)
                 c_num = re.sub(r'^[Rr][Ss]\.?\s*', '', c_num)
@@ -1858,10 +1873,9 @@ class FundImportService:
                     default_scheme.scheme_size = c_val2
                     scheme_updates.append('scheme_size')
 
-            # Sponsor commitment
-            sponsor_raw = kv.get('sponsor commitment') or kv.get('sponsor commitment %') or kv.get('sponsor %')
+            sponsor_raw = scheme_lifecycle.get('sponsor_commitment_pct')
             if sponsor_raw and not default_scheme.sponsor_commitment_pct:
-                s_str = _str(sponsor_raw).replace('%', '').strip()
+                s_str = str(sponsor_raw).replace('%', '').strip()
                 s_val = _d(s_str)
                 if s_val:
                     default_scheme.sponsor_commitment_pct = s_val
@@ -1898,136 +1912,66 @@ class FundImportService:
         if not candidate_sheets:
             return
 
-        # Map of lowercase label patterns → (scheme_field, parser)
-        # parser: 'str', 'int', 'decimal', 'date', 'pct', 'carry_type', 'fee_basis'
-        LIFECYCLE_PATTERNS = {
-            # Tenure
-            'tenure': ('tenure_years', 'int'),
-            'tenure (excl': ('tenure_years', 'int'),
-            'tenure (years)': ('tenure_years', 'int'),
-            'fund tenure': ('tenure_years', 'int'),
-            'scheme tenure': ('tenure_years', 'int'),
-            # Close dates
-            'initial close date': ('first_close_date', 'date'),
-            'first close date': ('first_close_date', 'date'),
-            'initial close': ('first_close_date', 'date'),
-            'first close': ('first_close_date', 'date'),
-            'final close date': ('final_close_date', 'date'),
-            'final close': ('final_close_date', 'date'),
-            'last close date': ('final_close_date', 'date'),
-            'last close': ('final_close_date', 'date'),
-            # Corpus / scheme size
-            'corpus at final close': ('scheme_size', 'decimal_cr'),
-            'corpus at close': ('scheme_size', 'decimal_cr'),
-            'total corpus': ('scheme_size', 'decimal_cr'),
-            'fund corpus': ('scheme_size', 'decimal_cr'),
-            'scheme size': ('scheme_size', 'decimal_cr'),
-            'fund size': ('scheme_size', 'decimal_cr'),
-            # Hurdle rate
-            'hurdle rate': ('hurdle_rate_pct', 'pct'),
-            'hurdle': ('hurdle_rate_pct', 'pct'),
-            'preferred return': ('hurdle_rate_pct', 'pct'),
-            'estimated expenses': ('hurdle_rate_pct', 'pct'),  # Some QARs label it this way
-            # Carried interest
-            'carried interest': ('carry_pct', 'pct'),
-            'carry': ('carry_pct', 'pct'),
-            'carry %': ('carry_pct', 'pct'),
-            'performance fee': ('carry_pct', 'pct'),
-            # Carry type / waterfall
-            'waterfall type': ('carry_type', 'carry_type'),
-            'carry type': ('carry_type', 'carry_type'),
-            'distribution waterfall': ('carry_type', 'carry_type'),
-            # Management fee
-            'management fee': ('management_fee_pct', 'pct'),
-            'mgmt fee': ('management_fee_pct', 'pct'),
-            'management fee %': ('management_fee_pct', 'pct'),
-            'annual management fee': ('management_fee_pct', 'pct'),
-            # Fee basis
-            'fee basis': ('management_fee_basis', 'fee_basis'),
-            'management fee basis': ('management_fee_basis', 'fee_basis'),
-            'mgmt fee basis': ('management_fee_basis', 'fee_basis'),
-            # Sponsor commitment
-            'sponsor commitment': ('sponsor_commitment_pct', 'pct'),
-            'sponsor commitment %': ('sponsor_commitment_pct', 'pct'),
-            'sponsor %': ('sponsor_commitment_pct', 'pct'),
-            # Vintage / inception
-            'vintage year': ('vintage_year', 'int'),
-            'vintage': ('vintage_year', 'int'),
-            # PPM / SEBI dates (for fund-level fields)
-            'ppm filing date': (None, None),  # skip — not a scheme field
-            'sebi communication date': (None, None),
-            'fund registration date': (None, None),
-        }
-
-        # Scan each candidate sheet for key-value pairs
-        collected = {}  # field_name → parsed_value
+        # Scan each candidate sheet for label-value pairs
+        all_pairs = {}  # label_str → val_str (first occurrence wins)
 
         for sheet_name in candidate_sheets:
             ws = wb[sheet_name]
             for r in range(1, min(ws.max_row + 1, 200)):
-                # Try columns (A, B), (B, C), (A, C) for label-value pairs
                 for label_col, val_col in [(1, 2), (2, 3), (1, 3)]:
                     label_raw = ws.cell(r, label_col).value
                     val_raw = ws.cell(r, val_col).value
                     if not label_raw or val_raw is None:
                         continue
-                    label = _str(label_raw).lower().strip().rstrip(':')
-
-                    # Match against patterns (longest match first for specificity)
-                    matched_field = None
-                    matched_parser = None
-                    best_len = 0
-                    for pattern, (field, parser) in LIFECYCLE_PATTERNS.items():
-                        if field is None:
-                            continue
-                        if pattern in label and len(pattern) > best_len:
-                            matched_field = field
-                            matched_parser = parser
-                            best_len = len(pattern)
-
-                    if not matched_field or matched_field in collected:
-                        continue
-
+                    label = _str(label_raw).strip().rstrip(':')
                     val_str = _str(val_raw).strip()
                     if not val_str or val_str.lower() in ('none', 'n/a', '-', ''):
                         continue
+                    if label and label not in all_pairs:
+                        all_pairs[label] = val_str
 
-                    # Parse value based on type
-                    parsed = None
-                    if matched_parser == 'int':
-                        nums = re.sub(r'[^\d]', '', val_str)
-                        if nums and nums.isdigit():
-                            parsed = int(nums)
-                    elif matched_parser == 'decimal_cr':
-                        clean = re.sub(r'[₹,\s]', '', val_str)
-                        clean = re.sub(r'\s*[Cc]r\.?$', '', clean)
-                        clean = re.sub(r'^[Rr][Ss]\.?\s*', '', clean)
-                        parsed = _d(clean)
-                    elif matched_parser == 'pct':
-                        clean = val_str.replace('%', '').strip()
-                        # Handle "8% per annum" or "2.00% p.a." patterns
-                        clean = re.split(r'\s+(?:per|p\.?a|above|on)', clean, maxsplit=1)[0].strip()
-                        parsed = _d(clean)
-                    elif matched_parser == 'date':
-                        parsed = _date(val_str)
-                    elif matched_parser == 'carry_type':
-                        vl = val_str.lower()
-                        if 'european' in vl or 'whole fund' in vl:
-                            parsed = 'european'
-                        elif 'american' in vl or 'deal' in vl:
-                            parsed = 'american'
-                    elif matched_parser == 'fee_basis':
-                        vl = val_str.lower()
-                        if 'committed' in vl:
-                            parsed = 'committed'
-                        elif 'called' in vl or 'drawn' in vl:
-                            parsed = 'called'
-                        elif 'nav' in vl:
-                            parsed = 'nav'
+        if not all_pairs:
+            return
 
-                    if parsed is not None:
-                        collected[matched_field] = parsed
-                        logger.info(f'  Lifecycle: {matched_field} = {parsed} (from "{sheet_name}" row {r})')
+        # Use Gemini to semantically match labels → scheme lifecycle fields
+        from .gemini_column_mapper import extract_structured_metadata
+        from .canonical_schema import CANONICAL_METADATA_FIELDS
+        field_defs = CANONICAL_METADATA_FIELDS.get('scheme_lifecycle', {})
+        extracted = extract_structured_metadata(all_pairs, field_defs,
+                                                context='Scheme lifecycle parameters from QAR / compliance sheet')
+
+        # Parse raw values into typed Python values
+        collected = {}
+        for field_name, raw_val in extracted.items():
+            if field_name in collected:
+                continue
+            ftype = field_defs.get(field_name, {}).get('type', 'str')
+            parsed = None
+            val_str = str(raw_val).strip()
+            if ftype == 'int':
+                nums = re.sub(r'[^\d]', '', val_str)
+                if nums and nums.isdigit():
+                    parsed = int(nums)
+            elif ftype == 'decimal':
+                clean = re.sub(r'[₹,\s]', '', val_str)
+                clean = re.sub(r'\s*[Cc]r\.?$', '', clean)
+                clean = re.sub(r'^[Rr][Ss]\.?\s*', '', clean)
+                parsed = _d(clean)
+            elif ftype == 'pct':
+                clean = val_str.replace('%', '').strip()
+                clean = re.split(r'\s+(?:per|p\.?a|above|on)', clean, maxsplit=1)[0].strip()
+                parsed = _d(clean)
+            elif ftype == 'date':
+                parsed = _date(val_str)
+            elif ftype == 'enum':
+                # Gemini already returned canonical enum value
+                parsed = raw_val if raw_val else None
+            else:
+                parsed = val_str if val_str else None
+
+            if parsed is not None:
+                collected[field_name] = parsed
+                logger.info(f'  Lifecycle: {field_name} = {parsed}')
 
         if not collected:
             return
@@ -2058,6 +2002,15 @@ class FundImportService:
         _, rows = read_table_from_sheet(ws, alias_map=self._get_alias(ws))
         investors = {}
 
+        # Pass 3: Collect all unique investor types and classify via Gemini
+        raw_inv_types = set()
+        for row in rows:
+            t = _find_col_str(row, 'Investor Type', 'LP Type', 'Type', 'Category')
+            if t:
+                raw_inv_types.add(t.strip())
+        inv_type_map = self._classify_labels(raw_inv_types, 'investor_types',
+                                              context='Investor/LP type classification')
+
         for row in rows:
             inv_name = _find_col_str(
                 row, 'Investor Name', 'LP Name', 'Name', 'Investor')
@@ -2065,8 +2018,8 @@ class FundImportService:
                 continue
 
             inv_type_raw = _find_col_str(
-                row, 'Investor Type', 'LP Type', 'Type', 'Category').lower()
-            inv_type = INVESTOR_TYPE_MAP.get(inv_type_raw, 'other')
+                row, 'Investor Type', 'LP Type', 'Type', 'Category')
+            inv_type = inv_type_map.get(inv_type_raw, 'other') if inv_type_raw else 'other'
 
             country = _find_col_str(row, 'Country', 'Domicile', default='India')
             commitment_amt = _find_col_decimal(
@@ -2147,13 +2100,11 @@ class FundImportService:
                     commit_date = _find_col_date(
                         row, 'Commitment Date', 'Date', 'Close Date')
                     close_type_raw = _find_col_str(
-                        row, 'Close Type', 'Close', default='first_close')
-                    close_map = {
-                        'first close': 'first_close',
-                        'subsequent close': 'subsequent_close',
-                        'final close': 'final_close',
-                    }
-                    close_type = close_map.get(close_type_raw.lower(), 'first_close')
+                        row, 'close_type', default='first_close')
+                    close_type_result = self._classify_enum(
+                        [close_type_raw], 'close_type',
+                        context='Fund close type for investor commitment')
+                    close_type = close_type_result.get(close_type_raw, 'first_close')
 
                     units = _find_col_decimal(
                         row, 'Units Allocated', 'Units', 'Allotted Units')
@@ -2318,24 +2269,17 @@ class FundImportService:
 
                     status_raw = _find_col_str(
                         row, 'Status', 'Call Status', 'LP Notified?', default='Paid')
-                    status_map = {
-                        'paid': 'paid', 'funded': 'paid', 'yes': 'paid',
-                        'pending': 'pending',
-                        'partially paid': 'partially_paid',
-                        'partial': 'partially_paid',
-                        'overdue': 'overdue',
-                    }
-                    status = status_map.get(status_raw.lower(), 'paid')
+                    call_status_result = self._classify_enum(
+                        [status_raw], 'capital_call_status',
+                        context='Capital call funding status')
+                    status = call_status_result.get(status_raw, 'paid')
 
                     if not total_amt or total_amt <= 0:
                         continue
-                    # Skip summary/total rows (e.g. "TOTAL CALLED") —
-                    # call_num is only None when the first column has text, not a number
+                    # Skip summary/total rows — call_num is only None when
+                    # the first column has text, not a number
                     if not call_num:
-                        # If purpose looks like a total/summary label, skip row
-                        if _is_junk_row(purpose) or (
-                            purpose.strip().upper().startswith(('TOTAL', 'VALIDATION', 'SUM', 'CROSS'))
-                        ):
+                        if _is_junk_row(purpose):
                             continue
                         call_num = call_count + 1
 
@@ -2419,7 +2363,9 @@ class FundImportService:
                             defaults={
                                 'called_amount': called_amt,
                                 'cumulative_called_pct': cum_pct,
-                                'payment_status': 'paid' if 'paid' in pay_status_raw.lower() else 'pending',
+                                'payment_status': self._classify_enum(
+                                    [pay_status_raw], 'payment_status',
+                                    context='Capital call payment status').get(pay_status_raw, 'pending'),
                                 'amount_received': received or called_amt,
                                 'payment_date': pay_date or parent_call.call_date,
                             },
@@ -2559,11 +2505,13 @@ class FundImportService:
                 # Gemini classifies combined company+investment tables as
                 # 'investments' — check if rows also have company identity
                 # columns to decide if this is combined or pure investment.
-                if sec_rows and any(
-                    k.lower() in ('company name', 'company', 'name',
-                                  'portfolio company', 'investee')
-                    for k in sec_headers
-                ):
+                # Check if rows have company identity columns via alias map
+                _sec_norm = {k.lower().replace(' ', '_').replace('-', '_')
+                             for k in sec_headers}
+                if sec_rows and ('company_name' in _sec_norm
+                                or 'company_name' in set(
+                                    self._get_alias(ws).get(k, '')
+                                    for k in sec_headers)):
                     combined_rows = sec_rows
                 else:
                     investment_rows = sec_rows
@@ -2642,16 +2590,11 @@ class FundImportService:
                     target_scheme = schemes.get(scheme_name_raw, default_scheme)
 
                 instrument_raw = _find_col_str(
-                    row, 'Instrument Type', 'Instrument', 'Security Type',
-                    default='Equity')
-                instrument_map = {
-                    'equity': 'equity', 'safe': 'safe', 'ccps': 'ccps',
-                    'convertible note': 'convertible_note',
-                    'convertible': 'convertible_note',
-                    'preference': 'preference_shares', 'ccd': 'ccd',
-                    'debt': 'debt', 'warrant': 'warrant',
-                }
-                instrument = instrument_map.get(instrument_raw.lower(), 'equity')
+                    row, 'instrument_type', default='Equity')
+                instrument_result = self._classify_enum(
+                    [instrument_raw], 'instrument_type',
+                    context='Investment instrument or security type')
+                instrument = instrument_result.get(instrument_raw, 'equity')
 
                 stage = _find_col_str(row, 'Round', 'Stage', 'Funding Round', 'Round Name')
                 irr_raw = _find_col_decimal(
@@ -2676,12 +2619,10 @@ class FundImportService:
                 is_lead = _find_col_bool(
                     row, 'Lead Investor', 'Is Lead', 'Lead')
 
-                status_map = {
-                    'active': 'active', 'partially exited': 'partially_exited',
-                    'fully exited': 'fully_exited', 'written off': 'written_off',
-                    'write-off': 'written_off', 'exited': 'fully_exited',
-                }
-                status = status_map.get(status_raw.lower(), 'active')
+                status_result = self._classify_enum(
+                    [status_raw], 'investment_status',
+                    context='Investment/portfolio company status')
+                status = status_result.get(status_raw, 'active')
 
                 inv_defaults = {
                     'portfolio_company': company,
@@ -2767,8 +2708,9 @@ class FundImportService:
             if country:
                 pc_update['headquarters_country'] = country
             if listing_raw:
-                pc_update['is_quoted'] = listing_raw.lower() in (
-                    'listed', 'quoted', 'yes', 'true', '1', 'public')
+                qs = self._classify_enum([listing_raw], 'quoted_status',
+                                          context='Listing status of portfolio company')
+                pc_update['is_quoted'] = (qs.get(listing_raw) == 'quoted')
             if listing_exchange:
                 pc_update['listing_exchange'] = listing_exchange.upper()
 
@@ -2800,12 +2742,10 @@ class FundImportService:
             board_seat = _find_col_bool(row, 'Board', 'Board Seat',
                                          'Has Board Seat')
 
-            status_map = {
-                'active': 'active', 'partially exited': 'partially_exited',
-                'fully exited': 'fully_exited', 'written off': 'written_off',
-                'write-off': 'written_off', 'exited': 'fully_exited',
-            }
-            status = status_map.get(status_raw.lower(), 'active')
+            status_result = self._classify_enum(
+                [status_raw], 'investment_status',
+                context='Investment/portfolio company status')
+            status = status_result.get(status_raw, 'active')
 
             inv_a_defaults = {
                 'portfolio_company': company,
@@ -3063,21 +3003,10 @@ class FundImportService:
                 'Val Method', 'IPEV Technique', 'Technique',
                 'Val. Method', 'Valuation Basis')
 
-            method_map = {
-                'dcf': 'dcf', 'comparables': 'comparables',
-                'market comparables': 'comparables',
-                'recent transaction': 'recent_transaction',
-                'net assets': 'net_assets', 'cost': 'cost',
-                'revenue multiple': 'comparables',
-                'ebitda multiple': 'comparables',
-                'p/e multiple': 'comparables',
-                'ev/ebitda': 'comparables',
-                'book value': 'net_assets',
-                'option pricing model': 'option_pricing',
-                'opm': 'option_pricing',
-                'nav': 'net_assets',
-            }
-            methodology = method_map.get(methodology_raw.lower(), 'cost')
+            val_method_result = self._classify_enum(
+                [methodology_raw], 'valuation_methodology',
+                context='Valuation methodology for portfolio company')
+            methodology = val_method_result.get(methodology_raw, 'cost')
 
             ev = _find_col_decimal(
                 row, 'EV(₹Cr)', 'Enterprise Value (Cr)',
@@ -3110,15 +3039,18 @@ class FundImportService:
                 'net_assets': 3, 'cost': 3, 'option_pricing': 3,
             }
             ipev_level = _IPEV_LEVEL_MAP.get(methodology, 3)
-            # IPEV Technique column may explicitly say "Level 2" for market comparables
+            # IPEV Technique column may explicitly specify the fair value level
             _ipev_technique_raw = _find_col_str(
-                row, 'IPEV Technique', 'Technique', 'IPEV Level', 'Level')
+                row, 'ipev_level', 'ipev_technique')
             if _ipev_technique_raw:
-                _tl = _ipev_technique_raw.lower()
-                if 'level 2' in _tl or 'level2' in _tl:
-                    ipev_level = 2
-                elif 'level 1' in _tl or 'level1' in _tl:
-                    ipev_level = 1
+                _ipev_result = self._classify_enum(
+                    [_ipev_technique_raw], 'ipev_level',
+                    context='IPEV fair value hierarchy level')
+                _ipev_mapped = _ipev_result.get(_ipev_technique_raw, str(ipev_level))
+                try:
+                    ipev_level = int(_ipev_mapped)
+                except (ValueError, TypeError):
+                    pass
 
             # Compute MOIC from FV / Cost if not directly in the sheet.
             if moic is None and equity_val:
@@ -3233,9 +3165,11 @@ class FundImportService:
                     count += 1
         else:
             # Check if this is a vertical format (KPI Name column exists) or flat snapshot
-            has_kpi_name_col = any(
-                str(h or '').lower().strip() in ('kpi name', 'kpi', 'metric', 'indicator')
-                for h in headers_dict.keys()
+            # Detect via Gemini Pass 2 alias map: any column mapped to kpi_name
+            _alias = self._get_alias(ws)
+            has_kpi_name_col = (
+                'kpi_name' in {str(h or '').lower().strip() for h in headers_dict.keys()}
+                or 'kpi_name' in set(_alias.values())
             )
 
             if has_kpi_name_col:
@@ -3290,135 +3224,56 @@ class FundImportService:
 
         logger.info(f'  KPIs: {count}')
 
-    def _semantic_kpi_column_map(self, raw_headers):
-        """
-        Use Gemini to semantically map raw KPI column headers to canonical names.
+    # KPI canonical key → display name + format
+    _KPI_DISPLAY = {
+        'gmv': ('GMV', 'currency'), 'revenue': ('Revenue', 'currency'),
+        'gross_margin_pct': ('Gross Margin %', 'percent'), 'ebitda': ('EBITDA', 'currency'),
+        'ebitda_pct': ('EBITDA %', 'percent'), 'orders': ('Orders', 'number'),
+        'aov': ('AOV', 'currency'), 'returns_pct': ('Returns %', 'percent'),
+        'cac': ('CAC', 'currency'), 'repeat_pct': ('Repeat %', 'percent'),
+        'cost_to_income': ('Cost to Income', 'ratio'), 'nim_pct': ('NIM %', 'percent'),
+        'gnpa_pct': ('GNPA %', 'percent'), 'nnpa_pct': ('NNPA %', 'percent'),
+        'roe_pct': ('ROE %', 'percent'), 'aum': ('AUM', 'currency'),
+        'car_pct': ('CAR %', 'percent'), 'd_ebitda': ('D/EBITDA', 'ratio'),
+        'capacity_pct': ('Capacity %', 'percent'), 'export_pct': ('Export %', 'percent'),
+        'headcount': ('Headcount', 'number'), 'bed_occupancy': ('Bed Occupancy', 'percent'),
+        'arpob': ('ARPOB', 'currency'), 'cap_rate_pct': ('Cap Rate %', 'percent'),
+        'cost': ('Cost', 'currency'), 'fv': ('FV', 'currency'),
+        'moic': ('MOIC', 'ratio'), 'mrr': ('MRR', 'currency'),
+        'arr': ('ARR', 'currency'), 'churn_pct': ('Churn %', 'percent'),
+        'nrr_pct': ('NRR %', 'percent'), 'ltv': ('LTV', 'currency'),
+        'ltv_cac': ('LTV/CAC', 'ratio'), 'burn_rate': ('Burn Rate', 'currency'),
+        'runway': ('Runway', 'number'), 'pat': ('PAT', 'currency'),
+    }
 
-        For example: "GMV (Cr)" → "GMV", "Gross M%" → "Gross Margin %",
-        "Rev" → "Revenue", "AOV" → "Average Order Value", etc.
+    def _semantic_kpi_column_map(self, raw_headers):
+        """Use Gemini Pass 3 to semantically map raw KPI column headers to canonical names.
 
         Returns: dict mapping raw_header → {canonical_name, slug, format}
         """
         if not raw_headers:
             return {}
 
-        # Define canonical KPI definitions with known aliases
-        CANONICAL_KPIS = {
-            'GMV': {'aliases': ['gmv', 'gross merchandise value', 'gross merch value', 'gmv (cr)', 'gmv in crore', 'gmv(lakhs)', 'gross sales value', 'total gmv'], 'format': 'currency'},
-            'Revenue': {'aliases': ['revenue', 'rev', 'net sales', 'revenue (cr)', 'revcr', 'net revenue', 'turnover', 'top line', 'total revenue', 'rev(cr)'], 'format': 'currency'},
-            'Gross Margin %': {'aliases': ['gross margin', 'gross m%', 'gm%', 'gross margin %', 'gross profit margin', 'gross profit %'], 'format': 'percent'},
-            'EBITDA': {'aliases': ['ebitda', 'ebitda (cr)', 'operating profit', 'ebitda margin amount', 'ebitdacr'], 'format': 'currency'},
-            'EBITDA %': {'aliases': ['ebitda %', 'ebitda margin', 'ebitda%', 'operating margin', 'ebitda margin %'], 'format': 'percent'},
-            'Orders': {'aliases': ['orders', 'order count', 'total orders', 'no. of orders', '# orders', 'transactions'], 'format': 'number'},
-            'AOV': {'aliases': ['aov', 'avg order value', 'average order value', 'avg transaction value', 'average ticket size'], 'format': 'currency'},
-            'Returns %': {'aliases': ['returns', 'return %', 'return rate', 'rto %', 'product returns %', 'return rate %'], 'format': 'percent'},
-            'CAC': {'aliases': ['cac', 'cac(₹)', 'customer acquisition cost', 'blended cac', 'cost to acquire'], 'format': 'currency'},
-            'Repeat %': {'aliases': ['repeat %', 'repeat rate', 'repeat customer %', 'retention %', 'customer retention', 'repeat customer rate'], 'format': 'percent'},
-            'Cost to Income': {'aliases': ['cost:inc', 'cost to income', 'cost/income', 'ci ratio', 'cost to income ratio'], 'format': 'ratio'},
-            'NIM %': {'aliases': ['nim%', 'nim', 'net interest margin', 'nim (%)', 'interest margin'], 'format': 'percent'},
-            'GNPA %': {'aliases': ['gnpa%', 'gross npa', 'gnpa', 'gross non-performing assets %'], 'format': 'percent'},
-            'NNPA %': {'aliases': ['nnpa%', 'net npa', 'nnpa', 'net non-performing assets %'], 'format': 'percent'},
-            'ROE %': {'aliases': ['roe %', 'roe', 'return on equity', 'return on equity %'], 'format': 'percent'},
-            'AUM': {'aliases': ['aum', 'aum (rs cr)', 'aum(₹cr)', 'total aum', 'managed assets', 'assets under management'], 'format': 'currency'},
-            'CAR %': {'aliases': ['car%', 'car', 'capital adequacy ratio', 'capital adequacy', 'car %'], 'format': 'percent'},
-            'D/EBITDA': {'aliases': ['d/ebitda', 'debt/ebitda', 'leverage', 'debt to ebitda', 'net debt/ebitda'], 'format': 'ratio'},
-            'Capacity %': {'aliases': ['capacity%', 'capacity utilization', 'capacity util %', 'plant utilization', 'util %'], 'format': 'percent'},
-            'Export %': {'aliases': ['export%', 'export revenue %', 'export share', 'exports %', 'export contribution'], 'format': 'percent'},
-            'Headcount': {'aliases': ['headcount', 'employees', 'team size', 'fte', 'full time employees', 'staff count', 'hc'], 'format': 'number'},
-            'Bed Occupancy': {'aliases': ['bed occupancy', 'occupancy %', 'bed occupancy %', 'hospital occupancy'], 'format': 'percent'},
-            'ARPOB': {'aliases': ['arpob', 'arpob (rs/day)', 'avg rev per bed', 'revenue per bed'], 'format': 'currency'},
-            'Cap Rate %': {'aliases': ['cap rate%', 'cap rate', 'capitalization rate', 'yield %'], 'format': 'percent'},
-            'Cost': {'aliases': ['cost', 'investment cost', 'deployed capital', 'capital deployed', 'total cost'], 'format': 'currency'},
-            'FV': {'aliases': ['fv', 'fair value', 'fmv', 'market value', 'current value', 'portfolio value'], 'format': 'currency'},
-            'MOIC': {'aliases': ['moic', 'multiple', 'multiple on invested capital', 'money multiple'], 'format': 'ratio'},
-            'MRR': {'aliases': ['mrr', 'monthly recurring revenue', 'recurring revenue'], 'format': 'currency'},
-            'ARR': {'aliases': ['arr', 'annual recurring revenue', 'arr (rs cr)', 'arrcr'], 'format': 'currency'},
-            'Churn %': {'aliases': ['churn %', 'churn rate', 'revenue churn', 'customer churn', 'monthly churn', 'churn %/mo'], 'format': 'percent'},
-            'NRR %': {'aliases': ['nrr', 'nrr %', 'net revenue retention', 'net dollar retention', 'ndr'], 'format': 'percent'},
-            'LTV': {'aliases': ['ltv', 'clv', 'customer ltv', 'lifetime value', 'customer value'], 'format': 'currency'},
-            'LTV/CAC': {'aliases': ['ltv/cac', 'ltv:cac', 'ltv cac ratio', 'payback multiple'], 'format': 'ratio'},
-            'Burn Rate': {'aliases': ['burn rate', 'net burn', 'gross burn', 'monthly burn', 'cash burn'], 'format': 'currency'},
-            'Runway': {'aliases': ['runway', 'runway months', 'cash runway', 'months of runway', 'runway left'], 'format': 'number'},
-            'PAT': {'aliases': ['pat', 'profit after tax', 'net profit', 'net income', 'bottomline'], 'format': 'currency'},
-        }
+        # Classify all headers via Gemini in a single call
+        kpi_map = self._classify_labels(raw_headers, 'kpi_types',
+                                         context='KPI column headers from portfolio sheet')
 
         result = {}
-
-        # First pass: exact/fuzzy local matching
-        unmatched = []
         for raw in raw_headers:
-            raw_lower = raw.lower().strip()
-            # Remove units in brackets for matching: "GMV (Cr)" → "gmv"
-            clean = raw_lower.replace('(cr)', '').replace('(lakhs)', '').replace('(₹)', '').replace('(rs cr)', '').strip()
-            matched = False
-            for canonical_name, info in CANONICAL_KPIS.items():
-                if clean in info['aliases'] or raw_lower in info['aliases']:
-                    result[raw] = {
-                        'canonical_name': canonical_name,
-                        'slug': slugify(canonical_name),
-                        'format': info['format'],
-                    }
-                    matched = True
-                    break
-            if not matched:
-                unmatched.append(raw)
-
-        # Second pass: use Gemini for unmatched columns
-        if unmatched:
-            try:
-                import google.generativeai as genai
-                from django.conf import settings
-                if settings.GEMINI_API_KEY:
-                    genai.configure(api_key=settings.GEMINI_API_KEY)
-                    model = genai.GenerativeModel(
-                        getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash'),
-                        generation_config={'temperature': 0, 'response_mime_type': 'application/json'}
-                    )
-                    canonical_list = list(CANONICAL_KPIS.keys())
-                    prompt = f"""Map these Excel column headers to their canonical KPI names.
-
-Unmatched headers: {unmatched}
-
-Canonical KPI names (pick from this list or use "UNKNOWN"): {canonical_list}
-
-Rules:
-- Match semantically, not just syntactically. "Gross Merch Value" = "GMV", "Rev(Cr)" = "Revenue"
-- If a header has units like "(Cr)", "(Lakhs)", "(₹)" — ignore the unit for matching
-- If % or M% appears, it's likely a percentage KPI
-- If no match, use "UNKNOWN"
-
-Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
-
-                    resp = model.generate_content(prompt)
-                    import json
-                    text = resp.text.strip()
-                    if text.startswith('```'):
-                        text = text.split('\n', 1)[-1].rsplit('```', 1)[0]
-                    mapping = json.loads(text)
-
-                    for raw in unmatched:
-                        canonical = mapping.get(raw, 'UNKNOWN')
-                        if canonical != 'UNKNOWN' and canonical in CANONICAL_KPIS:
-                            result[raw] = {
-                                'canonical_name': canonical,
-                                'slug': slugify(canonical),
-                                'format': CANONICAL_KPIS[canonical]['format'],
-                            }
-                        else:
-                            # Keep original name as-is
-                            result[raw] = {
-                                'canonical_name': raw,
-                                'slug': slugify(raw),
-                                'format': 'percent' if '%' in raw else 'number',
-                            }
-            except Exception as e:
-                logger.warning(f'Gemini KPI column mapping failed: {e}')
-                for raw in unmatched:
-                    result[raw] = {
-                        'canonical_name': raw,
-                        'slug': slugify(raw),
-                        'format': 'percent' if '%' in raw else 'number',
-                    }
+            canonical_key = kpi_map.get(raw)
+            if canonical_key and canonical_key in self._KPI_DISPLAY:
+                display_name, fmt = self._KPI_DISPLAY[canonical_key]
+                result[raw] = {
+                    'canonical_name': display_name,
+                    'slug': slugify(display_name),
+                    'format': fmt,
+                }
+            else:
+                result[raw] = {
+                    'canonical_name': raw,
+                    'slug': slugify(raw),
+                    'format': 'percent' if '%' in raw else 'number',
+                }
 
         return result
 
@@ -3437,10 +3292,12 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
         "GMV (Cr)", "GMV in Crore", "Gross Merch Value" all map to the same
         canonical KPI definition via fuzzy/semantic matching.
         """
-        # Only skip identity/metadata columns — NOT data columns like cost, fv
+        # Skip identity/metadata columns — use canonical field names + format tokens.
+        # Single-character tokens (#, id) and canonical names are language-independent.
         SKIP_COL_LOWER = {
-            'company', 'company name', 'name', '#', 'id', 'sr', 'sl', 'no',
-            'sector', 'industry', 'segment', 'status', 'stage', 'city',
+            'company_name', 'name', '#', 'id', 'sr', 'sl', 'no',
+            'sector', 'sub_sector', 'status', 'stage', 'headquarters_city',
+            'instrument_type', 'round_name', 'scheme_name',
         }
         snapshot_date = date.today()
         count = 0
@@ -3462,8 +3319,9 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
 
             first_cell = str(row_vals[0] or '').strip()
 
-            # Detect header row: first cell is 'Company' or 'Company Name'
-            if first_cell.lower() in ('company', 'company name', 'name'):
+            # Detect header row: first cell maps to 'company_name' canonical field
+            _fc_norm = first_cell.lower().replace(' ', '_')
+            if _fc_norm in ('company', 'company_name', 'name'):
                 current_headers = []
                 raw_kpi_headers = []
                 for col_idx, val in enumerate(row_vals, 1):
@@ -3471,7 +3329,9 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
                         continue
                     header = str(val).strip()
                     header_norm = _normalize_col_key(header)
-                    if header_norm.lower() in SKIP_COL_LOWER or header.lower() in SKIP_COL_LOWER:
+                    _hn = header_norm.lower().replace(' ', '_')
+                    _hl = header.lower().replace(' ', '_')
+                    if _hn in SKIP_COL_LOWER or _hl in SKIP_COL_LOWER:
                         continue
                     if not header_norm:
                         continue
@@ -3643,42 +3503,24 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
             from collections import defaultdict
             company_period_data = defaultdict(lambda: defaultdict(dict))
 
+            # Pre-classify all unique metric labels via Gemini Pass 3
+            _metric_labels = set()
             for row in rows:
-                name = _find_col_str(row, 'Company Name', 'Company', 'Name')
-                metric = _find_col_str(row, 'KPI Name', 'Metric', 'KPI',
-                                       'Indicator', 'Financial Metric')
+                metric = _find_col_str(row, 'kpi_name', 'metric')
+                if metric:
+                    _metric_labels.add(metric)
+            _metric_map = self._classify_labels(list(_metric_labels), 'burn_runway_metrics',
+                                                 context='Burn rate and runway metrics for portfolio companies')
+
+            for row in rows:
+                name = _find_col_str(row, 'company_name')
+                metric = _find_col_str(row, 'kpi_name', 'metric')
                 if not name or not metric:
                     continue
                 if _is_junk_row(name):
                     continue
 
-                m = metric.lower()
-                field = None
-                if any(k in m for k in (
-                    'gross burn', 'total burn', 'gross_burn', 'total outflow',
-                    'total expenses', 'opex burn', 'total opex',
-                    'total monthly expenses', 'cash outflow', 'operating expenses',
-                )):
-                    field = 'gross_burn'
-                elif any(k in m for k in (
-                    'net burn', 'net_burn', 'net outflow', 'net cash burn',
-                    'net monthly burn', 'net burn rate', 'net cash outflow',
-                    'operating cash flow', 'net operating cash',
-                )):
-                    field = 'net_burn'
-                elif any(k in m for k in (
-                    'cash in bank', 'cash balance', 'cash_balance',
-                    'cash & equiv', 'available cash', 'bank balance',
-                    'closing cash', 'closing balance', 'total cash',
-                    'cash reserves', 'cash on hand',
-                )) or (m.strip() == 'cash'):
-                    field = 'cash_balance'
-                elif any(k in m for k in (
-                    'runway', 'months of runway', 'runway_months',
-                    'cash runway', 'months runway', 'runway remaining',
-                    'estimated runway', 'months left',
-                )):
-                    field = 'runway_months'
+                field = _metric_map.get(metric)
                 if not field:
                     continue
 
@@ -3735,70 +3577,25 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
             # they represent a current snapshot.  Use today as the period.
             snapshot_date = date.today()
 
-            # Guard: only extract SaaS KPIs (MRR, ARR, NRR, CAC…) from sheets
-            # that actually have SaaS-specific column headers.  Generic financial
-            # sheets with "Revenue" / "EBITDA" columns must NOT be treated as SaaS
-            # sheets — "Revenue" falsely matches the "Monthly Revenue" MRR candidate
-            # and "Net Revenue Retention" NRR candidate via Pass-5 loose matching.
-            _SAAS_HEADER_SIGNALS = {
-                'mrr', 'arr', 'nrr', 'cac', 'ltv', 'churn',
-                'recurring', 'retention', 'acquisition',
-            }
-            _sheet_headers_lower = {str(h or '').lower() for h in headers_dict.keys()}
-            _has_real_saas_cols = any(
-                any(sig in h for sig in _SAAS_HEADER_SIGNALS)
-                for h in _sheet_headers_lower
-            )
+            # Guard: only extract SaaS KPIs from sheets with SaaS-specific headers.
+            # Check via Gemini Pass 2 alias map: if any canonical field is a SaaS KPI.
+            _saas_canonical = {'mrr', 'arr', 'nrr_pct', 'churn_pct', 'cac', 'ltv', 'ltv_cac'}
+            _alias_map = self._get_alias(ws)
+            _has_real_saas_cols = bool(_saas_canonical & set(_alias_map.values()))
 
-            # SaaS KPI definitions — created once, reused per row.
-            # Candidates are ordered: exact formats first (for Pass-1/2 match),
-            # then common abbreviations, then full semantic names (Pass-3/4/5).
-            # This covers diverse Excel layouts: columnar, pivot, mixed-currency,
-            # INR Lakhs/Crore notation, USD, SaaS-specific terminology, etc.
+            # SaaS KPI definitions — canonical field name only.
+            # Gemini Pass 2 maps Excel column headers (in ANY language) to
+            # canonical field names (arr, mrr, nrr, etc.) which are added as
+            # keys in the row dict by read_table_from_sheet(). No hardcoded
+            # English alias lists needed.
             SAAS_KPI_DEFS = [
-                ('arr', 'ARR', 'currency', 'saas', (
-                    'ARR(Cr)*', 'ARR(Cr)', 'ARR (Cr)', 'ARR (₹Cr)', 'ARR($M)',
-                    'ARR(M)', 'ARR (Mn)', 'ARR', 'Annual Recurring Revenue',
-                    'Annual Run Rate', 'Annualized Revenue', 'Annual Revenue Run Rate',
-                )),
-                ('mrr', 'MRR', 'currency', 'saas', (
-                    'MRR(Cr)*', 'MRR(Cr)', 'MRR (Cr)', 'MRR (₹Cr)', 'MRR($M)',
-                    'MRR(M)', 'MRR (Mn)', 'MRR', 'Monthly Recurring Revenue',
-                    'Monthly Revenue', 'Monthly Recurring Rev',
-                )),
-                ('nrr', 'NRR', 'percent', 'saas', (
-                    'NRR%', 'NRR %', 'NRR', 'Net Revenue Retention',
-                    'Net Revenue Retention Rate', 'Net Retention Rate',
-                    'Net Dollar Retention', 'NDR', 'NDR%', 'NRR (Net Retention)',
-                    'Net Retention', 'Revenue Retention',
-                )),
-                ('churn-rate', 'Churn Rate', 'percent', 'saas', (
-                    'Churn%/mo', 'Churn%', 'Churn % /mo', 'Churn Rate (%)',
-                    'Monthly Churn Rate', 'Monthly Churn', 'Churn Rate',
-                    'Revenue Churn', 'Customer Churn', 'Churn (Monthly)',
-                    'MoM Churn', 'Gross Churn', 'Net Churn',
-                    'ChurnSale', 'Churn/Sale', 'Churn Sale', 'Churn % Sale',
-                    'Churn%Sale', 'Monthly Churn%', 'Churn (%)','Churn(%)',
-                )),
-                ('cac', 'CAC', 'currency', 'saas', (
-                    'CAC(Lakhs)', 'CAC (Lakhs)', 'CAC (₹L)', 'CAC($)', 'CAC (₹)',
-                    'CAC', 'Customer Acquisition Cost', 'Blended CAC',
-                    'Avg CAC', 'Cost of Acquisition', 'Customer Acq. Cost',
-                    'CACLac', 'CAC Lac', 'CAC(Lac)', 'CAC(L)', 'CACLacs',
-                    'CAC (Lac)', 'CAC(Lacs)', 'CAC (Lacs)', 'CAC (₹Lac)',
-                )),
-                ('ltv', 'LTV', 'currency', 'saas', (
-                    'LTV', 'CLV', 'Customer LTV', 'Lifetime Value',
-                    'Customer Lifetime Value', 'LTV (₹)', 'LTV(₹)',
-                    'LTV(Lakhs)', 'LTV (Lakhs)', 'LTV(Cr)', 'LTV (Cr)',
-                    'LTV(Lac)', 'LTV (Lac)', 'LTV($)', 'LTV (Rs)',
-                    'Life Time Value', 'LifeTime Value', 'Customer Value',
-                )),
-                ('ltv-cac', 'LTV:CAC Ratio', 'ratio', 'saas', (
-                    'LTV:CAC', 'LTV/CAC', 'LTV-CAC', 'LTV CAC',
-                    'LTV:CAC Ratio', 'LTV/CAC Ratio', 'LTV to CAC',
-                    'Lifetime Value to CAC', 'LTV CAC Multiple',
-                )),
+                ('arr',       'ARR',            'currency', 'saas', 'arr'),
+                ('mrr',       'MRR',            'currency', 'saas', 'mrr'),
+                ('nrr',       'NRR',            'percent',  'saas', 'nrr'),
+                ('churn-rate', 'Churn Rate',    'percent',  'saas', 'churn_rate'),
+                ('cac',       'CAC',            'currency', 'saas', 'cac'),
+                ('ltv',       'LTV',            'currency', 'saas', 'ltv'),
+                ('ltv-cac',   'LTV:CAC Ratio',  'ratio',   'saas', 'ltv_cac_ratio'),
             ]
             kpi_def_cache = {}
             for slug, name_label, fmt, tmpl, _ in SAAS_KPI_DEFS:
@@ -3810,7 +3607,7 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
                 kpi_def_cache[slug] = kd
 
             for row in rows:
-                name = _find_col_str(row, 'Company Name', 'Company', 'Name')
+                name = _find_col_str(row, 'company_name')
                 if not name or _is_junk_row(name):
                     continue
 
@@ -3823,42 +3620,17 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
                     continue
 
                 company = companies.get(name)
-                period_date = _find_col_date(row, 'Period', 'Date', 'Month',
-                                             'Reporting Month')
+                period_date = _find_col_date(row, 'period', 'kpi_period')
                 # Snapshot sheets have no period column — fall back to today
                 if not period_date:
                     period_date = snapshot_date
 
-                gross = _find_col_decimal(
-                    row,
-                    'Gross Burn', 'Gross Burn(Cr/mo)', 'Gross Burn (Cr/mo)',
-                    'Gross Burn Rate', 'Total Burn', 'Total Burn Rate',
-                    'Monthly Expenses', 'Total Monthly Expenses',
-                    'Cash Outflow', 'Total Cash Outflow', 'Opex Burn',
-                    'Operating Expenses', 'Total Opex', 'gross_burn',
-                )
-                net = _find_col_decimal(
-                    row,
-                    'Net Burn', 'Net Burn(Cr/mo)', 'Net Burn (Cr/mo)',
-                    'Net Cash Burn', 'Net Monthly Burn', 'Net Burn Rate',
-                    'Net Outflow', 'Net Cash Outflow', 'Cash Burn (Net)',
-                    'Net Operating Cash Flow', 'net_burn',
-                )
-                cash = _find_col_decimal(
-                    row,
-                    'Cash in Bank', 'Cash in Bank(Cr)', 'Cash Balance',
-                    'Cash & Equivalents', 'Cash & Cash Equivalents',
-                    'Cash on Hand', 'Available Cash', 'Bank Balance',
-                    'Closing Cash', 'Closing Balance', 'Cash Reserves',
-                    'Total Cash', 'cash_balance',
-                )
-                runway = _find_col_decimal(
-                    row,
-                    'Runway(mo)', 'Runway (Months)', 'Runway (mo)',
-                    'Months of Runway', 'Cash Runway', 'Runway (Months Left)',
-                    'Estimated Runway', 'Runway Remaining', 'Months Runway',
-                    'runway_months',
-                )
+                # Gemini Pass 2 adds canonical field names as row keys —
+                # no hardcoded English candidates needed.
+                gross = _find_col_decimal(row, 'gross_burn')
+                net = _find_col_decimal(row, 'net_burn')
+                cash = _find_col_decimal(row, 'cash_balance')
+                runway = _find_col_decimal(row, 'runway_months')
 
                 if runway is None and cash is not None and net and net > 0:
                     from decimal import Decimal
@@ -3882,15 +3654,11 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
                     )
                     count += 1
 
-                # Extract SaaS KPIs (ARR, MRR, NRR, Churn, CAC, LTV:CAC) from
-                # the same row — ONLY if the sheet has actual SaaS-specific column
-                # headers.  Without this guard, generic financial columns like
-                # "Revenue" falsely match "Monthly Revenue" (MRR candidate) and
-                # "Net Revenue Retention" (NRR candidate) via Pass-5 substring match,
-                # resulting in revenue figures being imported as MRR/ARR/NRR.
+                # Extract SaaS KPIs from the same row — ONLY if the sheet has
+                # actual SaaS-specific columns (detected via Gemini Pass 2).
                 if _has_real_saas_cols:
-                    for slug, _label, _fmt, _tmpl, candidates in SAAS_KPI_DEFS:
-                        val = _find_col_decimal(row, *candidates)
+                    for slug, _label, _fmt, _tmpl, canonical_field in SAAS_KPI_DEFS:
+                        val = _find_col_decimal(row, canonical_field)
                         if val is None:
                             continue
                         kd = kpi_def_cache[slug]
@@ -3912,93 +3680,37 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
     # MIS Financials — P&L and Budget vs Actual for BudgetVsActual model
     # ------------------------------------------------------------------
 
-    # Map column header / row label text → BudgetVsActual.line_item key
-    _PL_LINE_ITEM_KEYWORDS = {
-        'revenue':              ('revenue', 'net sales', 'net revenue', 'operating revenue',
-                                 'top line', 'sales revenue', 'total sales', 'gross revenue',
-                                 'income from operations', 'operational revenue'),
-        'other_income':         ('other income', 'non-operating income', 'non operating',
-                                 'interest income', 'dividend income', 'misc income'),
-        'total_revenue':        ('total revenue', 'total income', 'total topline', 'gross income',
-                                 'total net revenue', 'net revenue total'),
-        'cogs':                 ('cogs', 'cost of goods sold', 'cost of sales', 'cost of revenue',
-                                 'direct cost', 'variable cost', 'material cost',
-                                 'cost of production', 'cost of service', 'cost of goods'),
-        'gross_profit':         ('gross profit', 'gross margin', 'contribution', 'gp',
-                                 'revenue less cogs', 'revenue after cogs'),
-        'employee_cost':        ('employee', 'payroll', 'salaries', 'staff cost', 'people cost',
-                                 'compensation', 'manpower', 'hr cost', 'talent cost',
-                                 'personnel cost', 'team cost', 'labour cost', 'labor cost',
-                                 'wages', 'human resource'),
-        'marketing_cost':       ('marketing', 'sales & marketing', 'advertising', 'promotion',
-                                 'ads spend', 'brand cost', 's&m', 'sales and marketing',
-                                 'customer acquisition cost', 'growth cost'),
-        'rd_cost':              ('r&d', 'research', 'development cost', 'r & d', 'tech cost',
-                                 'product cost', 'engineering cost', 'innovation cost',
-                                 'research and development', 'rd expense'),
-        'g_and_a':              ('g&a', 'general admin', 'overhead', 'corporate cost', 'g & a',
-                                 'admin cost', 'administrative', 'general and admin',
-                                 'corporate overhead', 'office cost'),
-        'total_opex':           ('total opex', 'opex', 'op ex', 'total operating expense', 'total cost',
-                                 'total expenditure', 'total expenses', 'operating expenses',
-                                 'total operating cost', 'all opex', 'total overheads'),
-        'ebitda':               ('ebitda', 'ebidta', 'ebit da', 'operating profit before dep',
-                                 'earnings before interest tax dep', 'operating cash profit',
-                                 'ebitda margin', 'ebidta margin'),
-        'depreciation':         ('depreciation', 'amortisation', 'amortization', 'd&a', ' da ',
-                                 'dep.', 'depr.', 'depreciation and amortization',
-                                 'dep & amort', 'da charge'),
-        'ebit':                 ('ebit', 'earnings before interest and tax', 'operating income',
-                                 'operating profit', 'income from operations after dep'),
-        'finance_cost':         ('finance cost', 'interest expense', 'interest cost',
-                                 'borrowing cost', 'financial charges', 'interest paid',
-                                 'finance charges', 'interest on loan', 'bank interest'),
-        'pbt':                  ('pbt', 'profit before tax', 'earnings before tax',
-                                 'pre-tax profit', 'profit before income tax', 'income before tax',
-                                 'earnings before taxes', 'pre tax income'),
-        'tax':                  ('income tax', 'tax expense', 'current tax', 'deferred tax',
-                                 'tax provision', 'taxes', 'total tax', 'tax charge'),
-        'pat':                  ('pat', 'profit after tax', 'net profit', 'net income',
-                                 'net earnings', 'bottom line', 'profit for the year',
-                                 'net loss', 'after tax profit', 'profit for period',
-                                 'net profit after tax', 'profit attributable'),
-        'total_assets':         ('total assets', 'balance sheet total', 'total asset',
-                                 'gross assets', 'total resources'),
-        'total_debt':           ('total debt', 'borrowings', 'total loans', 'bank borrowings',
-                                 'long term debt', 'debt outstanding', 'total liabilities',
-                                 'short term borrowing', 'debt'),
-        'cash_and_equivalents': ('cash', 'bank balance', 'cash equivalents', 'liquid assets',
-                                  'cash in bank', 'closing cash', 'cash and bank',
-                                  'cash & equivalents', 'cash and cash equivalents',
-                                  'cash reserves', 'available cash'),
-        'net_worth':            ('net worth', 'shareholders equity', 'shareholders funds',
-                                 'networth', 'total equity', 'owners equity',
-                                 'capital and reserves', 'equity capital', 'book value'),
-        'capex':               ('capex', 'capital expenditure', 'capital expense',
-                                 'cap ex', 'capex additions', 'capital investment',
-                                 'property plant equipment', 'ppe addition',
-                                 'purchase of assets', 'fixed asset addition'),
-        'working_capital':     ('working capital', 'net working capital', 'nwc',
-                                 'current assets minus current liabilities',
-                                 'trade working capital'),
-        'net_working_capital': ('net wc', 'net working cap'),
-        'dividend':            ('dividend', 'dividends paid', 'dividend paid',
-                                 'equity dividend', 'dividend payout'),
-        'other_cost':          ('other cost', 'other expense', 'miscellaneous expense',
-                                 'other charges', 'other expenditure', 'misc cost',
-                                 'sundry expense', 'other operating cost'),
-    }
+    def _pl_pre_classify(self, labels):
+        """Pre-classify a batch of P&L line item labels via Gemini.
 
-    @staticmethod
-    def _pl_map_to_line_item(text):
-        """Map a column header or row label text to a BudgetVsActual.line_item key."""
+        Populates self._pl_line_item_map so subsequent _pl_map_to_line_item() calls
+        are instant cache lookups. Call once per sheet before the row processing loop.
+        """
+        new_labels = [l for l in labels if l and str(l).strip()
+                      and str(l).strip().lower() not in self._pl_line_item_map]
+        if not new_labels:
+            return
+        result = self._classify_labels(new_labels, 'pl_line_items',
+                                        context='P&L / financial statement line item labels')
+        for label, canonical in result.items():
+            self._pl_line_item_map[label.lower().strip()] = canonical
+
+    def _pl_map_to_line_item(self, text):
+        """Map a column header or row label text to a canonical P&L line_item key.
+
+        Uses self._pl_line_item_map (populated by _pl_pre_classify or on-demand Gemini).
+        """
         if not text:
             return None
         t = str(text).lower().strip()
-        for li_key, keywords in FundImportService._PL_LINE_ITEM_KEYWORDS.items():
-            if any(kw in t for kw in keywords):
-                return li_key
-        return None
+        if t in self._pl_line_item_map:
+            return self._pl_line_item_map[t]
+        # On-demand classify for labels not in the pre-classified batch
+        result = self._classify_labels([text], 'pl_line_items',
+                                        context='P&L / financial statement line item label')
+        canonical = result.get(text)
+        self._pl_line_item_map[t] = canonical
+        return canonical
 
     @staticmethod
     def _pl_parse_year_month(period_str):
@@ -4157,10 +3869,7 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
         """
         from mis_consolidation.models import BudgetVsActual, ConsolidatedMIS
 
-        # Qualifiers that distinguish budget vs actual columns
-        _BUD_QUAL = ('budget', 'aop', 'plan', 'target', 'budgeted', 'planned', 'forecast')
-        _ACT_QUAL = ('actual', 'actuals', 'real', 'achieved', 'reported')
-
+        # Period regex — uses standard financial month abbreviations (universal)
         PERIOD_RE = re.compile(
             r'^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[-/]\d{2,4}$'
             r'|^Q[1-4][\s\-]?FY\d{2,4}$'
@@ -4168,14 +3877,10 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
             r'|^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[\s]\d{4}$',
             re.IGNORECASE,
         )
-        # Matches "Budget Apr-24", "Apr-24 Actual", "AOP May 2024", etc.
-        QUALIFIED_PERIOD_RE = re.compile(
-            r'^(?:budget|aop|plan|target|actual|actuals|real|achieved|budgeted)[\s_\-]+'
+        # Inner period pattern (without anchors) for extracting period from qualified headers
+        _INNER_PERIOD_RE = re.compile(
             r'((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[-/\s]\d{2,4}'
-            r'|Q[1-4][\s\-]?FY\d{2,4}|\d{4}[-/]\d{1,2})'
-            r'|^((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[-/\s]\d{2,4}'
-            r'|Q[1-4][\s\-]?FY\d{2,4}|\d{4}[-/]\d{1,2})'
-            r'[\s_\-]+(?:budget|aop|plan|target|actual|actuals|real|achieved|budgeted)$',
+            r'|Q[1-4][\s\-]?FY\d{2,4}|\d{4}[-/]\d{1,2})',
             re.IGNORECASE,
         )
 
@@ -4186,22 +3891,36 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
         period_cols = [h for h in headers_dict.keys()
                        if h and PERIOD_RE.match(str(h).strip())]
 
-        # Detect "Budget Apr-24" / "Apr-24 Actual" style period columns (Layout B2)
-        budget_period_cols = {}   # header_text → (yr, mo)
-        actual_period_cols = {}   # header_text → (yr, mo)
+        # Detect qualified period columns ("Budget Apr-24", "Apr-24 Actual")
+        # via Gemini: classify non-period column headers as budget/actual/variance
+        _candidate_qualified = []
         for h in headers_dict.keys():
             if not h or h in period_cols:
                 continue
             h_str = str(h).strip()
-            m = QUALIFIED_PERIOD_RE.match(h_str)
+            m = _INNER_PERIOD_RE.search(h_str)
             if m:
-                period_part = (m.group(1) or m.group(2) or '').strip()
+                _candidate_qualified.append(h)
+
+        budget_period_cols = {}   # header_text → (yr, mo)
+        actual_period_cols = {}   # header_text → (yr, mo)
+        if _candidate_qualified:
+            _qual_map = self._classify_enum(
+                _candidate_qualified, 'column_qualifier',
+                context='Column headers from a P&L / Budget vs Actual financial sheet. '
+                        'Classify each as budget (planned), actual (realized), or variance.')
+            for h in _candidate_qualified:
+                h_str = str(h).strip()
+                m = _INNER_PERIOD_RE.search(h_str)
+                if not m:
+                    continue
+                period_part = m.group(1).strip()
                 yr_q, mo_q = self._pl_parse_year_month(period_part)
                 if yr_q:
-                    h_lower = h_str.lower()
-                    if any(q in h_lower for q in _BUD_QUAL):
+                    qual = _qual_map.get(h, 'actual')
+                    if qual == 'budget':
                         budget_period_cols[h] = (yr_q, mo_q)
-                    else:
+                    elif qual != 'variance':
                         actual_period_cols[h] = (yr_q, mo_q)
 
         all_period_like_cols = period_cols or list(budget_period_cols) or list(actual_period_cols)
@@ -4353,33 +4072,24 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
                 if not yr:
                     yr, mo = snapshot_yr, snapshot_mo
 
+                # Pre-classify column headers as budget/actual/variance via Gemini
+                _col_names = [str(c).strip() for c in nr.keys() if c and str(c).strip()]
+                _col_qual_map = self._classify_enum(
+                    _col_names, 'column_qualifier',
+                    context='Column headers from a P&L / financial statement. '
+                            'Classify each as budget, actual, or variance.')
+
                 for col_name, col_val in nr.items():
                     if not col_name:
                         continue
-                    col_lower = str(col_name).lower().strip()
-
-                    # Skip percentage/ratio columns — they carry a rate, not an amount.
-                    # e.g. 'EBITDA%', 'GP%', 'Var%', 'Gross Margin %'
-                    if col_lower.endswith('%') or col_lower.endswith('margin') or col_lower.endswith('ratio'):
+                    # Skip variance columns (detected by Gemini)
+                    col_qualifier = _col_qual_map.get(str(col_name).strip(), 'actual')
+                    if col_qualifier == 'variance':
                         continue
 
-                    # Skip computed variance/difference columns
-                    if any(v in col_lower for v in ('variance', 'var %', '% var', 'difference', ' diff')):
-                        continue
+                    is_budget_col = (col_qualifier == 'budget')
 
-                    # Detect budget/actual qualifier in the (already normalised) column name
-                    is_budget_col = any(q in col_lower for q in _BUD_QUAL)
-                    is_actual_col = any(q in col_lower for q in _ACT_QUAL)
-
-                    # Strip qualifier to isolate the line-item name for mapping
-                    li_key = None
-                    if is_budget_col or is_actual_col:
-                        stripped = col_lower
-                        for q in _BUD_QUAL + _ACT_QUAL:
-                            stripped = stripped.replace(q, '').strip(' _-()')
-                        li_key = self._pl_map_to_line_item(stripped)
-                    if not li_key:
-                        li_key = self._pl_map_to_line_item(col_name)
+                    li_key = self._pl_map_to_line_item(col_name)
                     if not li_key:
                         continue
 
@@ -4435,11 +4145,15 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
 
         # Skip Balance Sheet and Cash Flow sheets — their line items (assets, liabilities,
         # cash inflows) are not P&L items and would corrupt the fund P&L view.
-        _ws_title = getattr(ws, 'title', '').lower()
-        _NON_PL_TERMS = ('balance sheet', 'bs statement', 'financial position',
-                         'net worth', 'cash flow', 'cash statement', 'cf statement',
-                         'fund_bs', 'fund_cf', ' bs', ' cf')
-        if any(t in _ws_title for t in _NON_PL_TERMS):
+        # Uses Gemini Pass 1.5 section sub-domains: P&L sheets have only 'unknown'
+        # sub-domains, while BS/CF sheets have structured sub-domains (nav_records,
+        # distributions, investments, capital_call_headers).
+        _ws_title = getattr(ws, 'title', '')
+        _sheet_sections = self._section_map.get(_ws_title, {})
+        _sub_domains = set(_sheet_sections.values())
+        _non_pl_indicators = {'nav_records', 'distributions', 'investments',
+                              'capital_call_headers'}
+        if _sub_domains & _non_pl_indicators:
             return 0
 
         if not period_labels:
@@ -4453,13 +4167,6 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
                 continue
             label = str(row[0]).strip()
             if _is_junk_row(label):
-                continue
-            # Skip percentage/margin/ratio rows — these are derived metrics,
-            # not absolute currency values (e.g. "EBITDA Margin", "Gross Margin %")
-            label_l = label.lower()
-            if (label_l.endswith('%') or label_l.endswith('margin')
-                    or label_l.endswith('ratio') or label_l.endswith('margin %')
-                    or '% of' in label_l or 'per unit' in label_l):
                 continue
             li_key = self._pl_map_to_line_item(label)
             if not li_key:
@@ -4585,17 +4292,9 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
             if not li_key:
                 continue
 
-            # After normalisation 'Budget(₹Cr)' → 'Budget', 'Actual(₹Cr)' → 'Actual', etc.
-            # _find_col() now matches via Pass-2 exact case-insensitive regardless of
-            # the original unit suffix or bracket style used by the fund manager.
-            budget = _find_col_decimal(
-                nr, 'Budget', 'Budget YTD', 'Annual Budget',
-                'Plan', 'AOP', 'Annual Operating Plan', 'Budgeted', 'Target',
-                'Budget Amount', 'Planned', 'Budget Value')
-            actual = _find_col_decimal(
-                nr, 'Actual', 'Actual YTD', 'YTD Actual',
-                'Actuals', 'Real', 'Achieved', 'Actual Amount', 'Reported',
-                'Actual Value')
+            # Gemini Pass 2 adds canonical field names as row keys
+            budget = _find_col_decimal(nr, 'budget', 'budget_amount')
+            actual = _find_col_decimal(nr, 'actual', 'actual_amount')
 
             if budget is None and actual is None:
                 continue
@@ -4660,39 +4359,42 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
             return 0
         from mis_consolidation.models import ConsolidatedMIS
 
-        # Qualifier patterns (order matters — check budget first)
-        _BUD_Q = ('bdgt', 'budget', 'aop', 'plan', 'target', 'planned', 'forecast')
-        _ACT_Q = ('actual', 'actuals', 'real', 'achieved', 'reported')
-        _Q_RE = re.compile(r'^(Q[1-4])\s*[-\s]?\s*(bdgt|budget|aop|plan|target|actual|actuals)',
-                           re.IGNORECASE)
-        _FY_Q_RE = re.compile(r'^(FY|annual|full.?year)\s*(budget|bdgt|aop|plan|actual|actuals)',
-                              re.IGNORECASE)
+        # Regex for quarter/FY detection (universal financial tokens)
+        _Q_RE = re.compile(r'^(Q[1-4])\s*[-\s]?\s*(.+)', re.IGNORECASE)
+        _FY_Q_RE = re.compile(r'^(FY|annual|full.?year)\s*(.+)', re.IGNORECASE)
+
+        # Collect candidate column headers for budget/actual classification
+        _candidate_cols = [str(h).strip() for h in headers_dict if h and str(h).strip()]
+
+        # Classify ALL column headers via Gemini (budget/actual/variance)
+        _col_qual_map = self._classify_enum(
+            _candidate_cols, 'column_qualifier',
+            context='Column headers from a fund Budget vs Actual sheet. '
+                    'Classify each as budget (planned), actual (realized), or variance.')
 
         # Map column headers → (period_quarter, period_type, is_budget)
-        period_budget_cols = {}   # col_header → (quarter, is_budget)
+        period_budget_cols = {}
         for h in headers_dict:
             if not h:
                 continue
             h_s = str(h).strip()
-            h_l = h_s.lower()
+            qual = _col_qual_map.get(h_s, 'actual')
+            if qual == 'variance':
+                continue
+            is_bud = (qual == 'budget')
+
             m = _Q_RE.match(h_s)
             if m:
                 qtr = m.group(1).upper()
-                qualifier = m.group(2).lower()
-                is_bud = any(q in qualifier for q in _BUD_Q)
                 period_budget_cols[h] = (qtr, 'quarterly', is_bud)
                 continue
             m2 = _FY_Q_RE.match(h_s)
             if m2:
-                qualifier = h_l
-                is_bud = any(q in qualifier for q in _BUD_Q)
                 period_budget_cols[h] = ('FY', 'annual', is_bud)
                 continue
-            # Plain "Budget" / "Actual" columns without period prefix
-            if any(h_l == q for q in _BUD_Q):
-                period_budget_cols[h] = ('FY', 'annual', True)
-            elif any(h_l == q for q in _ACT_Q):
-                period_budget_cols[h] = ('FY', 'annual', False)
+            # Non-period columns classified as budget or actual → annual
+            if qual in ('budget', 'actual'):
+                period_budget_cols[h] = ('FY', 'annual', is_bud)
 
         if not period_budget_cols:
             return 0
@@ -4716,16 +4418,18 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
 
         # Fund-level performance metrics (Net IRR, TVPI, Portfolio FV) found in
         # BvA sheets as special metric rows — not P&L line items.  We detect them
-        # by keyword and store as ConsolidatedMIS records with special line_item keys
-        # ('net_irr', 'tvpi', 'portfolio_fv') so the API can expose them separately.
-        # Values are stored in total_actual_inr (IRR: as percentage, e.g. 21.2 for 21.2%).
-        _FUND_METRIC_KEYS = {
-            'net_irr': ('net irr', 'irr net', 'net return', 'lp irr',
-                        'net irr%', 'net internal rate', 'fund irr'),
-            'tvpi':    ('tvpi', 'total value to paid', 'tv/pi', 'tv pi'),
-            'portfolio_fv': ('portfolio fv', 'portfolio fair value', 'portfolio value',
-                              'fund nav', 'total portfolio fv', 'total fv'),
-        }
+        # via Gemini and store as ConsolidatedMIS records with special line_item keys.
+
+        # Pre-classify all metric labels for fund-level metric detection
+        all_metric_labels = set()
+        for row in rows:
+            nr = _norm_row(row)
+            m = _find_col_str(nr, 'Metric', 'Line Item', 'Particulars',
+                              'Item', 'Category', 'Description')
+            if m and not _is_junk_row(m):
+                all_metric_labels.add(m)
+        fund_metric_map = self._classify_labels(all_metric_labels, 'fund_metrics',
+                                                 context='Fund-level performance metrics (IRR, TVPI, FV)')
 
         count = 0
         from django.utils import timezone as _tz
@@ -4736,14 +4440,8 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
             if not metric or _is_junk_row(metric):
                 continue
 
-            metric_l = metric.lower().strip()
-
             # Check if this is a special fund-level performance metric row
-            special_li_key = None
-            for li_key_candidate, patterns in _FUND_METRIC_KEYS.items():
-                if any(p in metric_l for p in patterns):
-                    special_li_key = li_key_candidate
-                    break
+            special_li_key = fund_metric_map.get(metric)
 
             if special_li_key:
                 # Extract FY Actual value (the most authoritative single number)
@@ -4904,19 +4602,15 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
                 'listing_exchange',
             )
 
-            # Determine quoted status.
-            # Guard: 'listed' must NOT be preceded by 'un' so that
-            # 'Equity (Unlisted)' is NOT treated as quoted.
-            share_lower = share_type.lower()
-            ipev_lower = ipev_raw.strip().lower()
-            is_quoted = (
-                '(listed)' in share_lower or       # "Equity (Listed)"
-                share_lower == 'listed' or          # bare "Listed"
-                share_lower.startswith('listed ') or
-                (share_lower.endswith(' listed') and 'unlisted' not in share_lower) or
-                'quoted' in share_lower or
-                ipev_lower == 'level 1'             # exact IPEV Level 1
-            )
+            # Determine quoted status via Gemini classification
+            classify_input = share_type or ipev_raw or ''
+            if classify_input.strip():
+                qs_result = self._classify_enum(
+                    [classify_input], 'quoted_status',
+                    context='Share type / instrument type classification: quoted vs unquoted')
+                is_quoted = (qs_result.get(classify_input) == 'quoted')
+            else:
+                is_quoted = False
 
             pc = companies.get(name)
             if pc:
@@ -4972,7 +4666,8 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
         for sheet_name in candidate_sheets:
             ws = wb[sheet_name]
             nav_count = self._try_import_nav_from_sheet(
-                ws, sheet_name, default_scheme, schemes, wb, _period_re)
+                ws, sheet_name, default_scheme, schemes, wb, _period_re,
+                domain_map=domain_map)
             if nav_count > 0:
                 logger.info(f'  NAV imported from sheet: "{sheet_name}" ({nav_count} records)')
                 return
@@ -4980,7 +4675,7 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
         logger.info('  No NAV records found in any sheet')
 
     def _try_import_nav_from_sheet(self, ws, sheet_name, default_scheme,
-                                    schemes, wb, _period_re):
+                                    schemes, wb, _period_re, domain_map=None):
         """Try to import NAV records from a single worksheet.
 
         Returns the number of NAV records created (0 if the sheet format
@@ -4991,9 +4686,17 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
 
         if period_cols and table_rows:
             # ── Format C: Transposed (Component | Oct-24 | Nov-24 | …) ──────────
-            # Scan row labels semantically: any row whose label contains
-            # "closing" + "nav" or "fund nav" is the total_nav row.
-            # Other metrics (unrealised, fees, carry) are detected by keywords.
+            # Classify all component labels via Gemini in one batch call
+            all_comp_labels = set()
+            for row in table_rows:
+                comp = _find_col_str(row, 'Component', 'Line Item', 'Item',
+                                     'Metric', 'Particulars', 'P&L Line',
+                                     'Cash Flow Item', 'Parameter')
+                if comp:
+                    all_comp_labels.add(comp)
+            nav_comp_map = self._classify_labels(all_comp_labels, 'nav_components',
+                                                  context='NAV statement components')
+
             period_data = {p: {} for p in period_cols}
             has_nav_row = False
             for row in table_rows:
@@ -5002,24 +4705,25 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
                                      'Cash Flow Item', 'Parameter')
                 if not comp:
                     continue
-                comp_l = comp.lower()
+                nav_type = nav_comp_map.get(comp)
+                if not nav_type:
+                    continue
                 for pcol in period_cols:
                     val = _d(row.get(pcol))
                     if val is None:
                         continue
-                    # Semantic matching for NAV-related row labels
-                    if ('closing' in comp_l or 'fund nav' in comp_l) and 'nav' in comp_l:
+                    if nav_type == 'total_nav':
                         period_data[pcol]['total_nav'] = val
                         has_nav_row = True
-                    elif 'unreali' in comp_l and ('gain' in comp_l or 'portfolio' in comp_l or 'appreciation' in comp_l):
+                    elif nav_type == 'unrealized_gains':
                         period_data[pcol]['unrealized'] = val
-                    elif ('realised' in comp_l or 'realized' in comp_l) and 'gain' in comp_l:
+                    elif nav_type == 'realized_gains':
                         period_data[pcol]['realized'] = val
-                    elif 'management fee' in comp_l or 'mgmt fee' in comp_l:
+                    elif nav_type == 'mgmt_fee':
                         period_data[pcol]['mgmt_fee'] = abs(val)
-                    elif 'carry' in comp_l and ('provision' in comp_l or 'interest' in comp_l or 'monthly' in comp_l):
+                    elif nav_type == 'carry_provision':
                         period_data[pcol]['carry'] = val
-                    elif 'investment income' in comp_l or 'net investment' in comp_l:
+                    elif nav_type == 'investment_income':
                         period_data[pcol]['income'] = val
 
             # Only proceed if we found at least one row that looks like NAV data
@@ -5029,8 +4733,9 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
             import calendar as _cal
             count = 0
             for pcol in period_cols:
-                if 'total' in pcol.lower():
-                    continue  # Skip "H2 Total", "FY Total" etc.
+                # Skip aggregation columns (H2 Total, FY Total, Grand Total, etc.)
+                if _is_junk_row(pcol):
+                    continue
                 pd = period_data.get(pcol, {})
                 nav_date = self._parse_period(pcol)
                 if not nav_date:
@@ -5184,21 +4889,34 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
         for sn in calc_sheets:
             calc_ws = wb[sn]
             max_r = min(calc_ws.max_row + 1, 80)
+            # Collect label-value pairs and classify via Gemini
+            nav_kv = {}
+            nav_vals = {}
             for rr in range(1, max_r):
                 label = calc_ws.cell(rr, 1).value
                 if not label:
                     continue
-                label_l = str(label).lower()
                 val = calc_ws.cell(rr, 2).value
                 dval = _d(val)
                 if dval is None:
                     continue
-                if 'closing nav/unit' in label_l or ('closing' in label_l and 'nav' in label_l and 'unit' in label_l):
-                    closing_nav_per_unit = dval
-                elif 'opening nav/unit' in label_l or ('opening' in label_l and 'nav' in label_l and 'unit' in label_l):
-                    opening_nav_per_unit = dval
-                elif 'unit' in label_l and ('outstanding' in label_l or 'issued' in label_l):
-                    total_units = dval
+                label_str = str(label).strip()
+                nav_kv[label_str] = label_str
+                nav_vals[label_str] = dval
+            if nav_kv:
+                nav_label_map = self._classify_labels(
+                    list(nav_kv.keys()), 'nav_components',
+                    context='NAV calculation sheet labels')
+                for label_str, nav_type in nav_label_map.items():
+                    dval = nav_vals.get(label_str)
+                    if dval is None:
+                        continue
+                    if nav_type == 'closing_nav_per_unit':
+                        closing_nav_per_unit = dval
+                    elif nav_type == 'opening_nav_per_unit':
+                        opening_nav_per_unit = dval
+                    elif nav_type == 'total_units':
+                        total_units = dval
             if closing_nav_per_unit is not None:
                 break  # Found it — no need to scan more sheets
 
@@ -5324,18 +5042,12 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
             return False
         sample = rows[0]
         keys_lower = {k.lower() for k in sample.keys()}
-        keys_str = ' '.join(keys_lower)
 
-        exit_signals = 0
-        if any(k for k in keys_lower if 'exit' in k and ('date' in k or 'type' in k or 'route' in k)):
-            exit_signals += 2  # strong signal
-        if any(k for k in keys_lower if 'proceed' in k or 'reali' in k):
-            exit_signals += 1
-        if any(k for k in keys_lower if k in ('moic', 'multiple')):
-            exit_signals += 1
-        if any(k for k in keys_lower if 'cost' in k and ('cr' in k or 'basis' in k)):
-            exit_signals += 1
-        return exit_signals >= 2
+        # Detect exit data using Gemini Pass 2 canonical field names
+        # which are added as row keys regardless of language
+        exit_canonical = {'exit_date', 'exit_type', 'exit_route',
+                          'exit_proceeds', 'realized_value', 'moic'}
+        return len(exit_canonical & keys_lower) >= 2
 
     def _process_exit_rows(self, rows, investments):
         """Process exit event rows from either format.
@@ -5433,21 +5145,11 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
             net_irr = (net_irr_raw * 100) if (net_irr_raw is not None and net_irr_raw < 2) else net_irr_raw
             is_actual_raw = _find_col_str(row, 'Is Actual', default='Yes')
 
-            # Extended exit type map — covers IPO variants (IPO – BSE, IPO – NSE)
-            # and management buyout (MBO/Mgmt Buyout)
-            exit_route_l = exit_route.lower().strip()
-            if exit_route_l.startswith('ipo'):
-                exit_type = 'ipo'
-            elif exit_route_l in ('trade sale', 'merger & acquisition', 'm&a', 'acquisition'):
-                exit_type = 'merger_acquisition'
-            elif 'buyout' in exit_route_l or exit_route_l == 'buyback':
-                exit_type = 'buyback'
-            elif 'secondary' in exit_route_l or exit_route_l == 'secondaries':
-                exit_type = 'secondary_sale'
-            elif 'write' in exit_route_l:
-                exit_type = 'write_off'
-            else:
-                exit_type = 'secondary_sale'
+            # Classify exit type via Gemini
+            exit_type_result = self._classify_enum(
+                [exit_route], 'exit_type',
+                context='Exit route / exit type for portfolio investment')
+            exit_type = exit_type_result.get(exit_route, 'secondary_sale')
 
             is_actual = is_actual_raw.lower() in ('yes', 'true', '1', 'y')
 
@@ -5520,17 +5222,10 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
                     scheme=target_scheme).count()
                 dist_num = existing + 1
 
-            type_map = {
-                'stcg': 'return_of_capital', 'ltcg': 'return_of_capital',
-                'return of capital': 'return_of_capital',
-                'capital + income': 'return_of_capital',
-                'capital and income': 'return_of_capital',
-                'income distribution': 'income_distribution',
-                'profit': 'profit_distribution',
-            }
-            dist_type_key = dist_type_raw.lower().strip()
-            dist_type = next((v for k, v in type_map.items() if k in dist_type_key),
-                             'return_of_capital')
+            dist_type_result = self._classify_enum(
+                [dist_type_raw], 'distribution_type',
+                context='Distribution type for LP payout')
+            dist_type = dist_type_result.get(dist_type_raw, 'return_of_capital')
 
             Distribution.objects.get_or_create(
                 scheme=target_scheme,
@@ -5578,14 +5273,15 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
 
         # Check if this sheet actually has distribution columns
         # (Format B investor sheets don't have distribution amounts)
+        # Detect distribution columns via Gemini Pass 2 canonical field names
         has_dist_col = False
         if rows:
             sample = rows[0]
-            for key in sample.keys():
-                kl = key.lower()
-                if any(kw in kl for kw in ['distribution', 'returned', 'payout']):
-                    has_dist_col = True
-                    break
+            _keys_norm = {k.lower().replace(' ', '_').replace('-', '_')
+                          for k in sample.keys()}
+            dist_fields = {'gross_amount', 'net_amount', 'tds_amount',
+                           'distribution_amount', 'distribution_type'}
+            has_dist_col = bool(dist_fields & _keys_norm)
         if not has_dist_col:
             return
 
@@ -5658,39 +5354,22 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
         'statutory_auditor': 'auditor_entity',
     }
 
-    # Fuzzy entity type matching: various ways users might name entity types
-    _ENTITY_TYPE_ALIASES = {
-        'manager': ['manager', 'investment manager', 'fund manager', 'im',
-                     'asset manager', 'management company'],
-        'trustee': ['trustee', 'trust company', 'trustee company'],
-        'sponsor': ['sponsor', 'gp', 'general partner', 'promoter'],
-        'custodian': ['custodian', 'custody', 'depository participant',
-                      'dp', 'fund custodian'],
-        'statutory_auditor': ['statutory_auditor', 'auditor', 'statutory auditor',
-                              'audit firm', 'chartered accountant', 'ca firm'],
-        'legal_counsel': ['legal_counsel', 'legal counsel', 'legal advisor',
-                          'law firm', 'legal', 'advocate'],
-        'registrar': ['registrar', 'rta', 'registrar & transfer agent',
-                      'registrar and transfer agent', 'transfer agent'],
-        'valuer': ['valuer', 'registered valuer', 'valuation firm',
-                   'independent valuer', 'valuator'],
-    }
-
     def _normalize_entity_type(self, raw_type):
-        """Normalize entity type string to a valid model choice using fuzzy matching."""
+        """Normalize entity type string to a valid model choice via Gemini classification."""
         if not raw_type:
             return None
-        raw = raw_type.strip().lower().replace('-', '_')
-        # Direct match
+        raw = raw_type.strip()
+        if not raw:
+            return None
+        # Direct match against Django model choices
+        raw_lower = raw.lower().replace('-', '_')
         valid_types = [c[0] for c in Entity.ENTITY_TYPE_CHOICES]
-        if raw in valid_types:
-            return raw
-        # Fuzzy match via aliases
-        for etype, aliases in self._ENTITY_TYPE_ALIASES.items():
-            for alias in aliases:
-                if alias in raw or raw in alias:
-                    return etype
-        return None
+        if raw_lower in valid_types:
+            return raw_lower
+        # Gemini classification
+        result = self._classify_enum([raw], 'entity_type',
+                                      context='Entity/service provider type for AIF fund')
+        return result.get(raw)
 
     def _import_entities(self, wb, org, fund, domain_map):
         """Import key entities from Excel and link them to the fund.
@@ -5782,25 +5461,31 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
             fsm_sheet = _dm_first(domain_map, 'fund_scheme_master')
             if fsm_sheet and fsm_sheet in wb.sheetnames:
                 ws = wb[fsm_sheet]
-                # Scan for entity references as key-value pairs
+                # Collect all label-value pairs first
+                label_value_pairs = {}
                 for r in range(1, ws.max_row + 1):
                     label = _str(ws.cell(r, 1).value).strip()
                     value = _str(ws.cell(r, 2).value).strip()
-                    if not label or not value:
-                        continue
-                    label_lower = label.lower()
-                    # Check if this row is an entity reference
-                    for etype, aliases in self._ENTITY_TYPE_ALIASES.items():
-                        if any(alias in label_lower for alias in aliases):
-                            if etype not in entity_map and len(value) > 2:
-                                entity, _ = Entity.objects.get_or_create(
-                                    organization=org,
-                                    entity_type=etype,
-                                    entity_name=value,
-                                )
-                                entity_map[etype] = entity
-                                count += 1
-                            break
+                    if label and value and len(value) > 2:
+                        label_value_pairs[label] = value
+                # Classify labels as entity types via Gemini (returns None for non-entity labels)
+                if label_value_pairs:
+                    from .canonical_schema import CANONICAL_ENUM_TYPES
+                    from .gemini_column_mapper import classify_labels
+                    entity_opts = CANONICAL_ENUM_TYPES.get('entity_type', {})
+                    label_types = classify_labels(
+                        list(label_value_pairs.keys()), 'entity_type_labels',
+                        entity_opts,
+                        context='Labels from fund master sheet — classify ONLY if label refers to an entity/service provider role, otherwise null')
+                    for label, etype in label_types.items():
+                        if etype and etype not in entity_map:
+                            entity, _ = Entity.objects.get_or_create(
+                                organization=org,
+                                entity_type=etype,
+                                entity_name=label_value_pairs[label],
+                            )
+                            entity_map[etype] = entity
+                            count += 1
 
         # Link entities to fund
         if entity_map:
@@ -6347,20 +6032,30 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
                             if _quarter_re.match(h.strip())]
 
             if quarter_cols and fee_rows:
-                # Find the Management Fee row and GST row
+                # Classify fee component labels via Gemini
+                fee_comp_labels = set()
+                for row in fee_rows:
+                    c = _find_col_str(row, 'Component', 'Expense Category', 'Item')
+                    if c:
+                        fee_comp_labels.add(c)
+                fee_comp_map = self._classify_labels(
+                    fee_comp_labels, 'fee_components',
+                    context='Fee schedule components: management fee vs GST')
+
                 mgmt_fee_vals = {}
                 gst_vals = {}
                 for row in fee_rows:
                     comp = _find_col_str(row, 'Component', 'Expense Category', 'Item')
-                    comp_l = comp.lower()
+                    fee_type = fee_comp_map.get(comp) if comp else None
+                    if not fee_type:
+                        continue
                     for qcol in quarter_cols:
                         val = _d(row.get(qcol))
                         if val is None:
                             continue
-                        if 'management fee' in comp_l and 'gst' not in comp_l:
-                            if val > 0:
-                                mgmt_fee_vals[qcol] = val
-                        elif 'gst' in comp_l and 'management' in comp_l:
+                        if fee_type == 'management_fee' and val > 0:
+                            mgmt_fee_vals[qcol] = val
+                        elif fee_type == 'gst_on_management_fee':
                             gst_vals[qcol] = abs(val)
 
                 count = 0
@@ -6555,28 +6250,34 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
         for sn in candidate_sheets:
             ws = wb[sn]
             max_r = min(ws.max_row + 1, 80)
+            # Collect all label-value pairs
+            carry_labels = {}
+            carry_vals = {}
             for rr in range(1, max_r):
-                # Scan label-value pairs in columns (1,2) and (2,3)
                 for label_col, val_col in [(1, 2), (2, 3)]:
                     label = ws.cell(rr, label_col).value
                     if not label:
                         continue
-                    label_l = str(label).lower().strip()
                     raw_val = ws.cell(rr, val_col).value
                     val = _d(raw_val)
                     if val is None or val <= 0:
                         continue
+                    label_str = str(label).strip()
+                    carry_labels[label_str] = label_str
+                    carry_vals[label_str] = val
 
-                    # Semantic matching for carry-related labels
-                    if carry_gross is None:
-                        if ('carried interest' in label_l and 'provision' in label_l) or \
-                           ('carry provision' in label_l) or \
-                           (label_l.startswith('carry') and 'amount' in label_l):
-                            carry_gross = val
-                    if preferred_return is None:
-                        if ('preferred return' in label_l and 'amount' not in label_l) or \
-                           ('hurdle' in label_l and 'amount' in label_l):
-                            preferred_return = val
+            if carry_labels:
+                wf_map = self._classify_labels(
+                    list(carry_labels.keys()), 'waterfall_components',
+                    context='Waterfall/carry components: carried interest vs preferred return')
+                for label_str, wf_type in wf_map.items():
+                    val = carry_vals.get(label_str)
+                    if val is None:
+                        continue
+                    if wf_type == 'carry_gross' and carry_gross is None:
+                        carry_gross = val
+                    elif wf_type == 'preferred_return' and preferred_return is None:
+                        preferred_return = val
 
             if carry_gross is not None and preferred_return is not None:
                 break
@@ -6827,15 +6528,6 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
     # Post-import validation
     # ------------------------------------------------------------------
 
-    # Words that appear in fund metadata fields but NEVER in real company names.
-    _METADATA_LABEL_WORDS = {
-        'short code', 'type', 'sebi category', 'vintage year', 'reporting currency',
-        'fund corpus', 'stage focus', 'management fee', 'hurdle rate',
-        'carried interest', 'domicile', 'date format', 'currency display',
-        'fund name', 'corpus', 'inception', 'carry', 'hurdle',
-        'vintage', 'aum', 'drawdown', 'deployment',
-    }
-
     # ------------------------------------------------------------------
     # IC Pipeline seeding
     # ------------------------------------------------------------------
@@ -6874,17 +6566,24 @@ Return JSON: {{ "header_name": "CanonicalKPIName", ... }}"""
     def _validate_imported_companies(self, fund):
         """Detect and warn when metadata field names were imported as company names.
 
-        This catches the class of bug where a Cover/summary sheet row like
-        "Short Code | SCIV-VIII" gets imported as a PortfolioCompany named
-        "Short Code". If any investment company_name exactly matches a known
-        metadata label we log a CRITICAL warning and append to self.errors.
+        Uses Gemini Pass 3 row_type classification to identify names that look
+        like metadata labels rather than real company names. Works for any
+        language — no hardcoded keyword list.
         """
         from investments.models import Investment
         invs = Investment.objects.filter(scheme__fund=fund).values_list('company_name', flat=True)
-        suspect = []
-        for name in invs:
-            if name and name.lower().strip() in self._METADATA_LABEL_WORDS:
-                suspect.append(name)
+        names = [n for n in invs if n and n.strip()]
+        if not names:
+            return
+
+        # Classify all company names — real entities vs metadata labels
+        name_map = self._classify_labels(
+            names, 'row_type',
+            context='These are company names from a fund portfolio. '
+                    'Identify any that look like metadata field labels '
+                    '(e.g., fund configuration fields, sheet headers) '
+                    'rather than real company/entity names.')
+        suspect = [n for n in names if name_map.get(n) in ('header', 'note', 'subtotal', 'total', 'serial')]
 
         if suspect:
             msg = (

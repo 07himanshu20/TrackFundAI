@@ -22,6 +22,7 @@
   let lastConfirmedFilePct = 0;   // highest SSE pct ever received for current file
   let lastSseTimestamp = 0;       // ms timestamp of last SSE data event
   let currentPhase = 'file_upload'; // current import phase label
+  let currentFileIdx = -1;         // track which file is active for reset detection
 
   const esc = (s) => {
     if (s === null || s === undefined) return '';
@@ -475,6 +476,15 @@
           const fileIdx = data.file_index !== undefined ? data.file_index : 0;
           totalFilesInBatch = nFiles;
 
+          // Detect file transition — reset per-file tracking for the new file
+          if (fileIdx !== currentFileIdx) {
+            currentFileIdx = fileIdx;
+            lastConfirmedFilePct = 0;
+            targetFilePct = 0;
+            displayFilePct = 0;
+            currentPhase = 'file_upload';
+          }
+
           // Overall target — only ever increases
           if (data.pct > targetOverallPct) targetOverallPct = data.pct;
 
@@ -528,8 +538,12 @@
           }
         }
 
-        // File complete
+        // File complete — snap per-file bar to 100%
         if (data.event === 'file_complete') {
+          lastConfirmedFilePct = 100;
+          targetFilePct = 100;
+          displayFilePct = 100;
+          renderProgressBars();
           if (data.file_index !== undefined) {
             updateFileStatus(data.file_index, 'completed', 'Done');
           }
@@ -817,6 +831,7 @@
     lastConfirmedFilePct = 0;
     lastSseTimestamp = 0;
     currentPhase = 'file_upload';
+    currentFileIdx = -1;
     queuedFiles = [];
     isImporting = false;
 

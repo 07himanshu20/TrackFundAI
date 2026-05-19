@@ -821,9 +821,9 @@
 
       <!-- ════════════ AI ANALYTICS PAGE ════════════ -->
       <div id="pg-analytics" class="v5-page">
-        <div class="v5-page-header">
-          <div><div class="v5-page-title">AI Analytics &amp; Intelligence Hub</div><div class="v5-page-subtitle">GPT-4o powered · ML risk scoring · Portfolio insights · MIS reports</div></div>
-          <div class="v5-header-actions">
+        <div class="v5-page-header" id="analytics-page-header">
+          <div><div class="v5-page-title" id="analytics-page-title">AI Analytics &amp; Intelligence Hub</div><div class="v5-page-subtitle" id="analytics-page-subtitle">GPT-4o powered · ML risk scoring · Portfolio insights · MIS reports</div></div>
+          <div class="v5-header-actions" id="analytics-header-actions">
             <button class="v5-btn v5-btn-ghost" onclick="showSub('analytics','chatbot')">&#9881; Configure AI</button>
             <button class="v5-btn v5-btn-primary" id="ai-run-analysis-btn" onclick="runAIAnalysis()">&#128302; Run Analysis</button>
             <button class="v5-btn v5-btn-primary" id="gen-mis-report-btn" onclick="generateComprehensiveMIS()" style="background:linear-gradient(135deg,#6366f1,#8b5cf6)">&#128196; Generate MIS Report</button>
@@ -832,49 +832,53 @@
 
         <!-- ── AI Chatbot ── -->
         <div id="ai-chatbot" class="v5-subpane active">
-          <div class="v5-grid two">
-            <div>
-              <div class="v5-grid three v5-mb">
-                <div class="v5-kpi-card gold"><div class="v5-kpi-label">AI Risk Score</div><div class="v5-kpi-value" id="ai-risk-score">—</div><div class="v5-kpi-sub">Portfolio-wide</div></div>
-                <div class="v5-kpi-card green"><div class="v5-kpi-label">Outperformers</div><div class="v5-kpi-value" id="ai-outperform">—</div><div class="v5-kpi-sub">IRR &gt; 25%</div></div>
-                <div class="v5-kpi-card red"><div class="v5-kpi-label">Watch List</div><div class="v5-kpi-value" id="ai-watchlist">—</div><div class="v5-kpi-sub">Action needed</div></div>
+          <div class="chatbot-layout">
+            <!-- Conversation sidebar -->
+            <div class="chatbot-sidebar" id="chatbot-sidebar">
+              <div class="chatbot-sidebar-header">
+                <button class="chatbot-sidebar-toggle" id="chatbot-sidebar-toggle" onclick="toggleChatSidebar()">
+                  <span class="hamburger-icon">&#9776;</span>
+                </button>
+                <span class="chatbot-sidebar-title">Conversations</span>
+                <button class="chatbot-new-chat-btn" onclick="startNewConversation()" title="New Chat">+</button>
               </div>
-              <div class="v5-chat-box">
+              <div class="chatbot-conv-list" id="chatbot-conv-list">
+                <!-- Populated by JS -->
+              </div>
+            </div>
+            <!-- Main chat area -->
+            <div class="chatbot-main">
+              <div class="v5-chat-box chatbot-fullscreen">
                 <div class="v5-chat-header">
+                  <button class="chatbot-sidebar-toggle-mini" id="chatbot-sidebar-toggle-mini" onclick="toggleChatSidebar()" title="Conversations">
+                    <span class="hamburger-icon">&#9776;</span>
+                  </button>
                   <div class="v5-chat-avatar-ai">AI</div>
-                  <div>
-                    <div style="font-size:12px;font-weight:700;color:var(--text)">TrackFundAI Assistant</div>
-                    <div style="font-size:9px;color:var(--green)">&#9679; Online — Gemini powered</div>
+                  <div style="flex:1">
+                    <div style="font-size:13px;font-weight:700;color:var(--text)">TrackFundAI Assistant</div>
+                    <div style="font-size:10px;color:var(--green)">&#9679; Online — Gemini powered</div>
                   </div>
+                  <button class="chatbot-new-chat-header-btn" onclick="startNewConversation()" title="New Chat">+ New Chat</button>
                 </div>
                 <div class="v5-chat-msgs" id="ai-chat-msgs">
-                  <div class="v5-chat-msg">
-                    <div class="v5-chat-avatar-ai">AI</div>
-                    <div class="v5-chat-bubble">Hello! I am your TrackFundAI assistant. Ask me anything about your portfolio — MOIC, IRR, burn rates, compliance alerts, or generate any report instantly.</div>
+                  <div class="v5-chat-welcome" id="ai-chat-welcome">
+                    <div class="v5-chat-welcome-icon">AI</div>
+                    <div class="v5-chat-welcome-title">TrackFundAI Assistant</div>
+                    <div class="v5-chat-welcome-sub">Ask me anything about your portfolio — MOIC, IRR, burn rates, compliance alerts, or generate any report instantly.</div>
+                    <div class="v5-chat-suggestions" id="ai-chat-suggestions">
+                      <span class="v5-chat-sug" onclick="sendAIChat('What is the portfolio MOIC?')">Portfolio MOIC?</span>
+                      <span class="v5-chat-sug" onclick="sendAIChat('Which sector has the best IRR?')">Best IRR sector?</span>
+                      <span class="v5-chat-sug" onclick="sendAIChat('Companies with runway under 6 months')">Short runway</span>
+                      <span class="v5-chat-sug" onclick="sendAIChat('List all overdue compliance filings')">Compliance alerts</span>
+                      <span class="v5-chat-sug" onclick="sendAIChat('What is our DPI and TVPI?')">DPI / TVPI?</span>
+                      <span class="v5-chat-sug" onclick="sendAIChat('Generate LP summary report')">LP summary</span>
+                    </div>
                   </div>
-                </div>
-                <div class="v5-chat-suggestions">
-                  <span class="v5-chat-sug" onclick="sendAIChat('What is the portfolio MOIC?')">Portfolio MOIC?</span>
-                  <span class="v5-chat-sug" onclick="sendAIChat('Which sector has the best IRR?')">Best IRR sector?</span>
-                  <span class="v5-chat-sug" onclick="sendAIChat('Companies with runway under 6 months')">Short runway</span>
-                  <span class="v5-chat-sug" onclick="sendAIChat('List all overdue compliance filings')">Compliance alerts</span>
-                  <span class="v5-chat-sug" onclick="sendAIChat('What is our DPI and TVPI?')">DPI / TVPI?</span>
-                  <span class="v5-chat-sug" onclick="sendAIChat('Generate LP summary report')">LP summary</span>
                 </div>
                 <div class="v5-chat-input-row">
                   <input class="v5-chat-input" id="ai-chat-inp" placeholder="Ask anything about your fund or portfolio…" onkeydown="if(event.key==='Enter')sendAIChat()">
                   <button class="v5-chat-send" onclick="sendAIChat()">Send &#8593;</button>
                 </div>
-              </div>
-            </div>
-            <div>
-              <div class="v5-panel v5-mb">
-                <div class="v5-panel-header"><div class="v5-panel-title">AI Insights — Today</div><div class="v5-panel-subtitle">Refreshed daily · Gemini</div></div>
-                <div class="v5-panel-body" id="ai-insights-mini"></div>
-              </div>
-              <div class="v5-panel">
-                <div class="v5-panel-header"><div class="v5-panel-title">Top Performers — Revenue Growth</div></div>
-                <div class="v5-panel-body" id="top-performers"></div>
               </div>
             </div>
           </div>

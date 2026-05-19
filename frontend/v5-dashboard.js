@@ -239,6 +239,14 @@ function showPage(id, btn) {
   // Update sidebar sub-tabs for the active page
   updateSidebarSubtabs(id);
 
+  // Show/hide floating chatbot widget based on page
+  if (id === 'analytics') {
+    _syncAnalyticsHeader();
+  } else {
+    const floatingBtn = document.getElementById('tfai-chat-btn');
+    if (floatingBtn) floatingBtn.style.display = '';
+  }
+
   if (!_pageRendered[id]) {
     _pageRendered[id] = true;
     lazyRender(id);
@@ -270,6 +278,9 @@ function showSub(page, sub) {
 
   // Always track the last-clicked sub-tab so fund-switch can reload it
   _activeSubTab[page] = sub;
+
+  // Toggle analytics page header for chatbot sub-tab
+  if (page === 'analytics') _syncAnalyticsHeader(sub);
 
   // Sync sidebar dynamic sub-tab highlight
   const sidebarDyn = $('sidebar-dynamic');
@@ -353,6 +364,7 @@ function lazyRenderSub(key) {
     'compliance-sebi':     loadSEBI,
     'compliance-alerts':   loadCompAlerts,
     'compliance-calendar': loadCompCalendar,
+    'analytics-chatbot':   loadChatConversations,
     'analytics-insights':  loadAIInsights,
     'analytics-risk':      loadRiskMonitor,
     'analytics-mis':       loadMISReports,
@@ -3499,15 +3511,10 @@ function renderMarket() {
 
 /* ── Analytics ─────────────────────────────────────────────── */
 function renderAnalytics() {
-  const ins = $('ai-insights-mini');
-  if (ins) {
-    ins.innerHTML = `
-      <div class="v5-insight-card gold"><div class="v5-insight-title">&#9888; Portfolio risk needs attention</div>Run Analysis to get Gemini AI-powered insights for this fund.</div>
-      <div class="v5-insight-card green"><div class="v5-insight-title">&#8593; Click Run Analysis above</div>Get exit predictions, revenue forecasts and peer benchmarks instantly.</div>
-      <div class="v5-insight-card blue"><div class="v5-insight-title">&#128302; AI-powered MIS Reports</div>Navigate to MIS Reports tab to generate Fund-Level and Company-Level reports.</div>`;
-  }
-  const topPerf = $('top-performers');
-  if (topPerf) topPerf.innerHTML = '<div style="color:var(--text3);font-size:11px;padding:8px">Run Analysis to populate top performers.</div>';
+  // Load chatbot conversations sidebar
+  loadChatConversations();
+  // Toggle header visibility based on active sub-tab
+  _syncAnalyticsHeader();
 }
 
 async function runAIAnalysis() {
@@ -4362,7 +4369,149 @@ function renderChatChart(container, chartData) {
   } catch (e) { /* Chart.js not loaded or error */ }
 }
 
+/* ── Analytics header sync (hide buttons/subtitle on chatbot tab) ── */
+function _syncAnalyticsHeader(sub) {
+  const activeSub = sub || _activeSubTab['analytics'] || 'chatbot';
+  const isChatbot = activeSub === 'chatbot';
+  const hdr = $('analytics-page-header');
+  if (hdr) hdr.style.display = isChatbot ? 'none' : '';
+  // Hide floating chatbot widget on the AI Chatbot sub-tab
+  const floatingBtn = document.getElementById('tfai-chat-btn');
+  const floatingPanel = document.getElementById('tfai-chat-panel');
+  if (floatingBtn) floatingBtn.style.display = isChatbot ? 'none' : '';
+  if (floatingPanel) floatingPanel.style.display = isChatbot ? 'none' : '';
+}
+
+/* ── Chatbot Conversation Management ──────────────────────── */
+let _activeConversationId = null;
 let _aiChatLoading = false;
+let _chatConversations = [];
+
+function toggleChatSidebar() {
+  const sb = $('chatbot-sidebar');
+  if (sb) sb.classList.toggle('collapsed');
+}
+
+async function loadChatConversations() {
+  try {
+    const data = await Auth.apiGet('/chatbot/conversations/');
+    _chatConversations = data || [];
+    _renderConversationList();
+  } catch (e) {
+    _chatConversations = [];
+    _renderConversationList();
+  }
+}
+
+function _renderConversationList() {
+  const list = $('chatbot-conv-list');
+  if (!list) return;
+  if (!_chatConversations.length) {
+    list.innerHTML = '<div style="padding:16px 14px;color:var(--text3);font-size:11px;text-align:center;">No conversations yet.<br>Start chatting to create one.</div>';
+    return;
+  }
+  list.innerHTML = _chatConversations.map(c => {
+    const isActive = c.id === _activeConversationId ? ' active' : '';
+    const timeStr = _formatConvTime(c.updated_at);
+    return `<div class="chatbot-conv-item${isActive}" data-conv-id="${c.id}" onclick="loadConversation('${c.id}')">
+      <span class="conv-icon">&#128172;</span>
+      <span class="conv-title">${esc(c.title)}</span>
+      <span class="conv-time">${timeStr}</span>
+      <button class="conv-delete" onclick="event.stopPropagation();deleteConversation('${c.id}')" title="Delete">&#128465;</button>
+    </div>`;
+  }).join('');
+}
+
+function _formatConvTime(isoStr) {
+  if (!isoStr) return '';
+  const d = new Date(isoStr);
+  const now = new Date();
+  const diff = now - d;
+  if (diff < 60000) return 'now';
+  if (diff < 3600000) return Math.floor(diff / 60000) + 'm';
+  if (diff < 86400000) return Math.floor(diff / 3600000) + 'h';
+  if (diff < 604800000) return Math.floor(diff / 86400000) + 'd';
+  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+}
+
+async function loadConversation(convId) {
+  _activeConversationId = convId;
+  _renderConversationList();
+  const msgs = $('ai-chat-msgs');
+  if (!msgs) return;
+
+  // Show loading
+  msgs.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text3);font-size:12px;">Loading conversation...</div>';
+
+  try {
+    const data = await Auth.apiGet(`/chatbot/conversations/${convId}/`);
+    msgs.innerHTML = '';
+    if (!data.messages || !data.messages.length) {
+      _showWelcomeScreen(msgs);
+      return;
+    }
+    data.messages.forEach(m => {
+      // User message
+      msgs.innerHTML += `<div class="v5-chat-msg user">
+        <div class="v5-chat-avatar-ai" style="background:linear-gradient(135deg,#7c3aed,#2563eb)">U</div>
+        <div class="v5-chat-bubble">${esc(m.query)}</div>
+      </div>`;
+      // AI response
+      msgs.innerHTML += `<div class="v5-chat-msg">
+        <div class="v5-chat-avatar-ai">AI</div>
+        <div class="v5-chat-bubble">${mdToHtml(m.response)}</div>
+      </div>`;
+    });
+    msgs.scrollTop = msgs.scrollHeight;
+  } catch (e) {
+    msgs.innerHTML = '<div style="padding:40px;text-align:center;color:#ef4444;font-size:12px;">Failed to load conversation.</div>';
+  }
+}
+
+function _showWelcomeScreen(container) {
+  container.innerHTML = `<div class="v5-chat-welcome" id="ai-chat-welcome">
+    <div class="v5-chat-welcome-icon">AI</div>
+    <div class="v5-chat-welcome-title">TrackFundAI Assistant</div>
+    <div class="v5-chat-welcome-sub">Ask me anything about your portfolio — MOIC, IRR, burn rates, compliance alerts, or generate any report instantly.</div>
+    <div class="v5-chat-suggestions">
+      <span class="v5-chat-sug" onclick="sendAIChat('What is the portfolio MOIC?')">Portfolio MOIC?</span>
+      <span class="v5-chat-sug" onclick="sendAIChat('Which sector has the best IRR?')">Best IRR sector?</span>
+      <span class="v5-chat-sug" onclick="sendAIChat('Companies with runway under 6 months')">Short runway</span>
+      <span class="v5-chat-sug" onclick="sendAIChat('List all overdue compliance filings')">Compliance alerts</span>
+      <span class="v5-chat-sug" onclick="sendAIChat('What is our DPI and TVPI?')">DPI / TVPI?</span>
+      <span class="v5-chat-sug" onclick="sendAIChat('Generate LP summary report')">LP summary</span>
+    </div>
+  </div>`;
+}
+
+function startNewConversation() {
+  _activeConversationId = null;
+  _renderConversationList();
+  const msgs = $('ai-chat-msgs');
+  if (msgs) _showWelcomeScreen(msgs);
+  const inp = $('ai-chat-inp');
+  if (inp) { inp.value = ''; inp.focus(); }
+}
+
+async function deleteConversation(convId) {
+  try {
+    const token = Auth.getToken();
+    const apiBase = (window.location.port === '8000' || !window.location.port) ? '' : 'http://127.0.0.1:8000';
+    await fetch(`${apiBase}/api/chatbot/conversations/${convId}/delete/`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    if (_activeConversationId === convId) {
+      _activeConversationId = null;
+      const msgs = $('ai-chat-msgs');
+      if (msgs) _showWelcomeScreen(msgs);
+    }
+    await loadChatConversations();
+  } catch (e) {
+    showToast('Failed to delete conversation', 'error');
+  }
+}
+
 async function sendAIChat(text) {
   const inp  = $('ai-chat-inp');
   const msgs = $('ai-chat-msgs');
@@ -4370,6 +4519,10 @@ async function sendAIChat(text) {
   if (!q || !msgs || _aiChatLoading) return;
   if (inp) inp.value = '';
   _aiChatLoading = true;
+
+  // Hide welcome screen on first message
+  const welcome = $('ai-chat-welcome');
+  if (welcome) welcome.remove();
 
   msgs.innerHTML += `
     <div class="v5-chat-msg user">
@@ -4394,6 +4547,8 @@ async function sendAIChat(text) {
       payload.fund_id = _ctx.fundId;
       if (_ctx.fundName) payload.fund_name = _ctx.fundName;
     }
+    if (_activeConversationId) payload.conversation_id = _activeConversationId;
+
     const res    = await fetch(`${apiBase}/api/chatbot/query/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
@@ -4401,6 +4556,16 @@ async function sendAIChat(text) {
     });
     const data  = await res.json();
     const reply = data.response || 'No response from AI.';
+
+    // Track conversation ID from response
+    if (data.conversation_id && !_activeConversationId) {
+      _activeConversationId = data.conversation_id;
+      loadChatConversations();
+    } else if (data.conversation_id) {
+      // Refresh sidebar to update timestamps/titles
+      loadChatConversations();
+    }
+
     const typingEl = $(typingId);
     if (typingEl) {
       const bubble = typingEl.querySelector('.v5-chat-bubble');
