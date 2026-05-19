@@ -1770,3 +1770,396 @@ table.v5-table { width: 100%; border-collapse: collapse; }
   .v5-kpi-grid { grid-template-columns: repeat(2,1fr); }
   .v5-grid.two, .v5-grid.three { grid-template-columns: 1fr; }
 }
+
+/* ═══════════════════════════════════════════════════════════
+   SAPPHIRE INSTITUTIONAL THEME — Default (non-light-toggle)
+   ───────────────────────────────────────────────────────────
+   Scoped entirely to html:not([data-theme="light"]) so the
+   white light-mode toggle (data-theme="light") is UNTOUCHED.
+
+   Deep sapphire chrome (navbar + sidebar) for trust, an airy
+   light canvas with clean flat white cards for the data —
+   institutional-grade, crisp, high-contrast. No gradient,
+   no glassmorphism: clarity over decoration.
+═══════════════════════════════════════════════════════════ */
+html:not([data-theme="light"]) {
+  /* Surfaces */
+  --bg:    #EDF0F6;   /* content canvas — soft cool grey */
+  --bg2:   #143A8A;   /* navbar + sidebar — deep sapphire chrome */
+  --card:  #FFFFFF;   /* cards, panels, tables */
+  --card2: #F4F6FB;   /* table stripe, inputs, light tiles */
+  --border:#E3E6EE;   /* hairline borders & dividers */
+
+  /* Accents — sapphire */
+  --accent:  #1F56D6; /* primary — vivid sapphire (buttons, focus) */
+  --accent2: #4F7BE8; /* lighter sapphire */
+  --accent3: #1A47B8; /* links & active text on white (high contrast) */
+  --gold:    #B54708; /* strong amber — warnings */
+  --green:   #067647; /* strong green — positive data */
+  --red:     #B42318; /* strong red — errors */
+  --purple:  #6938EF;
+  --cyan:    #0E7090;
+  --orange:  #C4320A;
+
+  /* Highlight */
+  --teal:      #1F56D6; /* highlight accent line */
+  --teal-tint: #E8EEFC; /* light sapphire — highlight backgrounds */
+
+  /* Lighter sapphire for accents on the deep chrome */
+  --sapphire-bright: #3F69CE;
+
+  /* Text — crisp & high-contrast, never pale */
+  --text:  #1C2840;   /* body — strong dark */
+  --text2: #3D4A63;   /* secondary — still strong */
+  --text3: #5A6478;   /* muted labels — readable, not faint */
+  --white: #0B1424;   /* headings & key figures — near-black */
+
+  /* Depth — subtle, professional */
+  --shadow-card:  0 1px 2px rgba(16,24,40,0.04), 0 1px 3px rgba(16,24,40,0.09);
+  --shadow-hover: 0 6px 16px rgba(16,24,40,0.12), 0 2px 6px rgba(16,24,40,0.08);
+
+  color-scheme: light;
+}
+
+/* ── Canvas — flat, airy light surface ─────────────────────── */
+html:not([data-theme="light"]) body { background: var(--bg); }
+html:not([data-theme="light"]) .v5-main { background: var(--bg); }
+
+/* ── Top navbar — deep navy #172F5D ────────────────────────── */
+html:not([data-theme="light"]) .v5-navbar {
+  background: #172F5D;
+  border-bottom: 1px solid rgba(255,255,255,0.10);
+  box-shadow: 0 1px 3px rgba(8,16,36,0.28);
+}
+html:not([data-theme="light"]) .v5-logo-icon {
+  background: #FFFFFF;
+  color: #143A8A;
+}
+html:not([data-theme="light"]) .v5-logo-text { color: #FFFFFF; }
+html:not([data-theme="light"]) .v5-logo-text span { color: #9DB4F0; }
+html:not([data-theme="light"]) .v5-logo-sub { color: rgba(255,255,255,0.80); }
+html:not([data-theme="light"]) .v5-nav-tab { color: #FFFFFF; font-weight: 600; }
+html:not([data-theme="light"]) .v5-nav-tab:hover {
+  background: rgba(255,255,255,0.12);
+  color: #FFFFFF;
+}
+html:not([data-theme="light"]) .v5-nav-tab.active {
+  background: var(--sapphire-bright);
+  color: #FFFFFF;
+  font-weight: 700;
+}
+html:not([data-theme="light"]) .v5-nav-icon-btn {
+  background: rgba(255,255,255,0.10);
+  border-color: rgba(255,255,255,0.22);
+  color: #FFFFFF;
+}
+html:not([data-theme="light"]) #user-badge { color: #FFFFFF; }
+html:not([data-theme="light"]) .v5-nav-icon-btn:hover {
+  color: #FFFFFF;
+  border-color: rgba(255,255,255,0.55);
+}
+html:not([data-theme="light"]) .v5-fund-selector {
+  background: #FFFFFF;
+  border-color: #B7D2CF;
+  color: #000000;
+  font-weight: 700;
+}
+html:not([data-theme="light"]) .v5-fund-selector option {
+  background: #FFFFFF;
+  color: var(--text);
+}
+
+/* ── Sidebar — mint #D7EBE9, black bold content ────────────── */
+html:not([data-theme="light"]) .v5-sidebar {
+  background: #D7EBE9;
+  border-right: 1px solid #B7D2CF;
+}
+html:not([data-theme="light"]) .v5-sidebar-label {
+  color: #000000;
+  font-weight: 700;
+}
+html:not([data-theme="light"]) .v5-sidebar-item {
+  color: #000000;
+  font-weight: 700;
+}
+html:not([data-theme="light"]) .v5-sidebar-item:hover {
+  background: rgba(20,58,138,0.10);
+  color: #000000;
+  border-left-color: #143A8A;
+}
+html:not([data-theme="light"]) .v5-sidebar-item.active {
+  background: rgba(20,58,138,0.15);
+  color: #000000;
+  border-left-color: #143A8A;
+}
+html:not([data-theme="light"]) .v5-sidebar-item .s-count {
+  background: rgba(20,58,138,0.14);
+  color: #143A8A;
+}
+html:not([data-theme="light"]) .v5-sidebar-item.active .s-count {
+  background: rgba(20,58,138,0.22);
+  color: #143A8A;
+}
+html:not([data-theme="light"]) .sidebar-fund-section,
+html:not([data-theme="light"]) #sidebar-dynamic {
+  border-bottom-color: #B7D2CF;
+}
+
+/* ── Sidebar emoji → black silhouettes on the mint sidebar ──── */
+html:not([data-theme="light"]) .v5-sidebar-item .s-icon {
+  filter: brightness(0);
+  opacity: 0.9;
+}
+html:not([data-theme="light"]) .v5-sidebar-item:hover .s-icon,
+html:not([data-theme="light"]) .v5-sidebar-item.active .s-icon {
+  opacity: 1;
+}
+
+/* ── Navbar tabs → formal monochrome icons (blue theme only) ─── */
+/* The emoji stay in the HTML so the light theme is untouched;    */
+/* the blue theme hides them and paints a masked SVG instead.     */
+html:not([data-theme="light"]) .nav-ico {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  font-size: 0;
+  flex-shrink: 0;
+  background-color: #FFFFFF;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+}
+html:not([data-theme="light"]) .v5-nav-tab.active .nav-ico {
+  background-color: #FFFFFF;
+}
+html:not([data-theme="light"]) .ni-overview {
+  -webkit-mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='3' width='7' height='7' rx='1'/><rect x='14' y='3' width='7' height='7' rx='1'/><rect x='14' y='14' width='7' height='7' rx='1'/><rect x='3' y='14' width='7' height='7' rx='1'/></svg>");
+  mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='3' width='7' height='7' rx='1'/><rect x='14' y='3' width='7' height='7' rx='1'/><rect x='14' y='14' width='7' height='7' rx='1'/><rect x='3' y='14' width='7' height='7' rx='1'/></svg>");
+}
+html:not([data-theme="light"]) .ni-portfolio {
+  -webkit-mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><rect x='2' y='7' width='20' height='14' rx='2'/><path d='M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2'/><path d='M2 13h20'/></svg>");
+  mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><rect x='2' y='7' width='20' height='14' rx='2'/><path d='M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2'/><path d='M2 13h20'/></svg>");
+}
+html:not([data-theme="light"]) .ni-accounting {
+  -webkit-mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M3 21h18'/><path d='M5 21V10'/><path d='M10 21V10'/><path d='M14 21V10'/><path d='M19 21V10'/><path d='M3 10 12 3l9 7z'/></svg>");
+  mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M3 21h18'/><path d='M5 21V10'/><path d='M10 21V10'/><path d='M14 21V10'/><path d='M19 21V10'/><path d='M3 10 12 3l9 7z'/></svg>");
+}
+html:not([data-theme="light"]) .ni-financials {
+  -webkit-mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M3 3v18h18'/><path d='M7 15l4-5 3 3 5-7'/></svg>");
+  mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M3 3v18h18'/><path d='M7 15l4-5 3 3 5-7'/></svg>");
+}
+html:not([data-theme="light"]) .ni-valuations {
+  -webkit-mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M6 3h12l3 6-9 12L3 9z'/><path d='M3 9h18'/><path d='M9 3 6 9l6 12 6-12-3-6'/></svg>");
+  mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M6 3h12l3 6-9 12L3 9z'/><path d='M3 9h18'/><path d='M9 3 6 9l6 12 6-12-3-6'/></svg>");
+}
+html:not([data-theme="light"]) .ni-investors {
+  -webkit-mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2'/><circle cx='9' cy='7' r='3.5'/><path d='M22 21v-2a4 4 0 0 0-3-3.9'/><path d='M16 3.1a4 4 0 0 1 0 7.8'/></svg>");
+  mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2'/><circle cx='9' cy='7' r='3.5'/><path d='M22 21v-2a4 4 0 0 0-3-3.9'/><path d='M16 3.1a4 4 0 0 1 0 7.8'/></svg>");
+}
+html:not([data-theme="light"]) .ni-compliance {
+  -webkit-mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'/><path d='M9 12l2 2 4-4'/></svg>");
+  mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'/><path d='M9 12l2 2 4-4'/></svg>");
+}
+html:not([data-theme="light"]) .ni-benchmarks {
+  -webkit-mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M4 4v16h16'/><path d='M8 17v-4'/><path d='M13 17V9'/><path d='M18 17V6'/></svg>");
+  mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M4 4v16h16'/><path d='M8 17v-4'/><path d='M13 17V9'/><path d='M18 17V6'/></svg>");
+}
+html:not([data-theme="light"]) .ni-market {
+  -webkit-mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='12' cy='12' r='9'/><path d='M3 12h18'/><path d='M12 3c2.5 2.6 4 5.7 4 9s-1.5 6.4-4 9c-2.5-2.6-4-5.7-4-9s1.5-6.4 4-9z'/></svg>");
+  mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='12' cy='12' r='9'/><path d='M3 12h18'/><path d='M12 3c2.5 2.6 4 5.7 4 9s-1.5 6.4-4 9c-2.5-2.6-4-5.7-4-9s1.5-6.4 4-9z'/></svg>");
+}
+html:not([data-theme="light"]) .ni-analytics {
+  -webkit-mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M12 3l1.7 4.3L18 9l-4.3 1.7L12 15l-1.7-4.3L6 9l4.3-1.7z'/><path d='M18 14l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z'/></svg>");
+  mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M12 3l1.7 4.3L18 9l-4.3 1.7L12 15l-1.7-4.3L6 9l4.3-1.7z'/><path d='M18 14l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z'/></svg>");
+}
+
+/* ── Page header & sub-tabs (on the light canvas) ──────────── */
+html:not([data-theme="light"]) .v5-page-title { color: var(--white); }
+html:not([data-theme="light"]) .v5-page-subtitle { color: var(--text3); }
+html:not([data-theme="light"]) .v5-subtab-bar {
+  border-bottom-color: var(--border);
+}
+html:not([data-theme="light"]) .v5-subtab { color: var(--text3); font-weight: 600; }
+html:not([data-theme="light"]) .v5-subtab:hover { color: var(--text); }
+html:not([data-theme="light"]) .v5-subtab.active { color: var(--accent3); }
+
+/* ── Scrollbars — quiet grey ───────────────────────────────── */
+html:not([data-theme="light"]) ::-webkit-scrollbar-track { background: transparent; }
+html:not([data-theme="light"]) ::-webkit-scrollbar-thumb {
+  background: rgba(16,24,40,0.20);
+}
+html:not([data-theme="light"]) ::-webkit-scrollbar-thumb:hover {
+  background: rgba(16,24,40,0.34);
+}
+
+/* ── Notification drawer — drop the heavy side shadow ──────── */
+html:not([data-theme="light"]) .notif-drawer {
+  box-shadow: none;
+}
+
+/* ── Cards & panels — clean flat white ─────────────────────── */
+html:not([data-theme="light"]) .v5-panel,
+html:not([data-theme="light"]) .v5-kpi-card,
+html:not([data-theme="light"]) .v5-insight-card,
+html:not([data-theme="light"]) .v5-chat-box,
+html:not([data-theme="light"]) .chatbot-sidebar {
+  background: var(--card);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-card);
+  transition: box-shadow 0.18s ease, transform 0.18s ease, border-color 0.18s ease;
+}
+html:not([data-theme="light"]) .v5-panel:hover {
+  box-shadow: var(--shadow-hover);
+  border-color: #D2D8E4;
+}
+html:not([data-theme="light"]) .v5-kpi-card:hover {
+  box-shadow: var(--shadow-hover);
+  transform: translateY(-2px);
+  border-color: var(--accent2);
+}
+html:not([data-theme="light"]) .v5-panel-header {
+  border-bottom-color: var(--border);
+}
+
+/* ── Performance Snapshot & Fund Scorecard — clean light tiles ─ */
+html:not([data-theme="light"]) .v5-metric-item,
+html:not([data-theme="light"]) .v5-gauge-item {
+  background: var(--card2);
+  border: 1px solid var(--border);
+}
+html:not([data-theme="light"]) .v5-metric-label,
+html:not([data-theme="light"]) .v5-gauge-label {
+  color: var(--text3);
+}
+html:not([data-theme="light"]) .v5-metric-value {
+  color: var(--white);
+}
+html:not([data-theme="light"]) .v5-gauge-value {
+  color: var(--white) !important;   /* overrides JS inline colors — crisp */
+}
+
+/* ── Tables — sapphire header, clean rows ──────────────────── */
+html:not([data-theme="light"]) .v5-table thead tr,
+html:not([data-theme="light"]) .v5-table th {
+  background: var(--bg2);
+  color: #FFFFFF;
+  border-bottom-color: var(--bg2);
+}
+html:not([data-theme="light"]) .v5-table td {
+  border-bottom-color: var(--border);
+  color: var(--text);
+}
+html:not([data-theme="light"]) .v5-table tbody tr:nth-child(even) td {
+  background: var(--card2);
+}
+html:not([data-theme="light"]) .v5-table tbody tr:hover td {
+  background: var(--teal-tint);
+}
+html:not([data-theme="light"]) .v5-table .td-bold { color: var(--white); }
+html:not([data-theme="light"]) .v5-table .td-green { color: var(--green); }
+html:not([data-theme="light"]) .v5-table .td-red   { color: var(--red); }
+html:not([data-theme="light"]) .v5-table .td-gold  { color: var(--gold); }
+
+/* ── Status badges & data colors — professional tones ──────── */
+html:not([data-theme="light"]) .v5-status.active,
+html:not([data-theme="light"]) .v5-status.funded,
+html:not([data-theme="light"]) .v5-status.approved,
+html:not([data-theme="light"]) .v5-status.complete,
+html:not([data-theme="light"]) .v5-status.low { color: var(--green); }
+html:not([data-theme="light"]) .v5-status.writeoff,
+html:not([data-theme="light"]) .v5-status.rejected,
+html:not([data-theme="light"]) .v5-status.critical,
+html:not([data-theme="light"]) .v5-status.overdue { color: var(--red); }
+html:not([data-theme="light"]) .v5-status.pending,
+html:not([data-theme="light"]) .v5-status.review,
+html:not([data-theme="light"]) .v5-status.medium,
+html:not([data-theme="light"]) .v5-status.upcoming { color: var(--gold); }
+html:not([data-theme="light"]) .v5-status.high { color: var(--orange); }
+html:not([data-theme="light"]) .v5-chip-live { color: var(--green); }
+html:not([data-theme="light"]) .v5-text-green { color: var(--green); }
+html:not([data-theme="light"]) .v5-text-red   { color: var(--red); }
+html:not([data-theme="light"]) .v5-text-gold  { color: var(--gold); }
+html:not([data-theme="light"]) .v5-alert-strip { color: var(--gold); }
+
+/* ── Buttons — solid sapphire, darken on hover ─────────────── */
+html:not([data-theme="light"]) .v5-btn-primary {
+  background: var(--accent);
+  transition: background 0.16s ease, box-shadow 0.16s ease;
+}
+html:not([data-theme="light"]) .v5-btn-primary:hover {
+  background: var(--accent3);
+  box-shadow: 0 2px 8px rgba(31,86,214,0.34);
+}
+html:not([data-theme="light"]) .v5-btn-ghost:hover {
+  border-color: var(--accent);
+  color: var(--accent3);
+}
+
+/* ── Form inputs — sapphire focus ring ─────────────────────── */
+html:not([data-theme="light"]) input:focus,
+html:not([data-theme="light"]) select:focus,
+html:not([data-theme="light"]) textarea:focus,
+html:not([data-theme="light"]) .v5-fund-selector:focus,
+html:not([data-theme="light"]) .v5-chat-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(31,86,214,0.18);
+}
+
+/* ── Highlight states — light sapphire ─────────────────────── */
+html:not([data-theme="light"]) .v5-chat-sug:hover {
+  background: var(--teal-tint);
+  border-color: var(--accent2);
+  color: var(--accent3);
+}
+html:not([data-theme="light"]) .chatbot-conv-item:hover {
+  background: var(--teal-tint);
+}
+html:not([data-theme="light"]) .chatbot-conv-item.active {
+  background: #DCE6FB;
+}
+
+/* ── Animations — deliberate & refined ─────────────────────── */
+@keyframes v5-fade-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes v5-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes v5-shimmer {
+  0%   { background-position: -520px 0; }
+  100% { background-position: 520px 0; }
+}
+@keyframes v5-pulse-live {
+  0%,100% { box-shadow: 0 0 0 0 rgba(5,150,105,0.35); }
+  50%     { box-shadow: 0 0 0 5px rgba(5,150,105,0); }
+}
+html:not([data-theme="light"]) .v5-page.active {
+  animation: v5-fade-up 0.42s ease-out both;
+}
+html:not([data-theme="light"]) .v5-subpane.active {
+  animation: v5-fade-in 0.34s ease-out both;
+}
+html:not([data-theme="light"]) .v5-chip-live {
+  animation: v5-pulse-live 2.4s ease-in-out infinite;
+}
+
+/* Soft shimmer skeleton */
+html:not([data-theme="light"]) .v5-skeleton {
+  background: linear-gradient(90deg,#EDEFF4 25%,#DEE3EE 38%,#EDEFF4 55%);
+  background-size: 1040px 100%;
+  animation: v5-shimmer 1.5s linear infinite;
+  border-radius: var(--radius-xs);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-theme="light"]) .v5-page.active,
+  html:not([data-theme="light"]) .v5-subpane.active,
+  html:not([data-theme="light"]) .v5-chip-live,
+  html:not([data-theme="light"]) .v5-skeleton { animation: none; }
+}

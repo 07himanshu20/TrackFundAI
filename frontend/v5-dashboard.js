@@ -672,7 +672,7 @@ async function loadOverview() {
     loadCapitalCallsTimeline();
 
     // Exits
-    renderExitsList([]);
+    renderExitsList();
 
     // Scorecard
     renderScorecard({ moic, tvpi, dpi, totalCos, active, netIrr });
@@ -915,10 +915,39 @@ async function loadCapitalCallsTimeline() {
   }
 }
 
-function renderExitsList(invs) {
+async function renderExitsList() {
   const el = $('exits-list');
   if (!el) return;
-  el.innerHTML = '<div style="color:var(--text3);font-size:11px">Exit data available in Fund Admin per-investment detail.</div>';
+  try {
+    const qs = _ctx.fundId ? `?fund=${_ctx.fundId}` : '';
+    const data = await Auth.apiGet('/portfolio/exits/' + qs);
+    const exits = data.exits || [];
+    if (!exits.length) {
+      el.innerHTML = '<div style="color:var(--text3);font-size:11px;padding:8px">No exits recorded for this fund yet.</div>';
+      return;
+    }
+    el.innerHTML = exits.slice(0, 8).map(e => {
+      const irr = e.net_irr_pct != null ? e.net_irr_pct
+                : e.irr_pct     != null ? e.irr_pct : null;
+      const moic = e.moic != null ? e.moic.toFixed(2) + 'x' : '—';
+      const moicColor = e.moic != null && e.moic >= 1 ? 'var(--green)' : 'var(--red)';
+      const meta = [e.exit_type_display || e.exit_type, e.exit_date].filter(Boolean).map(esc).join(' · ');
+      const sub  = [e.proceeds != null ? fmtCr(e.proceeds) + ' Cr' : null,
+                    irr != null ? irr.toFixed(1) + '% IRR' : null].filter(Boolean).join(' · ');
+      return `<div style="display:flex;align-items:center;gap:10px;padding:8px 4px;border-bottom:1px solid var(--border)">
+        <div style="min-width:0;flex:1">
+          <div style="font-size:12px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.company_name || '—')}</div>
+          <div style="font-size:10px;color:var(--text3);margin-top:2px">${meta || '—'}</div>
+        </div>
+        <div style="text-align:right;flex-shrink:0">
+          <div style="font-size:13px;font-weight:700;color:${moicColor}">${moic}</div>
+          <div style="font-size:10px;color:var(--text3);margin-top:2px">${sub || '—'}</div>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    el.innerHTML = '<div style="color:var(--text3);font-size:11px;padding:8px">Exit data unavailable.</div>';
+  }
 }
 
 function renderScorecard(d) {
@@ -4325,6 +4354,13 @@ function mdToHtml(text) {
   return h;
 }
 
+/** Theme-aware chart gridline color — light grid on the default theme,
+ *  unchanged dark grid when the light-mode toggle is active. */
+function _v5GridColor() {
+  return document.documentElement.getAttribute('data-theme') === 'light'
+    ? '#1e293b' : '#E3E6EE';
+}
+
 /** Render a Chart.js chart from chatbot chart data */
 function renderChatChart(container, chartData) {
   if (!chartData || !chartData.labels || !chartData.datasets) return;
@@ -4361,8 +4397,8 @@ function renderChatChart(container, chartData) {
           title: { display: !!chartData.title, text: chartData.title || '', color: '#e2e8f0', font: { size: 12 } },
         },
         scales: chartData.type === 'doughnut' ? {} : {
-          x: { ticks: { color: '#94a3b8', font: { size: 9 }, maxRotation: 45 }, grid: { color: '#1e293b' } },
-          y: { ticks: { color: '#94a3b8', font: { size: 9 } }, grid: { color: '#1e293b' } },
+          x: { ticks: { color: '#94a3b8', font: { size: 9 }, maxRotation: 45 }, grid: { color: _v5GridColor() } },
+          y: { ticks: { color: '#94a3b8', font: { size: 9 } }, grid: { color: _v5GridColor() } },
         },
       },
     });
