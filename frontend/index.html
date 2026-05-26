@@ -33,7 +33,6 @@
     <div class="v5-logo-icon">TF</div>
     <div>
       <div class="v5-logo-text">Track<span>Fund</span>AI</div>
-      <div class="v5-logo-sub">Trivesta Consulting Pvt Ltd</div>
     </div>
   </a>
 
@@ -45,8 +44,6 @@
     <button class="v5-nav-tab" onclick="showPage('valuations',this)"><span class="nav-ico ni-valuations">&#128142;</span> Valuations</button>
     <button class="v5-nav-tab" onclick="showPage('investors',this)"><span class="nav-ico ni-investors">&#129309;</span> Investors</button>
     <button class="v5-nav-tab" onclick="showPage('compliance',this)"><span class="nav-ico ni-compliance">&#9989;</span> Compliance</button>
-    <button class="v5-nav-tab" onclick="showPage('benchmarks',this)"><span class="nav-ico ni-benchmarks">&#127942;</span> Benchmarks</button>
-    <button class="v5-nav-tab" onclick="showPage('market',this)"><span class="nav-ico ni-market">&#127757;</span> Market Research</button>
     <button class="v5-nav-tab" onclick="showPage('analytics',this)"><span class="nav-ico ni-analytics">&#128302;</span> AI Analytics</button>
   </div>
 
@@ -84,19 +81,19 @@
     <div class="v5-sidebar-section">
       <div class="v5-sidebar-label">Administration</div>
       <div class="v5-sidebar-item" onclick="showPage('analytics',null);showSub('analytics','audit');sideActive(this)">
-        <span class="s-icon">&#10003;</span>Audit Log
+        <span class="s-icon si-check">&#10003;</span>Audit Log
       </div>
       <div class="v5-sidebar-item" onclick="showPage('compliance',null);sideActive(this)">
-        <span class="s-icon">&#128101;</span>Users &amp; Roles
+        <span class="s-icon si-users">&#128101;</span>Users &amp; Roles
       </div>
       <a class="v5-sidebar-item" href="data-upload.html">
-        <span class="s-icon">&#128229;</span>Data Ingestion
+        <span class="s-icon si-upload">&#128229;</span>Data Ingestion
       </a>
       <a class="v5-sidebar-item" href="doc-vault.html">
-        <span class="s-icon">&#128196;</span>Doc Vault
+        <span class="s-icon si-doc">&#128196;</span>Doc Vault
       </a>
       <div class="v5-sidebar-item" onclick="showPage('compliance',null);showSub('compliance','settings');sideActive(this)">
-        <span class="s-icon">&#9881;</span>Settings
+        <span class="s-icon si-gear">&#9881;</span>Settings
       </div>
     </div>
   </aside>
@@ -120,12 +117,12 @@
 
         <!-- KPI grid -->
         <div class="v5-kpi-grid" id="ov-kpi-grid">
-          <div class="v5-kpi-card blue"><div class="v5-kpi-icon">&#127970;</div><div class="v5-kpi-label">Portfolio Companies</div><div class="v5-kpi-value" id="kv-cos">—</div><div class="v5-kpi-sub" id="ks-cos">—</div><div class="v5-kpi-trend up" id="kt-cos">Loading…</div></div>
-          <div class="v5-kpi-card green"><div class="v5-kpi-icon">&#128176;</div><div class="v5-kpi-label">Total Fair Value</div><div class="v5-kpi-value" id="kv-fv">—</div><div class="v5-kpi-sub" id="ks-fv">—</div><div class="v5-kpi-trend up" id="kt-fv">—</div></div>
-          <div class="v5-kpi-card gold"><div class="v5-kpi-icon">&#128200;</div><div class="v5-kpi-label">Portfolio MOIC</div><div class="v5-kpi-value" id="kv-moic">—</div><div class="v5-kpi-sub" id="ks-moic">Gross · Unrealized</div><div class="v5-kpi-trend up" id="kt-moic">—</div></div>
-          <div class="v5-kpi-card purple"><div class="v5-kpi-icon">&#127919;</div><div class="v5-kpi-label">Net IRR</div><div class="v5-kpi-value" id="kv-irr">—</div><div class="v5-kpi-sub" id="ks-irr">vs Hurdle 8%</div><div class="v5-kpi-trend up" id="kt-irr">—</div></div>
-          <div class="v5-kpi-card cyan"><div class="v5-kpi-icon">&#128202;</div><div class="v5-kpi-label">TVPI</div><div class="v5-kpi-value" id="kv-tvpi">—</div><div class="v5-kpi-sub" id="ks-tvpi">DPI · RVPI</div><div class="v5-kpi-trend up" id="kt-tvpi">—</div></div>
-          <div class="v5-kpi-card red"><div class="v5-kpi-icon">&#128184;</div><div class="v5-kpi-label">Deployment</div><div class="v5-kpi-value" id="kv-dep">—</div><div class="v5-kpi-sub" id="ks-dep">% of drawdown</div><div class="v5-kpi-trend up" id="kt-dep">—</div></div>
+          <div class="v5-kpi-card blue"><div class="v5-kpi-icon"><span class="kpi-ico ki-cos">&#127970;</span></div><div class="v5-kpi-label">Portfolio Companies</div><div class="v5-kpi-value" id="kv-cos">—</div><div class="v5-kpi-sub" id="ks-cos">—</div><div class="v5-kpi-trend up" id="kt-cos">Loading…</div></div>
+          <div class="v5-kpi-card green"><div class="v5-kpi-icon"><span class="kpi-ico ki-fv">&#128176;</span></div><div class="v5-kpi-label">Total Fair Value</div><div class="v5-kpi-value" id="kv-fv">—</div><div class="v5-kpi-sub" id="ks-fv">—</div><div class="v5-kpi-trend up" id="kt-fv">—</div></div>
+          <div class="v5-kpi-card gold"><div class="v5-kpi-icon"><span class="kpi-ico ki-moic">&#128200;</span></div><div class="v5-kpi-label">Portfolio MOIC</div><div class="v5-kpi-value" id="kv-moic">—</div><div class="v5-kpi-sub" id="ks-moic">Gross · Unrealized</div><div class="v5-kpi-trend up" id="kt-moic">—</div></div>
+          <div class="v5-kpi-card purple"><div class="v5-kpi-icon"><span class="kpi-ico ki-irr">&#127919;</span></div><div class="v5-kpi-label">Net IRR</div><div class="v5-kpi-value" id="kv-irr">—</div><div class="v5-kpi-sub" id="ks-irr">vs Hurdle 8%</div><div class="v5-kpi-trend up" id="kt-irr">—</div></div>
+          <div class="v5-kpi-card cyan"><div class="v5-kpi-icon"><span class="kpi-ico ki-tvpi">&#128202;</span></div><div class="v5-kpi-label">TVPI</div><div class="v5-kpi-value" id="kv-tvpi">—</div><div class="v5-kpi-sub" id="ks-tvpi">DPI · RVPI</div><div class="v5-kpi-trend up" id="kt-tvpi">—</div></div>
+          <div class="v5-kpi-card red"><div class="v5-kpi-icon"><span class="kpi-ico ki-dep">&#128184;</span></div><div class="v5-kpi-label">Deployment</div><div class="v5-kpi-value" id="kv-dep">—</div><div class="v5-kpi-sub" id="ks-dep">% of drawdown</div><div class="v5-kpi-trend up" id="kt-dep">—</div></div>
         </div>
 
         <!-- Sector + Performance -->
@@ -420,7 +417,7 @@
           </div>
           <div class="v5-grid two">
             <div class="v5-panel"><div class="v5-panel-header"><div class="v5-panel-title">NAV History</div></div><div class="v5-table-scroll"><table class="v5-table" id="acc-nav-hist"><thead><tr><th>Period</th><th class="td-right">NAV (Cr)</th><th class="td-right">NAV/Unit</th><th class="td-right">QoQ%</th></tr></thead><tbody id="acc-nav-hist-tbody"><tr><td colspan="4" class="table-empty">Loading…</td></tr></tbody></table></div></div>
-            <div class="v5-panel"><div class="v5-panel-header"><div class="v5-panel-title">NAV Trend Chart</div></div><div class="v5-panel-body"><div class="v5-mini-chart" id="acc-nav-chart" style="height:120px"></div></div></div>
+            <div class="v5-panel"><div class="v5-panel-header"><div><div class="v5-panel-title">NAV Trend Chart</div><div class="v5-panel-subtitle" id="acc-nav-chart-sub">Total NAV (₹ Cr) per period</div></div></div><div class="v5-panel-body"><div style="position:relative;height:280px"><canvas id="acc-nav-chart"></canvas></div><div id="acc-nav-chart-empty" style="display:none;color:var(--text3);font-size:12px;text-align:center;padding:32px 0">No NAV records available for this fund.</div></div></div>
           </div>
         </div>
         <div id="acc-waterfall" class="v5-subpane">
@@ -856,7 +853,6 @@
                   <div class="v5-chat-avatar-ai">AI</div>
                   <div style="flex:1">
                     <div style="font-size:13px;font-weight:700;color:var(--text)">TrackFundAI Assistant</div>
-                    <div style="font-size:10px;color:var(--green)">&#9679; Online — Gemini powered</div>
                   </div>
                   <button class="chatbot-new-chat-header-btn" onclick="startNewConversation()" title="New Chat">+ New Chat</button>
                 </div>

@@ -343,7 +343,32 @@ def _uuid_for_sql(val):
     return s
 
 
-def build_context(organization, fund=None, company=None, intent_result=None, fund_name_override=None) -> Dict[str, Any]:
+def _user_display_name(user) -> str:
+    """Best display name for a Django user. Falls back to 'there' when unknown
+    so prompts never produce empty addressing like 'Hi ,'. Works for any
+    logged-in user, no hardcoded names."""
+    if not user:
+        return 'there'
+    full = (user.get_full_name() or '').strip()
+    if full:
+        return full
+    return (user.first_name or user.username or 'there').strip() or 'there'
+
+
+def _user_first_name(user) -> str:
+    """First name only, for casual addressing. Falls back gracefully."""
+    if not user:
+        return 'there'
+    first = (user.first_name or '').strip()
+    if first:
+        return first
+    full = (user.get_full_name() or '').strip()
+    if full:
+        return full.split()[0]
+    return (user.username or 'there').strip() or 'there'
+
+
+def build_context(organization, fund=None, company=None, intent_result=None, fund_name_override=None, user=None) -> Dict[str, Any]:
     ctx = {
         'organization_id': _uuid_for_sql(organization.pk),
         'organization_name': organization.name,
@@ -351,6 +376,8 @@ def build_context(organization, fund=None, company=None, intent_result=None, fun
         'fund_name': fund.name if fund else fund_name_override,
         'company_id': _uuid_for_sql(company.pk) if company else None,
         'company_name': company.name if company else None,
+        'user_name': _user_display_name(user),
+        'user_first_name': _user_first_name(user),
     }
 
     entity_name = intent_result.get('entity') if intent_result else None
@@ -1175,15 +1202,16 @@ def render_response(query: str, intent: str, columns: List[str], rows: List[tupl
 
         prompt = f"""You are a senior financial analyst AI assistant for TrackFundAI, a portfolio management platform for Indian AIFs (Alternative Investment Funds).
 
+You are speaking with {context.get('user_name', 'the user')} (address them as "{context.get('user_first_name', 'there')}" when appropriate — never as a company name, organization, or fund). Treat them as the human fund professional asking the question.
+
 User asked: "{query}"
-Organization: {context.get('organization_name', 'Portfolio')}
 Fund context: {context.get('fund_name') or 'All funds'}
 
 Data retrieved ({len(rows)} rows, {len(columns)} columns):
 {data_str}
 
 Provide a clear, professional response that:
-1. Directly answers the user's question using the data above — lead with the answer, not filler
+1. Directly answers {context.get('user_first_name', 'the user')}'s question using the data above — lead with the answer, not filler
 2. Highlights key numbers — use bold (**value**) for important figures
 3. For INR amounts, format as Rs.XX.XX Cr or Rs.XX.XX L (avoid raw decimals)
 4. Notes any important trends, anomalies, or concerns visible in the data
@@ -1194,7 +1222,7 @@ Provide a clear, professional response that:
 9. End with a brief insight or recommendation if relevant
 10. If the data includes NULL or None values, note what information is missing
 
-Do NOT include raw tables in the response — integrate numbers into prose. Do NOT say "based on the data" or "according to the query". Do NOT repeat the question back."""
+Do NOT include raw tables in the response — integrate numbers into prose. Do NOT say "based on the data" or "according to the query". Do NOT repeat the question back. Do NOT address the user as a company, firm, or organization — only by their personal name."""
 
         response = model.generate_content(prompt)
         return response.text.strip()
@@ -1247,7 +1275,7 @@ def _handle_general_finance(query: str, context: Dict) -> str:
         model = genai.GenerativeModel(getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash'))
 
         prompt = f"""You are a senior financial analyst AI assistant for TrackFundAI, a portfolio management platform for Indian AIFs.
-The user ({context.get('organization_name', 'a fund manager')}) is asking a general finance question.
+You are speaking with {context.get('user_name', 'a fund manager')} (address them personally as "{context.get('user_first_name', 'there')}" when appropriate — never as a company, firm, or organization). They are asking a general finance question.
 {f"Current fund context: {context['fund_name']}" if context.get('fund_name') else ''}
 
 User query: "{query}"
@@ -1332,6 +1360,7 @@ class ChatbotHandler:
         ctx = build_context(
             self.organization, fund=fund, company=company,
             intent_result=intent_result, fund_name_override=fund_name_override,
+            user=self.user,
         )
 
         # Handle out_of_scope from Gemini classification

@@ -10,6 +10,16 @@
 (function () {
   'use strict';
 
+  // ── Floating widget disabled ──────────────────────────────
+  // The dedicated inline chatbot on the AI Analytics page is now the
+  // single entry point for asking TrackFundAI questions, so this
+  // floating chat-bubble widget is no longer injected on any page.
+  // The file is kept (rather than removed from every page's <script>
+  // tag) so legacy markup that loads it does not 404, and so the
+  // toggle can be flipped back without re-wiring every HTML file.
+  return;
+  // eslint-disable-next-line no-unreachable
+
   const API = (() => {
     const p = window.location.port;
     const same = (p === '8000' || p === '' || p === '80' || p === '443');

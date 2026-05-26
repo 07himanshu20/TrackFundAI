@@ -167,6 +167,35 @@ const SIDEBAR_SUBTABS = {
   icworkflow: [],
 };
 
+// Maps each sub-tab slug to the formal-icon class. CSS uses these
+// (si-*) to paint Lucide-style SVGs via mask-image in the sapphire
+// theme. Light theme falls back to the original emoji unchanged.
+const SIDEBAR_ICON_CLASS = {
+  // portfolio
+  overview: 'si-grid', companies: 'si-building', burn: 'si-flame',
+  exits: 'si-exit', kpis: 'si-bars', saas: 'si-bolt', quoted: 'si-house',
+  'inv-detail': 'si-briefcase', 'val-tab': 'si-trend',
+  'kpi-tracking': 'si-clipboard', 'exit-scenarios': 'si-rocket',
+  'board-meetings': 'si-columns',
+  // accounting
+  nav: 'si-trend', waterfall: 'si-banknote', calls: 'si-clipboard',
+  dist: 'si-send', fpl: 'si-book', navrecords: 'si-clipcheck',
+  carried: 'si-coins', ledger: 'si-scroll', fees: 'si-percent',
+  coa: 'si-folder', tb: 'si-scales', finstat: 'si-doc',
+  // financials
+  pl: 'si-trend', bva: 'si-compare', consolidated: 'si-layers',
+  // valuations
+  summary: 'si-clipboard', method: 'si-gear', bridge: 'si-trend',
+  // investors
+  register: 'si-users', capital: 'si-monitor', kyc: 'si-shieldcheck',
+  // compliance
+  dashboard: 'si-grid', sebi: 'si-gavel', alerts: 'si-bell',
+  calendar: 'si-calendar',
+  // analytics
+  chatbot: 'si-message', insights: 'si-bulb', risk: 'si-shieldwarn',
+  mis: 'si-news', audit: 'si-check', predict: 'si-sparkle',
+};
+
 // Page display names for the sidebar label
 const SIDEBAR_PAGE_LABELS = {
   overview: 'Dashboard',
@@ -202,8 +231,9 @@ function updateSidebarSubtabs(pageId) {
     `<div class="v5-sidebar-label">${esc(label)}</div>` +
     tabs.map(t => {
       const isActive = t.sub === activeSub ? ' active' : '';
+      const iconCls  = SIDEBAR_ICON_CLASS[t.sub] || '';
       return `<div class="v5-sidebar-item sidebar-subtab-item${isActive}" data-page="${pageId}" data-sub="${t.sub}" onclick="onSidebarSubClick(this,'${pageId}','${t.sub}')">` +
-        `<span class="s-icon">${t.icon}</span>${esc(t.label)}` +
+        `<span class="s-icon ${iconCls}">${t.icon}</span>${esc(t.label)}` +
         `</div>`;
     }).join('');
 }
@@ -650,16 +680,49 @@ async function loadOverview() {
     const navChartVals = Object.values(navByDate).slice(-6);
     renderMiniChart('nav-chart', navChartVals, '#2563eb');
 
-    // Revenue sparkline: fetch real 6-month MIS rollup
+    // Revenue sparkline: real 6-month rollup, aggregated by period.
+    // Source order (universal, works for any Excel format):
+    //   1. ConsolidatedMIS rollup (fund-level monthly P&L)         — preferred
+    //   2. BvA fallback — sum per-company revenue rows by period   — if (1) empty
+    // Both sources use ACTUAL field names from the backend serializers.
     let revChartVals = [];
     if (_ctx.fundId) {
       try {
-        const revRollup = await Auth.apiGet(`/mis/consolidated/6month/?fund=${_ctx.fundId}&line_items=revenue`);
-        const revRows = revRollup?.data || [];
-        revChartVals = revRows.map(r => parseFloat(r.revenue || 0)).filter(v => v > 0);
+        const rollup = await Auth.apiGet(`/mis/consolidated/6month/?fund=${_ctx.fundId}&line_items=revenue`);
+        const rows = (rollup && rollup.data) || [];
+        // Aggregate by (year, month) — backend returns one row per scheme per month
+        const byPeriod = {};
+        rows.forEach(r => {
+          if (!r.period_year || !r.period_month) return;
+          const k = `${r.period_year}-${String(r.period_month).padStart(2,'0')}`;
+          byPeriod[k] = (byPeriod[k] || 0) + parseFloat(r.total_actual_inr || 0);
+        });
+        revChartVals = Object.keys(byPeriod).sort().slice(-6).map(k => byPeriod[k]).filter(v => v > 0);
       } catch(e) {}
+
+      // Fallback: aggregate from per-company BvA if consolidated MIS empty.
+      if (!revChartVals.length) {
+        try {
+          const bva = await Auth.apiGet(`/mis/bva/?fund=${_ctx.fundId}`);
+          const bvaRows = (bva && (bva.results || bva)) || [];
+          const byPeriod = {};
+          bvaRows.forEach(r => {
+            const li = String(r.line_item || '').toLowerCase();
+            // Match any "revenue"-flavoured line item (revenue, net_revenue, total_revenue, etc.)
+            if (!li.includes('revenue') && li !== 'sales' && li !== 'turnover') return;
+            if (!r.period_year || !r.period_month) return;
+            const k = `${r.period_year}-${String(r.period_month).padStart(2,'0')}`;
+            byPeriod[k] = (byPeriod[k] || 0) + parseFloat(r.actual_inr || r.actual || 0);
+          });
+          revChartVals = Object.keys(byPeriod).sort().slice(-6).map(k => byPeriod[k]).filter(v => v > 0);
+        } catch(e) {}
+      }
     }
     renderMiniChart('rev-chart', revChartVals, '#10b981');
+
+    // Portfolio Health — universal MOIC-bucket breakdown (works for any fund).
+    // Derived from cos + invs already in scope — no extra API call.
+    renderHealthBars(cos, invs);
 
     // Top portfolio — use investments for cost/FV, mapped by company
     renderTopPortfolio(cos, invs);
@@ -829,6 +892,73 @@ function renderMiniChart(targetId, values, color='#2563eb') {
   el.innerHTML = values.map(v => {
     const h = Math.max(8, Math.round((v / max) * 100));
     return `<div class="v5-mini-bar" style="height:${h}%;background:${color};opacity:0.7"></div>`;
+  }).join('');
+}
+
+/* ── Portfolio Health bars ────────────────────────────────────
+   Universal MOIC-bucket classification. Works for any Excel format
+   because MOIC = latest_valuation / total_invested is derived from
+   numeric columns already populated by the Gemini-mapped importer.
+
+   Buckets are PE-industry standard thresholds (not English-keyword
+   dependent), so the same logic applies to international funds:
+     ≥ 2.0x  → Outperforming
+     1.0–2.0 → On Track
+     0.5–1.0 → Watch
+     < 0.5   → Underperforming
+     not active → Exited (separate bucket)
+   Companies with no valuation data (cost = 0) are excluded so we
+   never show misleading 0-MOIC rows. */
+function renderHealthBars(cos, invs) {
+  const el = $('health-bars');
+  if (!el) return;
+
+  // Sum cost & FV per company across all its investment rows
+  const agg = {};
+  (invs || []).forEach(inv => {
+    const name = inv.company_name || inv.portfolio_company_name || '';
+    if (!name) return;
+    if (!agg[name]) agg[name] = { cost: 0, fv: 0 };
+    agg[name].cost += parseFloat(inv.total_invested   || 0);
+    agg[name].fv   += parseFloat(inv.latest_valuation || 0);
+  });
+
+  const buckets = {
+    outperform:    { label: 'Outperforming', range: '≥ 2.0x',  color: '#067647', count: 0 },
+    on_track:      { label: 'On Track',      range: '1.0–2.0x', color: '#1F56D6', count: 0 },
+    watch:         { label: 'Watch',         range: '0.5–1.0x', color: '#B54708', count: 0 },
+    underperform:  { label: 'Underperforming', range: '< 0.5x', color: '#B42318', count: 0 },
+    exited:        { label: 'Exited',        range: 'Realized', color: '#5A6478', count: 0 },
+  };
+
+  (cos || []).forEach(c => {
+    if (!c.is_active) { buckets.exited.count++; return; }
+    const a = agg[c.name];
+    if (!a || a.cost <= 0) return;            // skip cos with no valuation data
+    const moic = a.fv / a.cost;
+    if      (moic >= 2.0) buckets.outperform.count++;
+    else if (moic >= 1.0) buckets.on_track.count++;
+    else if (moic >= 0.5) buckets.watch.count++;
+    else                  buckets.underperform.count++;
+  });
+
+  const total = Object.values(buckets).reduce((s, b) => s + b.count, 0);
+  if (total === 0) {
+    el.innerHTML = '<div style="color:var(--text3);font-size:11px">No valuation data available</div>';
+    return;
+  }
+
+  el.innerHTML = Object.values(buckets).map(b => {
+    const pct = total > 0 ? Math.round((b.count / total) * 100) : 0;
+    if (b.count === 0) return '';
+    return `
+      <div class="v5-sector-bar" title="${b.label} (${b.range}): ${b.count} cos">
+        <div class="v5-sector-name" style="width:110px">${b.label}</div>
+        <div class="v5-sector-track">
+          <div class="v5-sector-fill" style="width:${pct}%;background:${b.color}"></div>
+        </div>
+        <div class="v5-sector-val" style="width:48px;color:${b.color}">${b.count} cos</div>
+      </div>`;
   }).join('');
 }
 
@@ -1671,19 +1801,112 @@ async function loadAccountingNAV() {
       }).join('') || '<tr><td colspan="4" class="table-empty">No NAV records.</td></tr>';
     }
 
-    // NAV trend chart
+    // NAV trend chart — aggregate Total NAV per period across all schemes
+    // of the selected fund. Pulled live from /accounting/nav/ — works for
+    // any uploaded Excel because the field names (nav_date, total_nav)
+    // come straight from the canonical NAVRecord model populated by the
+    // semantic importer. No hardcoded dates or values anywhere.
     const navByDate = {};
     arr.forEach(n => {
+      if (!n.nav_date) return;
       navByDate[n.nav_date] = (navByDate[n.nav_date] || 0) + parseFloat(n.total_nav || 0);
     });
-    const chartVals = Object.entries(navByDate).sort(([a],[b]) => a<b?-1:1).slice(-6).map(([,v])=>v);
-    renderMiniChart('acc-nav-chart', chartVals, '#2563eb');
-    const navDates = Object.keys(navByDate).sort().slice(-6);
+    const sortedDates = Object.keys(navByDate).sort();
+    // Show up to the last 12 periods — enough context, not crowded
+    const dates  = sortedDates.slice(-12);
+    const values = dates.map(d => navByDate[d]);
+    renderNavTrendChart(dates, values);
+
+    // Side-panel small date pills (existing markup)
+    const navDates = sortedDates.slice(-6);
     ['nav-date-1','nav-date-2'].forEach((id,i) => { const el=$(id); if(el&&navDates[i]) el.textContent=navDates[i].slice(0,7); });
     const lastDateEl = $('nav-date-last');
     if (lastDateEl && navDates.length) lastDateEl.textContent = navDates[navDates.length-1].slice(0,7);
 
   } catch(e) { console.error('NAV load error:', e); }
+}
+
+/* ── NAV Trend Chart (Fund Accounting → NAV & Unit Value) ──────
+   Real labelled bar chart driven by NAVRecord rows. The X-axis is
+   each unique nav_date (formatted as YYYY-MM-DD); the Y-axis is the
+   summed Total NAV in ₹ Crore across all schemes of the fund for
+   that date. Universal — pulls real periods from the data, no
+   hardcoded values or interval assumptions.                        */
+let _navTrendChart = null;
+function renderNavTrendChart(dates, values) {
+  const canvas = document.getElementById('acc-nav-chart');
+  const empty  = document.getElementById('acc-nav-chart-empty');
+  const subEl  = document.getElementById('acc-nav-chart-sub');
+  if (!canvas || typeof Chart === 'undefined') return;
+
+  // Destroy any previous chart instance so fund-switching doesn't leak
+  if (_navTrendChart) { try { _navTrendChart.destroy(); } catch(e) {} _navTrendChart = null; }
+
+  if (!dates.length) {
+    canvas.style.display = 'none';
+    if (empty) empty.style.display = 'block';
+    if (subEl) subEl.textContent = 'No NAV records available for this fund.';
+    return;
+  }
+  canvas.style.display = '';
+  if (empty) empty.style.display = 'none';
+
+  // Update subtitle with period range so the chart's scope is explicit
+  if (subEl) {
+    const first = dates[0], last = dates[dates.length-1];
+    subEl.textContent = `Total NAV (₹ Cr) per period · ${first} → ${last} · ${dates.length} period${dates.length===1?'':'s'}`;
+  }
+
+  // Crore-formatter for tooltip + axis ticks (no hardcoded denomination
+  // assumptions — backend already stores in INR Crore on NAVRecord)
+  const fmt = v => '₹' + (Math.round(v * 100) / 100).toLocaleString('en-IN') + ' Cr';
+
+  _navTrendChart = new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels: dates,
+      datasets: [{
+        label: 'Total NAV (₹ Cr)',
+        data: values,
+        backgroundColor: 'rgba(56,146,232,0.85)',  // #3892E8 brand sapphire
+        borderColor: '#1F56D6',
+        borderWidth: 1,
+        borderRadius: 4,
+        maxBarThickness: 56,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 400 },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#0B1424',
+          titleColor: '#FFFFFF',
+          bodyColor: '#E3E6EE',
+          padding: 10,
+          callbacks: {
+            title: (items) => 'NAV Date: ' + (items[0]?.label || ''),
+            label: (item) => 'Total NAV: ' + fmt(item.parsed.y),
+          },
+        },
+      },
+      scales: {
+        x: {
+          title: { display: true, text: 'NAV Date (Reporting Period)', color: '#5A6478', font: { size: 11, weight: '600' } },
+          ticks: { color: '#5A6478', font: { size: 10 }, maxRotation: 45, minRotation: 0, autoSkip: true, maxTicksLimit: 12 },
+          grid: { display: false },
+        },
+        y: {
+          title: { display: true, text: 'Total NAV (₹ Crore)', color: '#5A6478', font: { size: 11, weight: '600' } },
+          beginAtZero: true,
+          ticks: { color: '#5A6478', font: { size: 10 }, callback: (v) => '₹' + Number(v).toLocaleString('en-IN') + ' Cr' },
+          grid: { color: _v5GridColor(), drawBorder: false },
+        },
+      },
+    },
+  });
 }
 
 async function renderWaterfall() {

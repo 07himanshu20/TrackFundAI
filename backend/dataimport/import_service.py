@@ -995,6 +995,205 @@ class FundImportService:
         self._gemini_sheet_aliases = {}  # {sheet_name: {excel_col: canonical_field}}
         self._pl_line_item_map = {}     # {label: canonical_pl_category} — populated per sheet
         self._junk_name_cache = {}      # {name: row_type} — populated per section
+        self._filepath = None           # set by _do_import; used by Pass 2.5 layout calls
+        self._sheet_layouts = {}        # {sheet_name: layout_dict} — cached Pass 2.5 results
+        self._layout_failed_sheets = set()  # sheets where Gemini layout call failed → fallback
+
+    # ------------------------------------------------------------------
+    # Pass 2.5 — Per-sheet Gemini layout detection (PRIMARY row reader)
+    #
+    # Replaces the brittle Python heuristic that previously decided "where
+    # does the table start / where does it end / which row is the header /
+    # which rows are banner-disclaimer noise."  The Python heuristic
+    # (`_is_section_title_row` + `_read_data_rows`) survives ONLY as a
+    # safety-net fallback for the rare case where Gemini itself is
+    # unreachable.  In normal operation Gemini is the source of truth.
+    # ------------------------------------------------------------------
+
+    def _get_sheet_layout(self, sheet_name):
+        """Return the cached Pass 2.5 layout dict for a sheet, calling
+        Gemini once on the first access.  Returns None ONLY if the Gemini
+        call raised an exception — caller then falls back to the heuristic
+        reader.  A successful "this sheet has no tables" response is a
+        valid layout (sub_tables=[]) and is cached as such, not None.
+        """
+        if sheet_name in self._sheet_layouts:
+            return self._sheet_layouts[sheet_name]
+        if sheet_name in self._layout_failed_sheets:
+            return None
+        if not self._filepath:
+            return None
+        try:
+            from .gemini_column_mapper import detect_sheet_layout
+            layout = detect_sheet_layout(self._filepath, sheet_name)
+            self._sheet_layouts[sheet_name] = layout
+            return layout
+        except Exception as e:
+            logger.warning(
+                f'Pass 2.5 layout detection failed for "{sheet_name}" '
+                f'({type(e).__name__}: {e}); falling back to heuristic reader'
+            )
+            self._layout_failed_sheets.add(sheet_name)
+            return None
+
+    def _read_sheet_via_layout(self, ws, alias_map=None):
+        """Read a sheet using the Gemini layout map (Pass 2.5) — PRIMARY path.
+
+        Returns a dict of {section_name: (headers_dict, rows)} with the same
+        contract as read_all_sections_from_sheet() so call sites stay identical.
+
+        Behaviour:
+          * Gemini layout succeeded → read rows mechanically per the map.
+          * Gemini layout failed    → fall back to read_all_sections_from_sheet
+                                       (the deterministic Python heuristic).
+          * Gemini layout says "no tables" → return {} (empty result, NOT a
+                                              fallback — Gemini explicitly said
+                                              the sheet has no data, e.g. Cover).
+        """
+        sheet_name = ws.title
+        layout = self._get_sheet_layout(sheet_name)
+
+        if layout is None:
+            # Gemini truly failed (network / API error) — fall back to
+            # heuristic. This is the ONLY path that uses the old reader.
+            return read_all_sections_from_sheet(ws, alias_map=alias_map)
+
+        sub_tables = layout.get('sub_tables', [])
+        if not sub_tables:
+            # Gemini explicitly said: no tables in this sheet
+            return {}
+
+        sections = {}
+        max_col = ws.max_column or 0
+        max_row = ws.max_row or 0
+
+        for idx, st in enumerate(sub_tables):
+            header_row_0 = st['header_row']
+            data_start_0 = st['data_start']
+            data_end_0   = st['data_end']
+
+            # Convert 0-indexed → openpyxl 1-indexed
+            header_row = header_row_0 + 1
+            data_start = data_start_0 + 1
+            data_end   = data_end_0 + 1
+
+            # Defensive re-validation (Gemini already validated, but the
+            # sheet may have changed dimensions between Gemini's sample
+            # and this read — unlikely, but free insurance)
+            if not (1 <= header_row < data_start <= data_end <= max_row):
+                logger.warning(
+                    f'Layout sub-table {idx} for "{sheet_name}" has invalid '
+                    f'bounds (header={header_row}, start={data_start}, '
+                    f'end={data_end}, sheet_rows={max_row}); skipping'
+                )
+                continue
+
+            # Read header row
+            headers = {}
+            for c in range(1, max_col + 1):
+                h = ws.cell(header_row, c).value
+                if h is not None:
+                    headers[str(h).strip()] = c
+            if not headers:
+                continue
+
+            # Read data rows (data_start ... data_end inclusive)
+            rows = []
+            for r in range(data_start, data_end + 1):
+                row_data = {}
+                all_empty = True
+                for name, col in headers.items():
+                    v = ws.cell(r, col).value
+                    if v is not None:
+                        all_empty = False
+                    row_data[name] = v
+                if all_empty:
+                    continue
+
+                # Gemini Pass-2 alias enrichment
+                if alias_map:
+                    for excel_col, canonical in alias_map.items():
+                        if excel_col in row_data and canonical not in row_data:
+                            row_data[canonical] = row_data[excel_col]
+
+                rows.append(row_data)
+
+            # Normalize section name (compat with existing call sites that
+            # look up sections by ALL-CAPS keys)
+            section_name = (st.get('section_name') or '').upper().strip()
+            if '|' in section_name:
+                section_name = section_name[:section_name.index('|')].strip()
+            for sep in [' — ', ' - ', '—', ' –']:
+                if sep in section_name:
+                    section_name = section_name[:section_name.index(sep)].strip()
+                    break
+
+            # If this is the only/first sub-table and has no banner,
+            # use __default__ so the existing call sites (which look for
+            # __default__ before iterating named sections) keep working.
+            if not section_name:
+                if idx == 0 and len(sub_tables) == 1:
+                    section_name = '__default__'
+                else:
+                    section_name = f'__section_{idx}__'
+
+            sections[section_name] = (headers, rows)
+
+        return sections
+
+    def _derived_column_for(self, sheet_name, target_header_aliases):
+        """Look up the Gemini-discovered formula for a derived column.
+
+        target_header_aliases: list of header-text patterns to match against
+        the layout's derived_columns (case-insensitive substring match — same
+        spirit as _find_col).
+
+        Returns the matched derived_column dict, or None.
+        """
+        layout = self._sheet_layouts.get(sheet_name)
+        if not layout:
+            return None
+        aliases_lc = [a.lower() for a in target_header_aliases if a]
+        for st in layout.get('sub_tables', []):
+            for dc in st.get('derived_columns', []):
+                col_lc = (dc.get('column_name') or '').lower()
+                if not col_lc:
+                    continue
+                for a in aliases_lc:
+                    if a in col_lc or col_lc in a:
+                        return dc
+        return None
+
+    def _evaluate_derived_formula(self, derived_col, row):
+        """Compute a derived column's value from its formula_components.
+
+        derived_col: {'column_name', 'formula_components': [{sign, source_column}]}
+        row: the row dict (header_text → cell_value)
+
+        Returns Decimal or None if any source column is missing/non-numeric.
+        Universal — no hardcoded formula, no SEBI assumption.  The formula
+        was discovered by Gemini either from an explicit disclaimer row in
+        the Excel ("Col I = C+E+F-D") or from standard accounting identities.
+        """
+        from decimal import Decimal, InvalidOperation
+        total = Decimal('0')
+        for comp in derived_col.get('formula_components', []):
+            src_name = comp.get('source_column', '')
+            sign = comp.get('sign', '+')
+            # Case-insensitive lookup in row dict — handles whitespace/case drift
+            val_raw = None
+            for k, v in row.items():
+                if k and str(k).strip().lower() == src_name.strip().lower():
+                    val_raw = v
+                    break
+            if val_raw is None or val_raw == '':
+                return None  # missing source → can't compute
+            try:
+                val = Decimal(str(val_raw))
+            except (InvalidOperation, TypeError, ValueError):
+                return None
+            total = total + val if sign == '+' else total - val
+        return total
 
     # ------------------------------------------------------------------
     # Pass 3 helpers: Gemini-powered value classification
@@ -1174,6 +1373,13 @@ class FundImportService:
         """
         wb = openpyxl.load_workbook(filepath, data_only=True)
         org = self.org
+
+        # Store filepath so Pass 2.5 layout detection can re-open the workbook
+        # per-sheet. Reset layout cache for this import (fresh classification
+        # per file — no cross-import contamination).
+        self._filepath = filepath
+        self._sheet_layouts = {}
+        self._layout_failed_sheets = set()
 
         # Store Gemini Pass 1.5 section classification for routing
         self._section_map = section_map or {}
@@ -2201,7 +2407,7 @@ class FundImportService:
         cc_sheet = _dm_first(domain_map, 'capital_calls')
         if cc_sheet and cc_sheet in wb.sheetnames:
             ws = wb[cc_sheet]
-            sections = read_all_sections_from_sheet(ws, alias_map=self._get_alias(ws))
+            sections = self._read_sheet_via_layout(ws, alias_map=self._get_alias(ws))
 
             # Find the main capital calls section (not line items)
             cc_rows = []
@@ -2480,7 +2686,7 @@ class FundImportService:
         investments = {}
 
         # Try reading as multi-section sheet first
-        sections = read_all_sections_from_sheet(ws, alias_map=self._get_alias(ws))
+        sections = self._read_sheet_via_layout(ws, alias_map=self._get_alias(ws))
 
         # Look for separate PORTFOLIO COMPANIES and INVESTMENTS sections.
         #
@@ -2830,7 +3036,7 @@ class FundImportService:
         ws = wb[sheet_name]
 
         # Try multi-section approach first
-        sections = read_all_sections_from_sheet(ws, alias_map=self._get_alias(ws))
+        sections = self._read_sheet_via_layout(ws, alias_map=self._get_alias(ws))
         tranche_rows = None
         for sec_name, (sec_headers, sec_rows) in sections.items():
             subdomain = self._get_section_subdomain(sheet_name, sec_name)
@@ -4767,7 +4973,7 @@ class FundImportService:
             return count
 
         # ── Format B: Multi-section ──────────────────────────────────────────
-        sections = read_all_sections_from_sheet(ws, alias_map=self._get_alias(ws))
+        sections = self._read_sheet_via_layout(ws, alias_map=self._get_alias(ws))
         nav_rows = None
         for sec_name, (sec_headers, sec_rows) in sections.items():
             subdomain = self._get_section_subdomain(sheet_name, sec_name)
@@ -4803,6 +5009,33 @@ class FundImportService:
             total_nav = _find_col_decimal(
                 row, 'Total NAV (Cr)', 'Total NAV', 'NAV',
                 'Net Asset Value', 'total_nav')
+
+            # ── Fix B: NAV formula-derived fallback (no hardcoded SEBI formula) ──
+            # Many fund Excel files define "Total NAV" as a calculated cell
+            # (e.g. NAV sheet header row 1 says "Col I TotalNAV = C+E+F-D")
+            # but the workbook is saved without cached values → the cell
+            # comes through as None/0 here.  Pass 2.5 Gemini layout call
+            # identifies these derived columns and returns the formula in
+            # canonical form (sum of signed source-column references).  We
+            # evaluate it from the OTHER cells in this same row.  Universal:
+            # works for any Excel where Gemini sees the formula in a
+            # disclaimer row OR recognises a standard SEBI AIF identity.
+            if (not total_nav or total_nav == 0):
+                derived = self._derived_column_for(
+                    sheet_name,
+                    ['Total NAV', 'Total NAV(₹Cr)', 'Total NAV (Cr)', 'NAV',
+                     'Net Asset Value', 'total_nav'],
+                )
+                if derived:
+                    computed = self._evaluate_derived_formula(derived, row)
+                    if computed is not None:
+                        total_nav = computed
+                        logger.info(
+                            f'NAV row computed from Gemini-derived formula: '
+                            f'{[c["sign"]+c["source_column"] for c in derived["formula_components"]]} '
+                            f'= {computed} (sheet="{sheet_name}")'
+                        )
+
             nav_per_unit = _find_col_decimal(
                 row, 'NAV/Unit (INR)', 'NAV/Unit(₹)', 'NAV/Unit',
                 'NAV Per Unit', 'nav_per_unit')
@@ -4997,7 +5230,7 @@ class FundImportService:
 
     def _try_import_exits_from_sheet(self, ws, sheet_name, investments, schemes):
         """Try to import exits from a single sheet. Returns exit count (0 if unsuitable)."""
-        sections = read_all_sections_from_sheet(ws, alias_map=self._get_alias(ws))
+        sections = self._read_sheet_via_layout(ws, alias_map=self._get_alias(ws))
         exit_rows = None
         dist_rows = None
 
@@ -5389,7 +5622,7 @@ class FundImportService:
 
         if sheet_name and sheet_name in wb.sheetnames:
             ws = wb[sheet_name]
-            sections = read_all_sections_from_sheet(ws, alias_map=self._get_alias(ws))
+            sections = self._read_sheet_via_layout(ws, alias_map=self._get_alias(ws))
 
             # Find entity section via Gemini sub-domain
             entity_rows = None
@@ -6091,7 +6324,7 @@ class FundImportService:
             return
 
         ws = wb[sheet_name]
-        sections = read_all_sections_from_sheet(ws, alias_map=self._get_alias(ws))
+        sections = self._read_sheet_via_layout(ws, alias_map=self._get_alias(ws))
         rows = None
         for sec_name, (sec_headers, sec_rows) in sections.items():
             subdomain = self._get_section_subdomain(sheet_name, sec_name)

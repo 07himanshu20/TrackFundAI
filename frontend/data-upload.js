@@ -852,7 +852,7 @@
     document.getElementById('progress-overall-section').style.display = 'none';
     document.getElementById('progress-overall-bar').style.width = '0%';
     document.getElementById('progress-overall-percent').textContent = '0.0%';
-    document.getElementById('progress-title-text').textContent = 'Importing with Gemini AI';
+    document.getElementById('progress-title-text').textContent = 'Importing with AI';
     // Reset step indicators
     PROGRESS_STEPS.forEach(id => {
       const el = document.getElementById(id);

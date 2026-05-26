@@ -546,6 +546,257 @@ Return JSON: {{"currency": "INR", "unit_multiplier": 10000000, "unit_label": "Cr
         return default_result
 
 
+def detect_sheet_layout(filepath, sheet_name, sample_top_rows=25, sample_bottom_rows=5):
+    """Pass 2.5 — Detect the table layout(s) inside ONE sheet via Gemini.
+
+    Replaces the brittle Python heuristic (`_is_section_title_row` +
+    `_read_data_rows`) that fails on sheets whose first rows are
+    banner/disclaimer/formula-legend text rather than headers.
+
+    The call is per-sheet (NOT per-row) — one Gemini round-trip returns the
+    full layout map for the sheet:
+      - which rows are pre-header noise (banner / disclaimer / sub-title)
+      - which row is the REAL header row (column names live here)
+      - where the actual data rows start and end
+      - whether the sheet contains multiple stacked sub-tables, each with its
+        own header + data range
+      - which columns are formula-derived in the Excel layout (e.g. the NAV
+        sheet declares "Col I TotalNAV = C+E+F-D") and how to compute them
+        from sibling columns when the cell value is empty
+
+    Returns a strict JSON dict on success:
+    {
+      "sub_tables": [
+        {
+          "section_name": str,                # "PORTFOLIO INVESTMENTS" or "" if no banner
+          "skip_rows_above": [int, ...],      # 0-indexed rows to ignore (banner, disclaimer)
+          "header_row": int,                  # 0-indexed row whose cells name each column
+          "data_start": int,                  # 0-indexed first real data row
+          "data_end": int,                    # 0-indexed last real data row (inclusive)
+          "derived_columns": [
+            {
+              "column_name": str,             # header text of the derived column
+              "formula_components": [         # ordered terms: sum of (sign * source_column)
+                {"sign": "+" | "-", "source_column": str},
+                ...
+              ],
+              "source": "disclaimer_row" | "standard_formula"
+            }
+          ]
+        }
+      ]
+    }
+
+    Raises on:
+      * Network / Gemini API failures (propagated from _call_gemini)
+      * Malformed JSON
+      * Layout validation failures (header_row >= data_start, indices out of
+        bounds, etc.) — caller MUST treat as failure and may fall back to the
+        deterministic heuristic.
+    """
+    import openpyxl
+
+    cache_key = ('layout', filepath, sheet_name)
+    if cache_key in _classification_cache:
+        return _classification_cache[cache_key]
+
+    try:
+        wb = openpyxl.load_workbook(filepath, data_only=True, read_only=False)
+        if sheet_name not in wb.sheetnames:
+            raise ValueError(f'Sheet "{sheet_name}" not found in {filepath}')
+        ws = wb[sheet_name]
+        max_row = ws.max_row or 0
+        max_col = ws.max_column or 0
+    except Exception as e:
+        raise ValueError(f'Could not open sheet "{sheet_name}": {e}')
+
+    if max_row == 0 or max_col == 0:
+        empty = {'sub_tables': []}
+        _classification_cache[cache_key] = empty
+        wb.close()
+        return empty
+
+    # Sample the first N rows and the last few rows (to spot footer/total).
+    # 0-indexed for prompt clarity (matches the schema the model returns).
+    top_n    = min(sample_top_rows, max_row)
+    bot_n    = min(sample_bottom_rows, max(0, max_row - top_n))
+    top_idxs = list(range(0, top_n))
+    bot_idxs = list(range(max_row - bot_n, max_row)) if bot_n else []
+    # De-duplicate (small sheets may overlap)
+    seen, sample_idxs = set(), []
+    for i in top_idxs + bot_idxs:
+        if i not in seen:
+            sample_idxs.append(i)
+            seen.add(i)
+
+    def _cell_preview(v):
+        if v is None:
+            return ''
+        s = str(v).strip()
+        return s[:80] if len(s) > 80 else s
+
+    rows_for_prompt = []
+    cap_col = min(max_col, 20)
+    for ridx_0 in sample_idxs:
+        cells = [_cell_preview(ws.cell(ridx_0 + 1, c).value) for c in range(1, cap_col + 1)]
+        rows_for_prompt.append((ridx_0, cells))
+
+    wb.close()
+
+    # Build the prompt
+    rows_text = '\n'.join(
+        f'[Row {ridx}]: ' + ' | '.join(f'"{c}"' if c else '<empty>' for c in cells)
+        for ridx, cells in rows_for_prompt
+    )
+
+    prompt = f"""You are a precise table-layout detector for an Indian AIF (Alternative Investment Fund) Excel sheet.
+
+A data importer will use your output to read this sheet ROW-BY-ROW. Wrong row indices = wrong data imported. Be exact.
+
+SHEET NAME: "{sheet_name}"
+SHEET DIMENSIONS: {max_row} rows × {max_col} columns
+SHOWING {len(rows_for_prompt)} sampled rows (first {top_n} + last {bot_n}) with 0-BASED row indices and first {cap_col} columns:
+
+{rows_text}
+
+TASK: Identify the table layout. Common patterns in fund files:
+  - Row 0 may be a BANNER  (sheet title in caps + fund name) e.g. "PORTFOLIO INVESTMENTS | Multiples IV"
+  - Row 1 may be a DISCLAIMER or FORMULA LEGEND e.g. "Blue = Input | Black = Formula" or "Col I TotalNAV = C+E+F-D"
+  - The next row is the REAL HEADER (short noun-phrase column names like "Company Name", "Cost", "Date")
+  - Below the header are data rows
+  - Multiple stacked sub-tables may exist, each with its own banner+header
+
+RETURN STRICT JSON exactly matching this schema:
+{{
+  "sub_tables": [
+    {{
+      "section_name": "string — banner text if any, else empty string",
+      "skip_rows_above": [list of 0-indexed rows to ignore — banner, disclaimer, blank lines above the header],
+      "header_row": "integer — 0-indexed row whose cells are the column NAMES",
+      "data_start": "integer — 0-indexed first real data row (must be > header_row)",
+      "data_end":   "integer — 0-indexed last real data row (must be <= {max_row - 1})",
+      "derived_columns": [
+        {{
+          "column_name": "exact header text of a column whose value is a formula",
+          "formula_components": [
+            {{"sign": "+", "source_column": "exact header text of source column"}},
+            {{"sign": "-", "source_column": "exact header text of source column"}}
+          ],
+          "source": "disclaimer_row OR standard_formula"
+        }}
+      ]
+    }}
+  ]
+}}
+
+CRITICAL RULES — violations cause data corruption:
+1. All row indices are 0-BASED. Row 0 is the first row of the sheet.
+2. header_row MUST point to a row whose cells are SHORT NOUN-PHRASE column names (≤ 5 words each, no sentences, no formulas, no all-caps banner text).
+3. header_row MUST be strictly < data_start. data_start MUST be strictly <= data_end. data_end MUST be < {max_row} (the sheet size).
+4. skip_rows_above lists rows BETWEEN the start of this sub-table and the header_row that should be ignored. Do NOT include the header_row itself.
+5. If the sheet has NO tabular data (e.g. a Cover/Summary/Index sheet), return {{"sub_tables": []}}.
+6. If the sheet has ONE table starting at row 0 with no banner, return a single sub_table with skip_rows_above=[] and header_row=0.
+7. If the sheet has MULTIPLE stacked sub-tables (separated by banner/blank rows), return ONE entry per sub-table in top-to-bottom order. data_end of sub_table N MUST be < skip_rows_above[0] (or header_row) of sub_table N+1.
+8. data_end MUST exclude any "Total", "Grand Total", "Sub-total", or summary footer rows — only real data rows count.
+9. derived_columns: include ONLY columns that are explicitly declared as formulas in the disclaimer/legend rows (source="disclaimer_row") OR are standard SEBI AIF accounting identities that the importer should compute when the cell is blank (source="standard_formula"). Examples:
+     - NAV sheet: "Total NAV" = Total Investments + Unrealized Gains + Realized Gains − Mgmt Fee − Fund Expenses
+     - Valuations sheet: "MOIC" = FV Holding / Cost
+   Use the EXACT column header text in source_column — the importer will look up these column names from the header_row.
+10. NEVER invent rows or columns that are not in the sample shown. NEVER guess. If unsure, omit derived_columns entirely.
+
+Respond with ONLY the JSON object."""
+
+    result = _call_gemini(prompt, context_label=f'Pass2.5-layout-{sheet_name}')
+
+    # Validate the response structure
+    if not isinstance(result, dict) or 'sub_tables' not in result:
+        raise ValueError(f'Gemini layout response missing "sub_tables" for {sheet_name}')
+    sub_tables = result.get('sub_tables') or []
+    if not isinstance(sub_tables, list):
+        raise ValueError(f'Gemini layout "sub_tables" is not a list for {sheet_name}')
+
+    validated = []
+    last_end = -1
+    for idx, st in enumerate(sub_tables):
+        if not isinstance(st, dict):
+            continue
+        try:
+            header_row = int(st.get('header_row'))
+            data_start = int(st.get('data_start'))
+            data_end   = int(st.get('data_end'))
+        except (TypeError, ValueError):
+            logger.warning(
+                f'Layout {sheet_name} sub_table {idx} has non-integer indices; skipping'
+            )
+            continue
+
+        # Strict validation: indices must be within bounds and ordered.
+        if not (0 <= header_row < data_start <= data_end < max_row):
+            logger.warning(
+                f'Layout {sheet_name} sub_table {idx} indices out of order/bounds '
+                f'(header={header_row}, start={data_start}, end={data_end}, sheet_rows={max_row}); skipping'
+            )
+            continue
+
+        # Stacked sub-tables must not overlap
+        if header_row <= last_end:
+            logger.warning(
+                f'Layout {sheet_name} sub_table {idx} overlaps previous (header={header_row} <= prev_end={last_end}); skipping'
+            )
+            continue
+        last_end = data_end
+
+        skip_above = st.get('skip_rows_above') or []
+        if not isinstance(skip_above, list):
+            skip_above = []
+        skip_above = [int(x) for x in skip_above if isinstance(x, (int, float)) and 0 <= int(x) < header_row]
+
+        derived = []
+        for dc in (st.get('derived_columns') or []):
+            if not isinstance(dc, dict):
+                continue
+            col_name = (dc.get('column_name') or '').strip()
+            comps = dc.get('formula_components') or []
+            if not col_name or not isinstance(comps, list) or not comps:
+                continue
+            clean_comps = []
+            for comp in comps:
+                if not isinstance(comp, dict):
+                    continue
+                sign = comp.get('sign', '+')
+                src  = (comp.get('source_column') or '').strip()
+                if sign not in ('+', '-') or not src:
+                    continue
+                clean_comps.append({'sign': sign, 'source_column': src})
+            if clean_comps:
+                derived.append({
+                    'column_name': col_name,
+                    'formula_components': clean_comps,
+                    'source': dc.get('source', 'standard_formula'),
+                })
+
+        validated.append({
+            'section_name':    (st.get('section_name') or '').strip(),
+            'skip_rows_above': skip_above,
+            'header_row':      header_row,
+            'data_start':      data_start,
+            'data_end':        data_end,
+            'derived_columns': derived,
+        })
+
+    final = {'sub_tables': validated}
+    _classification_cache[cache_key] = final
+    logger.info(
+        f'Pass2.5 layout for "{sheet_name}": {len(validated)} sub-table(s); '
+        + ', '.join(
+            f'header={st["header_row"]} data={st["data_start"]}-{st["data_end"]}'
+            + (f' derived={len(st["derived_columns"])}' if st['derived_columns'] else '')
+            for st in validated
+        )
+    )
+    return final
+
+
 def _extract_sheet_previews(filepath):
     """
     Read an Excel file and extract sheet names + first 5 rows of each sheet.
