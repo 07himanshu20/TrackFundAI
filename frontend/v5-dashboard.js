@@ -23,6 +23,8 @@ let _ctx = {
 
 // Cache: fund id → array of scheme UUIDs
 const _schemeCache = {};
+// Cache: fund id → primary scheme object (hurdle/carry/fee/etc.) from /funds/<id>/
+const _schemeDetailCache = {};
 
 // Cache: scheme id → array of investment objects (with cost + FV)
 const _invCache = {};
@@ -60,6 +62,56 @@ async function resolveSchemeIds(fundId) {
     console.warn('Could not resolve schemes for fund', fundId, e);
     return [];
   }
+}
+
+/* Returns the primary Scheme object for a fund (the first one, in most
+   funds there is just one). Cached. Used to drive every "vs Hurdle X%"
+   / "Y% p.a. on Z" / waterfall-terms subtitle so the dashboard reads
+   real values from funds_scheme instead of hardcoded strings. Returns
+   null if the fund/scheme can't be fetched.
+
+   Universal — no per-fund hardcoding. Any value displayed via this
+   helper is the actual DB value populated by the importer.            */
+async function getSchemeForFund(fundId) {
+  if (!fundId) return null;
+  if (fundId in _schemeDetailCache) return _schemeDetailCache[fundId];
+  try {
+    const fund = await Auth.apiGet(`/funds/${fundId}/`);
+    const schemes = (fund && fund.schemes) || [];
+    const scheme = schemes.length ? schemes[0] : null;
+    _schemeDetailCache[fundId] = scheme;
+    return scheme;
+  } catch(e) {
+    console.warn('Could not fetch scheme for fund', fundId, e);
+    _schemeDetailCache[fundId] = null;
+    return null;
+  }
+}
+
+/* Format a percentage from a DB Decimal value. Returns null for missing
+   data so callers can skip display (never substitute placeholder numbers).
+   Strips trailing zeros — 8.00 → '8%', 20.50 → '20.5%', 2.00 → '2%'.    */
+function _fmtSchemePct(v) {
+  const n = parseFloat(v);
+  if (isNaN(n)) return null;
+  const s = (n % 1 === 0) ? n.toFixed(0) : n.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+  return s + '%';
+}
+
+/* Build the "European model · 8% Hurdle · 20% Carry" descriptor string
+   from real funds_scheme columns. Skips fields that are NULL in DB so
+   nothing is ever made up. Returns a fallback message when no scheme
+   data exists, so the panel is honest about what's missing.            */
+function buildSchemeTermsLine(scheme) {
+  if (!scheme) return 'Scheme terms not specified.';
+  const bits = [];
+  const ctype = (scheme.carry_type_display || scheme.carry_type || '').trim();
+  if (ctype) bits.push(`${ctype} model`);
+  const hurdle = _fmtSchemePct(scheme.hurdle_rate_pct);
+  if (hurdle) bits.push(`${hurdle} Hurdle`);
+  const carry = _fmtSchemePct(scheme.carry_pct);
+  if (carry) bits.push(`${carry} Carry`);
+  return bits.length ? bits.join(' · ') : 'Scheme terms not specified.';
 }
 
 // Build query string with scheme filter(s). Returns '' if no filter.
@@ -114,10 +166,13 @@ const SIDEBAR_SUBTABS = {
     { icon: '\u26A1', label: 'SaaS Metrics', sub: 'saas' },
     { icon: '\u{1F3E0}', label: 'Quoted & Unquoted', sub: 'quoted' },
     { icon: '\u{1F4BC}', label: 'Investments', sub: 'inv-detail' },
-    { icon: '\u{1F4CA}', label: 'Valuations', sub: 'val-tab' },
     { icon: '\u{1F4CB}', label: 'KPI Tracking', sub: 'kpi-tracking' },
     { icon: '\u{1F680}', label: 'Exit Scenarios', sub: 'exit-scenarios' },
     { icon: '\u{1F3DB}', label: 'Board Meetings', sub: 'board-meetings' },
+    // Merged in from the former "Financials" section
+    { icon: '\u{1F4C8}', label: 'P&L', sub: 'pl' },
+    { icon: '\u{1F4CC}', label: 'Budget vs Actual', sub: 'bva' },
+    { icon: '\u{1F4F0}', label: 'Consolidated', sub: 'consolidated' },
   ],
   accounting: [
     { icon: '\u{1F4C8}', label: 'NAV & Unit Value', sub: 'nav' },
@@ -128,21 +183,10 @@ const SIDEBAR_SUBTABS = {
     { icon: '\u{1F4F1}', label: 'NAV Records', sub: 'navrecords' },
     { icon: '\u{1F4B0}', label: 'Carried Interest', sub: 'carried' },
     { icon: '\u{1F4DC}', label: 'Fund Ledger', sub: 'ledger' },
-    { icon: '\u{1F4BC}', label: 'Management Fees', sub: 'fees' },
-    { icon: '\u{1F4C1}', label: 'Chart of Accounts', sub: 'coa' },
-    { icon: '\u2696', label: 'Trial Balance', sub: 'tb' },
     { icon: '\u{1F4CA}', label: 'Financial Statements', sub: 'finstat' },
   ],
-  financials: [
-    { icon: '\u{1F4C8}', label: 'P&L', sub: 'pl' },
-    { icon: '\u{1F4CC}', label: 'Budget vs Actual', sub: 'bva' },
-    { icon: '\u{1F4F0}', label: 'Consolidated', sub: 'consolidated' },
-  ],
-  valuations: [
-    { icon: '\u{1F4CA}', label: 'Summary', sub: 'summary' },
-    { icon: '\u2699', label: 'Methodology', sub: 'method' },
-    { icon: '\u{1F4C8}', label: 'Value Bridge', sub: 'bridge' },
-  ],
+  // financials & valuations removed \u2014 P&L/BvA/Consolidated merged into
+  // portfolio; standalone Valuations section dropped per product spec.
   investors: [
     { icon: '\u{1F91D}', label: 'LP Register', sub: 'register' },
     { icon: '\u{1F5A5}', label: 'Capital Accounts', sub: 'capital' },
@@ -153,6 +197,7 @@ const SIDEBAR_SUBTABS = {
     { icon: '\u{1F58C}', label: 'SEBI', sub: 'sebi' },
     { icon: '\u26A0', label: 'Alerts', sub: 'alerts' },
     { icon: '\u{1F4C5}', label: 'Calendar', sub: 'calendar' },
+    { icon: '\u{1F525}', label: 'Risk Heatmap', sub: 'heatmap' },
   ],
   benchmarks: [],
   market: [],
@@ -174,36 +219,34 @@ const SIDEBAR_ICON_CLASS = {
   // portfolio
   overview: 'si-grid', companies: 'si-building', burn: 'si-flame',
   exits: 'si-exit', kpis: 'si-bars', saas: 'si-bolt', quoted: 'si-house',
-  'inv-detail': 'si-briefcase', 'val-tab': 'si-trend',
+  'inv-detail': 'si-briefcase',
   'kpi-tracking': 'si-clipboard', 'exit-scenarios': 'si-rocket',
   'board-meetings': 'si-columns',
   // accounting
   nav: 'si-trend', waterfall: 'si-banknote', calls: 'si-clipboard',
   dist: 'si-send', fpl: 'si-book', navrecords: 'si-clipcheck',
-  carried: 'si-coins', ledger: 'si-scroll', fees: 'si-percent',
-  coa: 'si-folder', tb: 'si-scales', finstat: 'si-doc',
-  // financials
+  carried: 'si-coins', ledger: 'si-scroll', finstat: 'si-doc',
+  // financials (merged into portfolio)
   pl: 'si-trend', bva: 'si-compare', consolidated: 'si-layers',
-  // valuations
-  summary: 'si-clipboard', method: 'si-gear', bridge: 'si-trend',
   // investors
   register: 'si-users', capital: 'si-monitor', kyc: 'si-shieldcheck',
   // compliance
   dashboard: 'si-grid', sebi: 'si-gavel', alerts: 'si-bell',
-  calendar: 'si-calendar',
+  calendar: 'si-calendar', heatmap: 'si-shieldwarn',
   // analytics
   chatbot: 'si-message', insights: 'si-bulb', risk: 'si-shieldwarn',
   mis: 'si-news', audit: 'si-check', predict: 'si-sparkle',
 };
 
 // Page display names for the sidebar label
+// Sidebar labels — newlines render as a real line break via the
+// `white-space: pre-line` rule on `.v5-sidebar-label`, matching the
+// 2-line nav tabs.
 const SIDEBAR_PAGE_LABELS = {
   overview: 'Dashboard',
-  portfolio: 'Portfolio',
-  accounting: 'Fund Accounting',
-  financials: 'Financials',
-  valuations: 'Valuations',
-  investors: 'Investors',
+  portfolio: 'Fund\nPerformance',
+  accounting: 'Fund\nReporting',
+  investors: 'LP\nManagement',
   compliance: 'Compliance',
   benchmarks: 'Benchmarks',
   market: 'Market Research',
@@ -348,8 +391,6 @@ function lazyRender(id) {
     overview:    loadOverview,
     portfolio:   loadPortfolioOverview,
     accounting:  loadAccountingNAV,
-    financials:  loadFinancials,
-    valuations:  loadValuations,
     investors:   loadInvestors,
     compliance:  loadCompliance,
     benchmarks:  renderBenchmarks,
@@ -370,10 +411,15 @@ function lazyRenderSub(key) {
     'portfolio-saas':           loadSaasMetrics,
     'portfolio-quoted':         loadQuotedUnquoted,
     'portfolio-inv-detail':     loadPortfolioInvestments,
-    'portfolio-val-tab':        loadPortfolioValuations,
     'portfolio-kpi-tracking':   loadPortfolioKPITracking,
     'portfolio-exit-scenarios': loadPortfolioExitScenarios,
     'portfolio-board-meetings': loadPortfolioBoardMeetings,
+    // Moved here from the former Financials section — the panes (#fin-pl,
+    // #fin-bva, #fin-consolidated) now live inside #pg-portfolio so
+    // showSub finds them via the 'fin-' prefix fallback.
+    'portfolio-pl':             loadFinancials,
+    'portfolio-bva':            loadBvA,
+    'portfolio-consolidated':   loadConsolidated,
     'accounting-waterfall':  renderWaterfall,
     'accounting-calls':      loadCapitalCalls,
     'accounting-dist':       loadDistributions,
@@ -381,19 +427,13 @@ function lazyRenderSub(key) {
     'accounting-navrecords': loadAccNAVRecords,
     'accounting-carried':    loadAccCarried,
     'accounting-ledger':     loadAccLedger,
-    'accounting-fees':       loadAccFees,
-    'accounting-coa':        loadAccCOA,
-    'accounting-tb':         loadAccTrialBalanceUI,
     'accounting-finstat':    loadAccFinStatementsUI,
-    'financials-bva':      loadBvA,
-    'financials-consolidated': loadConsolidated,
-    'valuations-method':   renderValMethod,
-    'valuations-bridge':   renderValBridge,
     'investors-capital':   loadLPCapital,
     'investors-kyc':       loadLPKYC,
     'compliance-sebi':     loadSEBI,
     'compliance-alerts':   loadCompAlerts,
     'compliance-calendar': loadCompCalendar,
+    'compliance-heatmap':  loadComplianceHeatmap,
     'analytics-chatbot':   loadChatConversations,
     'analytics-insights':  loadAIInsights,
     'analytics-risk':      loadRiskMonitor,
@@ -529,6 +569,176 @@ async function _triggerFundContextFromSelect(fundId, funds) {
   });
 }
 
+/* ── Pass 4: Derived metric fallback + provenance panel ─────── */
+let _derivedMetrics = {}; // { metric_key: full record from API }
+
+async function loadDerivedMetricsForFund(fundId) {
+  _derivedMetrics = {};
+  if (!fundId) return;
+  try {
+    const r = await Auth.apiGet(`/dataimport/derived-metrics/?fund=${fundId}`);
+    const list = (r && r.metrics) || [];
+    // Dashboard is fund-aggregate; if a fund has multiple schemes, take the
+    // first record per metric_key (multi-scheme aggregation is future work).
+    list.forEach(m => {
+      if (!_derivedMetrics[m.metric_key]) _derivedMetrics[m.metric_key] = m;
+    });
+  } catch (e) {
+    _derivedMetrics = {};
+  }
+}
+
+function getDerivedValue(metricKey) {
+  // Precedence: imported_direct (Pass 3.5 Excel extraction) > derived
+  // (Pass 4 Gemini computation). The previous code returned null for
+  // imported_direct so the dashboard would re-compute from legacy
+  // models — but Pass 3.5 now writes the authoritative Excel value to
+  // DerivedMetric only, so ignoring it meant displaying 0 instead of
+  // the real number. Always return the persisted value when it exists.
+  const rec = _derivedMetrics[metricKey];
+  if (!rec) return null;
+  return rec.value;
+}
+
+function getProvenanceSource(metricKey) {
+  const rec = _derivedMetrics[metricKey];
+  return rec ? rec.source : null;
+}
+
+function wireProvenance(elId, metricKey) {
+  const el = document.getElementById(elId);
+  if (!el || !_derivedMetrics[metricKey]) return;
+  const rec = _derivedMetrics[metricKey];
+  el.setAttribute('data-prov-key', metricKey);
+  // Surface source AT A GLANCE: badge colour + label differs based on
+  // whether the value came directly from the Excel ('Extracted', green)
+  // or was computed by Gemini Pass 4 ('Derived', purple). Click still
+  // opens the full provenance panel.
+  el.setAttribute('data-prov-source',
+    rec.source === 'imported_direct' ? 'extracted' : 'derived'
+  );
+  el.onclick = () => openProvenancePanel(metricKey);
+}
+
+function openProvenancePanel(metricKey) {
+  const ov = document.getElementById('prov-overlay');
+  const titleEl = document.getElementById('prov-title');
+  const subEl = document.getElementById('prov-sub');
+  const bodyEl = document.getElementById('prov-body');
+  if (!ov || !bodyEl) return;
+
+  const rec = _derivedMetrics[metricKey];
+  if (!rec) {
+    titleEl.textContent = metricKey.toUpperCase();
+    subEl.textContent = 'No provenance available';
+    bodyEl.innerHTML = '<div style="color:var(--text3);">No Pass 4 derivation record exists for this metric. Re-import the fund to trigger derivation.</div>';
+    ov.classList.add('open');
+    return;
+  }
+
+  titleEl.textContent = rec.metric_label || metricKey;
+  subEl.textContent = rec.metric_description || '';
+
+  const isImported = rec.source === 'imported_direct';
+  const fmt = (v) => {
+    if (v == null) return '—';
+    const u = rec.metric_unit;
+    if (u === 'percent')  return parseFloat(v).toFixed(2) + '%';
+    if (u === 'multiple') return parseFloat(v).toFixed(2) + 'x';
+    if (u === 'currency') return '₹' + parseFloat(v).toLocaleString('en-IN');
+    return parseFloat(v).toLocaleString();
+  };
+
+  let html = '';
+  html += `<div class="prov-section">
+    <h4>Source</h4>
+    <span class="prov-source-pill ${isImported ? 'imported' : 'derived'}">
+      ${isImported ? 'Imported direct from Excel' : 'Gemini-derived (Pass 4)'}
+    </span>
+    <div class="prov-value-big" style="margin-top:10px">${fmt(rec.value)}</div>
+    <div class="prov-value-meta">${rec.metric_unit ? rec.metric_unit + ' · ' : ''}as of ${rec.derived_at ? rec.derived_at.split('T')[0] : ''}</div>
+  </div>`;
+
+  if (!isImported && rec.formula_expression) {
+    html += `<div class="prov-section">
+      <h4>Formula chosen by Gemini</h4>
+      <div class="prov-formula">${esc(rec.formula_expression)}</div>
+    </div>`;
+  }
+
+  if (rec.inputs_used && Object.keys(rec.inputs_used).length) {
+    let rows = '';
+    Object.entries(rec.inputs_used).forEach(([k, info]) => {
+      const v    = (info && typeof info === 'object') ? info.value       : info;
+      const src  = (info && typeof info === 'object') ? (info.source||'') : '';
+      const desc = (info && typeof info === 'object') ? (info.description||'') : '';
+      rows += `<tr>
+        <td class="k">${esc(k)}</td>
+        <td class="v">${esc(String(v))}</td>
+        <td class="s">${esc(src)}${desc ? '<br/>' + esc(desc) : ''}</td>
+      </tr>`;
+    });
+    html += `<div class="prov-section">
+      <h4>Inputs used</h4>
+      <table class="prov-inputs-table">
+        <thead><tr><th>Input</th><th>Value</th><th>Source</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+  }
+
+  if (rec.confidence != null) {
+    const pct = Math.round((rec.confidence || 0) * 100);
+    html += `<div class="prov-section">
+      <h4>Confidence</h4>
+      <div style="font-weight:700;">${pct}%</div>
+      <div class="prov-confidence-bar"><div class="prov-confidence-fill" style="width:${pct}%"></div></div>
+    </div>`;
+  }
+
+  if (rec.gemini_reasoning) {
+    html += `<div class="prov-section">
+      <h4>Why this formula</h4>
+      <div style="line-height:1.5;">${esc(rec.gemini_reasoning)}</div>
+    </div>`;
+  }
+
+  if (rec.candidate_formulas && rec.candidate_formulas.length) {
+    let cards = '';
+    rec.candidate_formulas.forEach(c => {
+      const okInputs = c.all_inputs_available;
+      cards += `<div class="prov-candidate">
+        <div class="prov-candidate-head">
+          <span>${esc(c.formula || '—')}</span>
+          <span style="color:${okInputs ? '#15803d' : '#dc2626'};font-size:11px;">
+            ${okInputs ? 'inputs available' : 'inputs missing'}
+          </span>
+        </div>
+        ${c.inputs_required ? `<div style="font-size:11px;color:var(--text3);margin-top:4px;">requires: ${esc((c.inputs_required||[]).join(', '))}</div>` : ''}
+        ${c.reason_rejected ? `<div class="prov-candidate-reason">${esc(c.reason_rejected)}</div>` : ''}
+      </div>`;
+    });
+    html += `<div class="prov-section">
+      <h4>Alternate formulas Gemini considered</h4>
+      ${cards}
+    </div>`;
+  }
+
+  bodyEl.innerHTML = html;
+  ov.classList.add('open');
+}
+
+function closeProvenancePanel(e) {
+  if (e && e.target && e.target.id !== 'prov-overlay') return;
+  const ov = document.getElementById('prov-overlay');
+  if (ov) ov.classList.remove('open');
+}
+
+// Inline onclick handlers in index.html need globals
+window.openProvenancePanel = openProvenancePanel;
+window.closeProvenancePanel = closeProvenancePanel;
+
+
 /* ── Overview ──────────────────────────────────────────────── */
 async function loadOverview() {
   // Show a fast company count immediately while the heavy calls run
@@ -550,6 +760,11 @@ async function loadOverview() {
       Auth.apiGet(distUrl),
       getInvestmentsForContext(schemeIds),
     ]);
+
+    // Pass 4 — fetch derived-metric provenance for this fund so we can
+    // (a) fall back when direct computation yields 0/null and
+    // (b) open a provenance panel on KPI click.
+    await loadDerivedMetricsForFund(_ctx.fundId);
 
     const cos   = (companies.value?.results  || companies.value  || []);
     const navs  = (navData.value?.results    || navData.value    || []);
@@ -588,13 +803,13 @@ async function loadOverview() {
       calls.forEach(c => { totalCost += parseFloat(c.total_call_amount || 0); });
     }
 
-    const moic = totalCost > 0 ? totalFV / totalCost : 0;
+    let moic = totalCost > 0 ? totalFV / totalCost : 0;
 
     // Total distributions
     let totalDist = 0;
     dists.forEach(d => { totalDist += parseFloat(d.total_net_amount || 0); });
-    const dpi  = totalCost > 0 ? totalDist / totalCost : 0;
-    const tvpi = totalCost > 0 ? (totalFV + totalDist) / totalCost : 0;
+    let dpi  = totalCost > 0 ? totalDist / totalCost : 0;
+    let tvpi = totalCost > 0 ? (totalFV + totalDist) / totalCost : 0;
 
     // totalCost and totalFV from investments are already in Cr
     const costCr = totalCost;
@@ -625,18 +840,59 @@ async function loadOverview() {
       } catch (e) { /* silent — no IRR data available */ }
     }
 
+    // PRODUCTION PRECEDENCE — authoritative Excel values always win.
+    // Order (highest priority first):
+    //   1. imported_direct (Pass 3.5 — extracted from a labelled Excel cell)
+    //   2. derived (Pass 4 — Gemini-computed formula)
+    //   3. on-the-fly DB aggregate (the moic/tvpi/dpi/netIrr we computed above)
+    // Previously the on-the-fly compute was preferred, which caused the
+    // dashboard to display "0" even when Pass 3.5 had extracted the real
+    // value, because the on-the-fly aggregate returned 0 due to missing
+    // Investment/CapitalCall rows.
+    const _applyDerived = (currentValue, metricKey) => {
+      const rec = _derivedMetrics[metricKey];
+      if (!rec || rec.value == null) return currentValue;
+      // imported_direct trumps everything
+      if (rec.source === 'imported_direct') return rec.value;
+      // derived only if current value is 0/null
+      if (currentValue == null || currentValue === 0) return rec.value;
+      return currentValue;
+    };
+    moic   = _applyDerived(moic,   'moic');
+    tvpi   = _applyDerived(tvpi,   'tvpi');
+    dpi    = _applyDerived(dpi,    'dpi');
+    netIrr = _applyDerived(netIrr, 'net_irr');
+    // Net IRR from Pass 3.5 comes as a fraction (0.1612); some pipelines
+    // store it as a percentage (16.12). Normalise to percentage for display.
+    if (netIrr != null && Math.abs(netIrr) < 1) netIrr = netIrr * 100;
+    // MOIC / TVPI / DPI from Pass 3.5 are pure multiples (no normalisation).
+
     // Update KPI cards — show ACTIVE portfolio count as primary (matches Excel Portfolio Investments sheet)
     if ($('kv-cos'))  $('kv-cos').textContent  = active || '—';
     if ($('ks-cos'))  $('ks-cos').textContent  = inactive > 0 ? `+ ${inactive} Exited` : 'Active portfolio';
     if ($('kt-cos'))  $('kt-cos').textContent  = totalCos > 0 ? `${active} active in this fund` : '—';
     if ($('kv-fv'))   $('kv-fv').textContent   = fmtCr(fvCr);
-    if ($('ks-fv'))   $('ks-fv').textContent   = `vs Cost ${fmtCr(costCr)} Cr`;
+    if ($('ks-fv'))   $('ks-fv').textContent   = `vs Cost ${fmtCr(costCr)}`;
     if ($('kv-moic')) $('kv-moic').textContent = fmtX(moic);
     if ($('kv-tvpi')) $('kv-tvpi').textContent = fmtX(tvpi);
     if ($('kv-irr'))  $('kv-irr').textContent  = netIrr != null ? netIrr.toFixed(1) + '%' : '—';
+
+    // Wire Pass 4 provenance click — opens side panel showing chosen formula,
+    // inputs, alternates Gemini considered. Only fires if a DerivedMetric row
+    // exists for this metric (wireProvenance() no-ops otherwise).
+    wireProvenance('kv-moic', 'moic');
+    wireProvenance('kv-tvpi', 'tvpi');
+    wireProvenance('kv-irr',  'net_irr');
+    // Net IRR card subtitle — real hurdle % from funds_scheme, not hardcoded "8%"
+    const _irrSub = $('ks-irr');
+    if (_irrSub) {
+      const _sch = await getSchemeForFund(_ctx.fundId);
+      const _h = _sch ? _fmtSchemePct(_sch.hurdle_rate_pct) : null;
+      _irrSub.textContent = _h ? `vs Hurdle ${_h}` : 'vs Hurdle —';
+    }
     if ($('kv-dep'))  $('kv-dep').textContent  = fmtCr(costCr);
     const corpus = _ctx.corpusTarget;
-    const depPct = corpus > 0 ? ((costCr / corpus) * 100).toFixed(1) + '% of ₹' + fmtCr(corpus) + ' Cr corpus' : '% of corpus';
+    const depPct = corpus > 0 ? ((costCr / corpus) * 100).toFixed(1) + '% of ' + fmtCr(corpus) + ' corpus' : '% of corpus';
     if ($('ks-dep'))  $('ks-dep').textContent  = depPct;
 
     // Subtitle
@@ -646,23 +902,6 @@ async function loadOverview() {
     // Sidebar company count
     const sbCos = $('sb-cos');
     if (sbCos) sbCos.textContent = active;
-
-    // Alert strip — fetch real anomaly alerts, hide if none
-    const alertEl  = $('alert-strip');
-    const alertMsg = $('alert-strip-msg');
-    if (alertEl) {
-      alertEl.style.display = 'none';
-      const alertQS = _ctx.fundId ? `?fund=${_ctx.fundId}` : '';
-      Auth.apiGet(`/mis/anomalies/${alertQS}`).then(data => {
-        const alerts = Array.isArray(data) ? data : (data.results || []);
-        if (!alerts.length) return;
-        alertEl.style.display = 'flex';
-        const high = alerts.filter(a => a.severity === 'high').length;
-        if (alertMsg) alertMsg.textContent =
-          `${alerts.length} active anomaly alert${alerts.length > 1 ? 's' : ''}` +
-          (high ? ` · ${high} high severity` : '');
-      }).catch(() => {});
-    }
 
     // Sector bars — use investments for FV/cost, cos for count
     renderSectorBars(cos, invs, 'sector-bars', 'cos');
@@ -776,8 +1015,8 @@ function renderSectorBars(cos, invs, targetId, view='fv') {
     const pct = ((val / max) * 100).toFixed(0);
     let display;
     if (view === 'cos') display = d.cos + ' cos';
-    else if (view === 'fv')   display = fmtCr(d.fv)   + ' Cr';
-    else                      display = fmtCr(d.cost) + ' Cr';
+    else if (view === 'fv')   display = fmtCr(d.fv);
+    else                      display = fmtCr(d.cost);
     const color = colors[i % colors.length];
     const safeN = esc(name);
     const safeName = name.replace(/'/g, "\\'");
@@ -1038,7 +1277,7 @@ async function loadCapitalCallsTimeline() {
         <div class="v5-timeline-dot ${dotColors[i%6]}"></div>
         <div class="v5-timeline-date">${c.call_date || '—'}</div>
         <div class="v5-timeline-text">${esc(c.scheme_name || '—')}</div>
-        <div class="v5-timeline-amount">${fmtCr(parseFloat(c.total_call_amount||0))} Cr</div>
+        <div class="v5-timeline-amount">${fmtCr(parseFloat(c.total_call_amount||0))}</div>
       </div>`).join('');
   } catch(e) {
     el.innerHTML = '<div style="color:var(--text3);font-size:11px">No capital calls data.</div>';
@@ -1062,7 +1301,7 @@ async function renderExitsList() {
       const moic = e.moic != null ? e.moic.toFixed(2) + 'x' : '—';
       const moicColor = e.moic != null && e.moic >= 1 ? 'var(--green)' : 'var(--red)';
       const meta = [e.exit_type_display || e.exit_type, e.exit_date].filter(Boolean).map(esc).join(' · ');
-      const sub  = [e.proceeds != null ? fmtCr(e.proceeds) + ' Cr' : null,
+      const sub  = [e.proceeds != null ? fmtCr(e.proceeds) : null,
                     irr != null ? irr.toFixed(1) + '% IRR' : null].filter(Boolean).join(' · ');
       return `<div style="display:flex;align-items:center;gap:10px;padding:8px 4px;border-bottom:1px solid var(--border)">
         <div style="min-width:0;flex:1">
@@ -1788,6 +2027,19 @@ async function loadAccountingNAV() {
     if ($('acc-unrealized')) $('acc-unrealized').textContent = totalUnrealized > 0 ? fmtCr(totalUnrealized) : '—';
     if ($('acc-realized'))   $('acc-realized').textContent   = totalRealized   > 0 ? fmtCr(totalRealized)   : '—';
 
+    // Mgmt Fee YTD subtitle — read real {pct}% on {basis} from funds_scheme
+    // instead of the old hardcoded "2.0% p.a. on corpus". Honest "—" if
+    // the importer didn't capture these fields for this fund.
+    const _mgSub = $('acc-mgmt-fee-sub');
+    if (_mgSub) {
+      const _sch = await getSchemeForFund(_ctx.fundId);
+      const _pct = _sch ? _fmtSchemePct(_sch.management_fee_pct) : null;
+      const _basis = _sch ? (_sch.fee_basis_display || _sch.management_fee_basis || '').trim() : '';
+      _mgSub.textContent = _pct
+        ? (_basis ? `${_pct} p.a. on ${_basis}` : `${_pct} p.a.`)
+        : '—';
+    }
+
     const tbody = $('acc-nav-hist-tbody');
     if (tbody) {
       tbody.innerHTML = arr.slice(0,12).map(n => {
@@ -1909,9 +2161,110 @@ function renderNavTrendChart(dates, values) {
   });
 }
 
+/* ── Waterfall panel header (title + subtitle) ─────────────────
+   Driven entirely by funds_scheme columns — no hardcoded percentages.
+   For the selected fund, fetches /funds/<id>/ (which embeds nested
+   schemes via FundDetailSerializer) and renders the actual hurdle,
+   carry, waterfall type, mgmt-fee terms.  Fields that are NULL in DB
+   are honestly omitted (NOT replaced with placeholder numbers) so the
+   panel never lies about a fund's economics.                          */
+async function _renderWaterfallHeader() {
+  const titleEl = document.getElementById('acc-wf-title');
+  const subEl   = document.getElementById('acc-wf-subtitle');
+  if (!subEl) return;
+
+  // No fund selected → honest empty state
+  if (!_ctx.fundId) {
+    if (titleEl) titleEl.textContent = 'Distribution Waterfall';
+    subEl.textContent = 'Select a fund to view its waterfall terms.';
+    return;
+  }
+
+  const scheme = await getSchemeForFund(_ctx.fundId);
+  if (!scheme) {
+    if (titleEl) titleEl.textContent = 'Distribution Waterfall';
+    subEl.textContent = 'Scheme terms unavailable.';
+    return;
+  }
+
+  // Title — append waterfall type if known (European / American)
+  const ctype = (scheme.carry_type_display || scheme.carry_type || '').trim();
+  if (titleEl) {
+    titleEl.textContent = ctype
+      ? `Distribution Waterfall — ${ctype} Model`
+      : 'Distribution Waterfall';
+  }
+
+  // Subtitle — concatenate ONLY the fields that have real values
+  const parts = [];
+  const hurdle = _fmtSchemePct(scheme.hurdle_rate_pct);
+  if (hurdle) parts.push(`${hurdle} Hurdle`);
+  const carry = _fmtSchemePct(scheme.carry_pct);
+  if (carry) parts.push(`${carry} Carry`);
+  const mgmt = _fmtSchemePct(scheme.management_fee_pct);
+  if (mgmt) {
+    const basis = (scheme.fee_basis_display || scheme.management_fee_basis || '').trim();
+    parts.push(basis ? `${mgmt} Mgmt Fee on ${basis}` : `${mgmt} Mgmt Fee`);
+  }
+  const sponsor = _fmtSchemePct(scheme.sponsor_commitment_pct);
+  if (sponsor) parts.push(`${sponsor} Sponsor Commitment`);
+
+  subEl.textContent = parts.length
+    ? parts.join(' · ')
+    : 'Scheme terms not specified — import the fund’s PPM / Cover sheet to populate.';
+}
+
+/* ── Waterfall SIMULATOR hydrator ─────────────────────────────────
+   Replaces the HTML defaults (value="8", value="20", value="7") of the
+   interactive simulator sliders with the actually-selected fund's real
+   terms. NO hardcoded percentages live in the JS — if the scheme returns
+   NULL for a field, the corresponding slider keeps its HTML default
+   (which is the only fallback in the system, and is just a starting
+   position the user can drag — not displayed as "truth" anywhere).      */
+async function _hydrateWaterfallSimulator() {
+  if (!_ctx.fundId) return;
+  const scheme = await getSchemeForFund(_ctx.fundId);
+  if (!scheme) return;
+
+  const setSlider = (sliderId, valId, value, fmt) => {
+    if (value == null || isNaN(parseFloat(value))) return;
+    const sl = document.getElementById(sliderId);
+    const lab = document.getElementById(valId);
+    if (sl) sl.value = String(value);
+    if (lab && fmt) lab.textContent = fmt(value);
+  };
+
+  setSlider('wf-sim-hurdle', 'wf-sim-hurdle-val', scheme.hurdle_rate_pct,
+            v => `${parseFloat(v).toFixed(1)}%`);
+  setSlider('wf-sim-carry',  'wf-sim-carry-val',  scheme.carry_pct,
+            v => `${parseFloat(v).toFixed(0)}%`);
+  setSlider('wf-sim-tenure', 'wf-sim-tenure-val', scheme.tenure_years,
+            v => `${parseFloat(v).toFixed(0)} years`);
+
+  // Recompute the simulator output with the new starting values so the
+  // viewer sees the fund's real waterfall the moment the page loads,
+  // before they touch any slider.
+  if (typeof _runWaterfallSim === 'function') {
+    try { _runWaterfallSim(); } catch (e) { /* simulator panel not visible yet */ }
+  }
+}
+
 async function renderWaterfall() {
   const el = $('acc-wf');
   if (!el) return;
+
+  // ── Header (title + subtitle) — driven by real scheme data, not hardcoded.
+  // Reads hurdle_rate_pct / carry_pct / carry_type from funds_scheme via
+  // /funds/<id>/ which embeds nested schemes. Falls back to honest "—" when
+  // a field is NULL in DB. NO hardcoded percentages anywhere.
+  _renderWaterfallHeader();
+
+  // ── Hydrate the waterfall SIMULATOR sliders from real scheme data.
+  // The HTML defaults (value="8" for hurdle, value="20" for carry, etc.)
+  // are only starting positions before the page knows which fund the user
+  // selected. Once the scheme has loaded, overwrite those positions with
+  // the fund's actual terms so the simulator starts at the truth.
+  _hydrateWaterfallSimulator();
 
   try {
     const fqs  = _ctx.fundId ? `?fund=${_ctx.fundId}` : '';
@@ -1941,9 +2294,9 @@ async function renderWaterfall() {
         return `<div class="v5-wf-bar">
           <div class="v5-wf-label">${it.label}</div>
           <div class="v5-wf-track"><div class="v5-wf-fill" style="width:${pct}%;background:${it.color}">${pct}%</div></div>
-          <div class="v5-wf-num">${fmtCr(it.val)} Cr</div>
+          <div class="v5-wf-num">${fmtCr(it.val)}</div>
         </div>`;
-      }).join('') + '<div style="font-size:10px;color:var(--text3);margin-top:10px">European model · 8% Hurdle · 20% Carry · 100% GP Catch-up</div>';
+      }).join('') + `<div style="font-size:10px;color:var(--text3);margin-top:10px">${esc(buildSchemeTermsLine(await getSchemeForFund(_ctx.fundId)))}</div>`;
 
       // Carry & Clawback Analysis
       const carryEl = $('acc-carry');
@@ -1955,22 +2308,22 @@ async function renderWaterfall() {
           <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px">
             <div class="v5-kpi-card gold" style="padding:14px">
               <div class="v5-kpi-label">Carry Base</div>
-              <div class="v5-kpi-value" style="font-size:1.2rem">${fmtCr(carries.reduce((s,c)=>s+parseFloat(c.carry_base||0),0))} Cr</div>
+              <div class="v5-kpi-value" style="font-size:1.2rem">${fmtCr(carries.reduce((s,c)=>s+parseFloat(c.carry_base||0),0))}</div>
               <div class="v5-kpi-sub">Profit above hurdle</div>
             </div>
             <div class="v5-kpi-card purple" style="padding:14px">
               <div class="v5-kpi-label">GP Carry (Gross)</div>
-              <div class="v5-kpi-value" style="font-size:1.2rem">${fmtCr(carryGross)} Cr</div>
+              <div class="v5-kpi-value" style="font-size:1.2rem">${fmtCr(carryGross)}</div>
               <div class="v5-kpi-sub">Before clawback</div>
             </div>
             <div class="v5-kpi-card cyan" style="padding:14px">
               <div class="v5-kpi-label">GP Carry (Net)</div>
-              <div class="v5-kpi-value" style="font-size:1.2rem">${fmtCr(carryNet)} Cr</div>
+              <div class="v5-kpi-value" style="font-size:1.2rem">${fmtCr(carryNet)}</div>
               <div class="v5-kpi-sub">After clawback provision</div>
             </div>
             <div class="v5-kpi-card blue" style="padding:14px">
               <div class="v5-kpi-label">Clawback Provision</div>
-              <div class="v5-kpi-value" style="font-size:1.2rem">${fmtCr(clawback)} Cr</div>
+              <div class="v5-kpi-value" style="font-size:1.2rem">${fmtCr(clawback)}</div>
               <div class="v5-kpi-sub">Excess carry to LPs</div>
             </div>
           </div>
@@ -1988,7 +2341,7 @@ async function renderWaterfall() {
         <div class="v5-wf-label">${it.label}</div>
         <div class="v5-wf-track"><div class="v5-wf-fill" style="width:${it.pct}%;background:${it.color}">${it.pct}%</div></div>
         <div class="v5-wf-num">${it.val}</div>
-      </div>`).join('') + '<div style="font-size:10px;color:var(--text3);margin-top:10px">European model · 8% Hurdle · 20% Carry · 100% GP Catch-up</div>';
+      </div>`).join('') + `<div style="font-size:10px;color:var(--text3);margin-top:10px">${esc(buildSchemeTermsLine(await getSchemeForFund(_ctx.fundId)))}</div>`;
 
       const carryEl = $('acc-carry');
       if (carryEl) {
@@ -2111,10 +2464,10 @@ async function loadFundPL() {
       return `<tr>
         <td>${n.nav_date || '—'}</td>
         <td>${esc(n.scheme_name || '—')}</td>
-        <td class="td-right">${unrealized > 0 ? fmtCr(unrealized)+' Cr' : '—'}</td>
-        <td class="td-right">${realized   > 0 ? fmtCr(realized)+' Cr'   : '—'}</td>
-        <td class="td-right" style="color:var(--accent-red)">${mgmtFee > 0 ? fmtCr(mgmtFee)+' Cr' : '—'}</td>
-        <td class="td-right ${netCls}">${fmtCr(netPL)} Cr</td>
+        <td class="td-right">${unrealized > 0 ? fmtCr(unrealized) : '—'}</td>
+        <td class="td-right">${realized   > 0 ? fmtCr(realized)   : '—'}</td>
+        <td class="td-right" style="color:var(--accent-red)">${mgmtFee > 0 ? fmtCr(mgmtFee) : '—'}</td>
+        <td class="td-right ${netCls}">${fmtCr(netPL)}</td>
       </tr>`;
     }).join('');
     body.innerHTML = `
@@ -2881,11 +3234,16 @@ function _runWaterfallSim() {
     if (Math.abs(v) >= 1e5) return `₹${(v/1e5).toFixed(1)} L`;
     return `₹${v.toLocaleString('en-IN', {maximumFractionDigits:0})}`;
   };
-  const totalDist = parseFloat($('wf-sim-dist')?.value || 200) * 1e7;
-  const calledCap = parseFloat($('wf-sim-called')?.value || 100) * 1e7;
-  const hurdlePct = parseFloat($('wf-sim-hurdle')?.value || 8) / 100;
-  const carryPct  = parseFloat($('wf-sim-carry')?.value || 20) / 100;
-  const tenure    = parseFloat($('wf-sim-tenure')?.value || 7);
+  // Read slider values straight from the DOM. No hardcoded JS fallbacks —
+  // if a slider is missing entirely, NaN propagates through the math and
+  // the display shows '—'. The slider's own HTML value attribute is the
+  // starting position; _hydrateWaterfallSim() pulls real scheme values
+  // into those sliders once the scheme data has loaded.
+  const totalDist = parseFloat($('wf-sim-dist')?.value) * 1e7;
+  const calledCap = parseFloat($('wf-sim-called')?.value) * 1e7;
+  const hurdlePct = parseFloat($('wf-sim-hurdle')?.value) / 100;
+  const carryPct  = parseFloat($('wf-sim-carry')?.value) / 100;
+  const tenure    = parseFloat($('wf-sim-tenure')?.value);
 
   const prefReturn = calledCap * (Math.pow(1 + hurdlePct, tenure) - 1);
   const carryBase  = Math.max(0, totalDist - calledCap - prefReturn);
@@ -3438,8 +3796,10 @@ async function loadInvestors() {
     const commits = (commitRes.value?.results  || commitRes.value  || []);
     const calls   = (callsRes.value?.results   || callsRes.value   || []);
 
+    // LP Management subtitle was removed per product spec — leave any
+    // stray element empty so a stale id reference doesn't repopulate it.
     const elSub = $('inv-subtitle');
-    if (elSub) elSub.textContent = `${lps.length} LPs · ${_ctx.fundName} · Commitments · Capital accounts · KYC/FATCA`;
+    if (elSub) elSub.textContent = '';
     const sbLps = $('sb-lps');
     if (sbLps) sbLps.textContent = lps.length;
 
@@ -3915,6 +4275,58 @@ async function loadRiskMonitor() {
 }
 
 /* ── AI Insights ─────────────────────────────────────────────── */
+
+// Render the Portfolio Risk Heatmap (Sector Overview + Company Risk Map)
+// into any container. Both copies of the heatmap — the one in AI Insights
+// and the duplicate in Compliance > Risk Heatmap — call this helper so they
+// stay byte-for-byte identical and 100% driven by /ai-insights/ response.
+function renderPortfolioRiskHeatmap(containerEl, heatmap, sectorSummary) {
+  if (!containerEl) return;
+  if (!heatmap || !heatmap.length) {
+    containerEl.innerHTML = '<div style="color:var(--text3);font-size:11px;padding:12px">No portfolio data. Import fund data first.</div>';
+    return;
+  }
+  const tierColor = t => ({ high: '#f87171', medium: '#fb923c', low: '#34d399' }[t] || '#94a3b8');
+  const tierBg    = t => ({ high: 'rgba(248,113,113,0.12)', medium: 'rgba(251,146,60,0.12)', low: 'rgba(52,211,153,0.12)' }[t] || 'var(--card2)');
+
+  // No .slice() caps — render every sector and every company the backend
+  // returned, so the heatmap reflects the FULL portfolio (a fund of 120
+  // companies shows 120 cards). Prior hardcoded caps (6 / 24) were
+  // hiding most of the portfolio for any meaningfully-sized fund.
+  const sectorHtml = (sectorSummary || []).map(s => `
+    <div style="padding:8px;background:var(--card2);border-radius:8px;border:1px solid var(--border);text-align:center">
+      <div style="font-size:10px;font-weight:700;color:var(--text)">${esc(s.sector)}</div>
+      <div style="font-size:11px;color:#34d399;margin:2px 0">${s.avg_moic != null ? s.avg_moic.toFixed(2) + 'x' : '—'}</div>
+      <div style="font-size:9px;color:var(--text3)">${s.company_count} cos · IRR ${s.avg_irr != null ? s.avg_irr.toFixed(1) + '%' : '—'}</div>
+    </div>`).join('');
+
+  const compHtml = heatmap.map(h => `
+    <div title="${esc(h.company_name)}" style="padding:6px 8px;border-radius:6px;background:${tierBg(h.risk_tier)};border:1px solid ${tierColor(h.risk_tier)}33;cursor:default">
+      <div style="font-size:10px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(h.company_name)}</div>
+      <div style="font-size:9px;color:var(--text3)">${esc(h.sector || '')}</div>
+      <div style="display:flex;justify-content:space-between;margin-top:3px">
+        <span style="font-size:10px;font-weight:700;color:${tierColor(h.risk_tier)}">${Math.round(h.risk_score || 0)}</span>
+        <span style="font-size:9px;color:var(--text3)">${h.moic != null ? h.moic.toFixed(1) + 'x' : '—'}</span>
+      </div>
+    </div>`).join('');
+
+  containerEl.innerHTML = `
+    <div style="margin-bottom:10px">
+      <div style="font-size:10px;font-weight:600;color:var(--text3);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">Sector Overview</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px">${sectorHtml}</div>
+    </div>
+    <div>
+      <div style="font-size:10px;font-weight:600;color:var(--text3);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">Company Risk Map
+        <span style="margin-left:8px;font-weight:400">
+          <span style="color:#34d399">■</span> Low &nbsp;
+          <span style="color:#fb923c">■</span> Medium &nbsp;
+          <span style="color:#f87171">■</span> High
+        </span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:5px">${compHtml}</div>
+    </div>`;
+}
+
 async function loadAIInsights() {
   const heatmapEl  = $('risk-heatmap');
   const analysisEl = $('ai-full-analysis');
@@ -3928,50 +4340,7 @@ async function loadAIInsights() {
     const sectorSummary = data.sector_summary || [];
     const fullAnalysis  = data.full_analysis  || '';
 
-    // Render Portfolio Risk Heatmap
-    if (heatmapEl) {
-      if (!heatmap.length) {
-        heatmapEl.innerHTML = '<div style="color:var(--text3);font-size:11px;padding:12px">No portfolio data. Import fund data first.</div>';
-      } else {
-        const tierColor = t => ({ high: '#f87171', medium: '#fb923c', low: '#34d399' }[t] || '#94a3b8');
-        const tierBg    = t => ({ high: 'rgba(248,113,113,0.12)', medium: 'rgba(251,146,60,0.12)', low: 'rgba(52,211,153,0.12)' }[t] || 'var(--card2)');
-
-        // Sector summary row
-        const sectorHtml = sectorSummary.slice(0, 6).map(s => `
-          <div style="padding:8px;background:var(--card2);border-radius:8px;border:1px solid var(--border);text-align:center">
-            <div style="font-size:10px;font-weight:700;color:var(--text)">${esc(s.sector)}</div>
-            <div style="font-size:11px;color:#34d399;margin:2px 0">${s.avg_moic != null ? s.avg_moic.toFixed(2) + 'x' : '—'}</div>
-            <div style="font-size:9px;color:var(--text3)">${s.company_count} cos · IRR ${s.avg_irr != null ? s.avg_irr.toFixed(1) + '%' : '—'}</div>
-          </div>`).join('');
-
-        // Company heatmap grid
-        const compHtml = heatmap.slice(0, 24).map(h => `
-          <div title="${esc(h.company_name)}" style="padding:6px 8px;border-radius:6px;background:${tierBg(h.risk_tier)};border:1px solid ${tierColor(h.risk_tier)}33;cursor:default">
-            <div style="font-size:10px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(h.company_name)}</div>
-            <div style="font-size:9px;color:var(--text3)">${esc(h.sector || '')}</div>
-            <div style="display:flex;justify-content:space-between;margin-top:3px">
-              <span style="font-size:10px;font-weight:700;color:${tierColor(h.risk_tier)}">${Math.round(h.risk_score || 0)}</span>
-              <span style="font-size:9px;color:var(--text3)">${h.moic != null ? h.moic.toFixed(1) + 'x' : '—'}</span>
-            </div>
-          </div>`).join('');
-
-        heatmapEl.innerHTML = `
-          <div style="margin-bottom:10px">
-            <div style="font-size:10px;font-weight:600;color:var(--text3);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">Sector Overview</div>
-            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px">${sectorHtml}</div>
-          </div>
-          <div>
-            <div style="font-size:10px;font-weight:600;color:var(--text3);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">Company Risk Map
-              <span style="margin-left:8px;font-weight:400">
-                <span style="color:#34d399">■</span> Low &nbsp;
-                <span style="color:#fb923c">■</span> Medium &nbsp;
-                <span style="color:#f87171">■</span> High
-              </span>
-            </div>
-            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:5px">${compHtml}</div>
-          </div>`;
-      }
-    }
+    renderPortfolioRiskHeatmap(heatmapEl, heatmap, sectorSummary);
 
     // Render AI Full Analysis (Gemini markdown)
     if (analysisEl) {
@@ -3996,6 +4365,23 @@ async function loadAIInsights() {
     if (heatmapEl)  heatmapEl.innerHTML  = `<div style="color:var(--text3);font-size:11px;padding:12px">Error loading heatmap: ${esc(e.message || 'Check console')}</div>`;
     if (analysisEl) analysisEl.innerHTML = `<div style="color:var(--text3);font-size:11px;padding:12px">Error loading analysis: ${esc(e.message || 'Check console')}</div>`;
     console.error('AI Insights error:', e);
+  }
+}
+
+// Compliance > Risk Heatmap — same data source as AI Insights heatmap, so
+// the two views never drift. Both call /ai-insights/ which derives every
+// value from the currently selected fund's real portfolio data; no
+// hardcoded fund or sector logic anywhere.
+async function loadComplianceHeatmap() {
+  const el = $('comp-risk-heatmap');
+  if (!el) return;
+  el.innerHTML = '<div style="color:var(--text3);font-size:11px;padding:12px">Loading portfolio heatmap…</div>';
+  try {
+    const data = await Auth.apiGet('/ai-insights/');
+    renderPortfolioRiskHeatmap(el, data.heatmap || [], data.sector_summary || []);
+  } catch(e) {
+    el.innerHTML = `<div style="color:var(--text3);font-size:11px;padding:12px">Error loading heatmap: ${esc(e.message || 'Check console')}</div>`;
+    console.error('Compliance heatmap error:', e);
   }
 }
 
@@ -4473,7 +4859,7 @@ async function loadICWorkflow() {
           ? 'v5-status overdue'
           : 'v5-status pending';
       const ticket = d.proposed_investment_inr
-        ? fmtCr(parseFloat(d.proposed_investment_inr)) + ' Cr'
+        ? fmtCr(parseFloat(d.proposed_investment_inr))
         : '—';
       const owner = d.sourced_by_name || d.sourced_by || '—';
       const updated = d.updated_at
@@ -5886,11 +6272,20 @@ window.exportAccountingPDF = async function() {
     html += `<div class="pdf-header"><h1>Fund Accounting Report</h1><p>${esc(_ctx.fundName)} &middot; Generated ${now}</p></div>`;
 
     // ── 1. NAV Summary ──
+    // Mgmt-fee subtitle is driven by funds_scheme so the PDF reflects the
+    // actual fund being reported on, not a hardcoded "2.0% p.a. on corpus".
+    const _pdfScheme = await getSchemeForFund(_ctx.fundId);
+    const _pdfFeePct   = _pdfScheme ? _fmtSchemePct(_pdfScheme.management_fee_pct) : null;
+    const _pdfFeeBasis = _pdfScheme ? (_pdfScheme.fee_basis_display || _pdfScheme.management_fee_basis || '').trim() : '';
+    const _pdfFeeSub = _pdfFeePct
+      ? (_pdfFeeBasis ? `${_pdfFeePct} p.a. on ${_pdfFeeBasis}` : `${_pdfFeePct} p.a.`)
+      : 'Per scheme terms';
+
     html += `<div class="pdf-section"><h2>1. NAV Summary</h2>
       <div class="pdf-kpi-grid">
         ${_pdfKpi('Total NAV', fmtCr(totalNav), 'As of latest period')}
         ${_pdfKpi('NAV / Unit', avgNavPerUnit > 0 ? '₹'+avgNavPerUnit.toFixed(4) : '—', latestArr.length+' schemes')}
-        ${_pdfKpi('Mgmt Fee YTD', totalMgmtFee > 0 ? fmtCr(totalMgmtFee) : '—', '2.0% p.a. on corpus')}
+        ${_pdfKpi('Mgmt Fee YTD', totalMgmtFee > 0 ? fmtCr(totalMgmtFee) : '—', _pdfFeeSub)}
         ${_pdfKpi('Unrealized Gains', totalUnrealized > 0 ? fmtCr(totalUnrealized) : '—', 'Portfolio revaluation')}
         ${_pdfKpi('Realized Gains', totalRealized > 0 ? fmtCr(totalRealized) : '—', 'From exits')}
       </div></div>`;

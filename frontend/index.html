@@ -38,11 +38,9 @@
 
   <div class="v5-nav-tabs">
     <button class="v5-nav-tab active" onclick="showPage('overview',this)"><span class="nav-ico ni-overview">&#128202;</span> Overview</button>
-    <button class="v5-nav-tab" onclick="showPage('portfolio',this)"><span class="nav-ico ni-portfolio">&#127970;</span> Portfolio</button>
-    <button class="v5-nav-tab" onclick="showPage('accounting',this)"><span class="nav-ico ni-accounting">&#128181;</span> Fund Accounting</button>
-    <button class="v5-nav-tab" onclick="showPage('financials',this)"><span class="nav-ico ni-financials">&#128200;</span> Financials</button>
-    <button class="v5-nav-tab" onclick="showPage('valuations',this)"><span class="nav-ico ni-valuations">&#128142;</span> Valuations</button>
-    <button class="v5-nav-tab" onclick="showPage('investors',this)"><span class="nav-ico ni-investors">&#129309;</span> Investors</button>
+    <button class="v5-nav-tab v5-nav-tab-2line" onclick="showPage('portfolio',this)"><span class="nav-ico ni-portfolio">&#127970;</span><span class="nav-tab-label">Fund<br>Performance</span></button>
+    <button class="v5-nav-tab v5-nav-tab-2line" onclick="showPage('accounting',this)"><span class="nav-ico ni-accounting">&#128181;</span><span class="nav-tab-label">Fund<br>Reporting</span></button>
+    <button class="v5-nav-tab v5-nav-tab-2line" onclick="showPage('investors',this)"><span class="nav-ico ni-investors">&#129309;</span><span class="nav-tab-label">LP<br>Management</span></button>
     <button class="v5-nav-tab" onclick="showPage('compliance',this)"><span class="nav-ico ni-compliance">&#9989;</span> Compliance</button>
     <button class="v5-nav-tab" onclick="showPage('analytics',this)"><span class="nav-ico ni-analytics">&#128302;</span> AI Analytics</button>
   </div>
@@ -56,12 +54,10 @@
   </div>
 </nav>
 
-<!-- ── Alert Strip ────────────────────────────────────────── -->
-<div class="v5-alert-strip" id="alert-strip" style="display:none;">
-  <span>&#9888;</span>
-  <span id="alert-strip-msg">Loading alerts…</span>
-  <button class="v5-alert-close" onclick="document.getElementById('alert-strip').style.display='none'">&#10005;</button>
-</div>
+<!-- Alert strip removed — anomaly alerts now surface only in their
+     dedicated home pages (AI Analytics > Risk Monitor, MIS Reports) and
+     general notifications live in the bell drawer at the top-right. -->
+
 
 <!-- ── Layout ─────────────────────────────────────────────── -->
 <div class="v5-layout">
@@ -120,7 +116,7 @@
           <div class="v5-kpi-card blue"><div class="v5-kpi-icon"><span class="kpi-ico ki-cos">&#127970;</span></div><div class="v5-kpi-label">Portfolio Companies</div><div class="v5-kpi-value" id="kv-cos">—</div><div class="v5-kpi-sub" id="ks-cos">—</div><div class="v5-kpi-trend up" id="kt-cos">Loading…</div></div>
           <div class="v5-kpi-card green"><div class="v5-kpi-icon"><span class="kpi-ico ki-fv">&#128176;</span></div><div class="v5-kpi-label">Total Fair Value</div><div class="v5-kpi-value" id="kv-fv">—</div><div class="v5-kpi-sub" id="ks-fv">—</div><div class="v5-kpi-trend up" id="kt-fv">—</div></div>
           <div class="v5-kpi-card gold"><div class="v5-kpi-icon"><span class="kpi-ico ki-moic">&#128200;</span></div><div class="v5-kpi-label">Portfolio MOIC</div><div class="v5-kpi-value" id="kv-moic">—</div><div class="v5-kpi-sub" id="ks-moic">Gross · Unrealized</div><div class="v5-kpi-trend up" id="kt-moic">—</div></div>
-          <div class="v5-kpi-card purple"><div class="v5-kpi-icon"><span class="kpi-ico ki-irr">&#127919;</span></div><div class="v5-kpi-label">Net IRR</div><div class="v5-kpi-value" id="kv-irr">—</div><div class="v5-kpi-sub" id="ks-irr">vs Hurdle 8%</div><div class="v5-kpi-trend up" id="kt-irr">—</div></div>
+          <div class="v5-kpi-card purple"><div class="v5-kpi-icon"><span class="kpi-ico ki-irr">&#127919;</span></div><div class="v5-kpi-label">Net IRR</div><div class="v5-kpi-value" id="kv-irr">—</div><div class="v5-kpi-sub" id="ks-irr">vs Hurdle —</div><div class="v5-kpi-trend up" id="kt-irr">—</div></div>
           <div class="v5-kpi-card cyan"><div class="v5-kpi-icon"><span class="kpi-ico ki-tvpi">&#128202;</span></div><div class="v5-kpi-label">TVPI</div><div class="v5-kpi-value" id="kv-tvpi">—</div><div class="v5-kpi-sub" id="ks-tvpi">DPI · RVPI</div><div class="v5-kpi-trend up" id="kt-tvpi">—</div></div>
           <div class="v5-kpi-card red"><div class="v5-kpi-icon"><span class="kpi-ico ki-dep">&#128184;</span></div><div class="v5-kpi-label">Deployment</div><div class="v5-kpi-value" id="kv-dep">—</div><div class="v5-kpi-sub" id="ks-dep">% of drawdown</div><div class="v5-kpi-trend up" id="kt-dep">—</div></div>
         </div>
@@ -211,7 +207,7 @@
       <!-- ════════════ PORTFOLIO PAGE ════════════ -->
       <div id="pg-portfolio" class="v5-page">
         <div class="v5-page-header">
-          <div><div class="v5-page-title">Portfolio Companies</div><div class="v5-page-subtitle" id="pt-subtitle">Loading…</div></div>
+          <div><div class="v5-page-title">Fund Performance</div><div class="v5-page-subtitle" id="pt-subtitle">Loading…</div></div>
           <div class="v5-header-actions">
             <button class="v5-btn v5-btn-ghost" id="btn-export-portfolio-csv" onclick="exportPortfolioCSV()">&#128228; Export CSV</button>
             <button class="v5-btn v5-btn-primary" id="btn-export-portfolio-pdf" onclick="exportPortfolioPDF()">&#128196; Export PDF</button>
@@ -322,22 +318,6 @@
           </div>
         </div>
 
-        <!-- Valuations -->
-        <div id="pt-val-tab" class="v5-subpane">
-          <div class="v5-panel">
-            <div class="v5-panel-header">
-              <div>
-                <div class="v5-panel-title">Valuation Overview <span id="val-tab-count" style="font-size:13px;font-weight:400;color:var(--text3);margin-left:8px"></span></div>
-                <div class="v5-panel-subtitle">IPEV-standard fair value assessments for the selected fund</div>
-              </div>
-              <div style="display:flex;gap:8px;align-items:center">
-                <input type="text" class="v5-input" placeholder="Search…" id="val-tab-search" oninput="filterValTab()" style="width:150px">
-              </div>
-            </div>
-            <div class="v5-table-max2"><table class="v5-table" id="val-tab-table"><thead><tr><th style="width:36px;text-align:center">#</th><th>Company</th><th>Scheme</th><th>Date</th><th class="td-right">Fair Value (Cr)</th><th>Methodology</th><th class="td-center">IPEV Level</th><th class="td-right">MOIC</th><th class="td-center">Status</th><th>Submitted By</th><th>Approved By</th></tr></thead><tbody id="val-tab-tbody"><tr><td colspan="11" class="table-empty">Loading…</td></tr></tbody></table></div>
-          </div>
-        </div>
-
         <!-- KPI Tracking -->
         <div id="pt-kpi-tracking" class="v5-subpane">
           <div class="v5-panel">
@@ -396,12 +376,49 @@
           </div>
         </div>
 
+        <!-- ── Company P&L (moved here from former Financials section) ── -->
+        <div id="fin-pl" class="v5-subpane">
+          <div class="v5-panel">
+            <div class="v5-panel-header">
+              <div>
+                <div class="v5-panel-title">Company P&amp;L — Latest Period <span id="fin-pl-count" style="font-size:12px;color:var(--text3);font-weight:400;"></span></div>
+              </div>
+              <div style="display:flex;gap:8px;align-items:center;">
+                <input type="search" id="fin-pl-search" placeholder="Search company…" class="v5-search-input" oninput="filterFinPnl()" style="width:180px;">
+                <button class="v5-panel-btn" onclick="showPage('analytics');showSub('analytics','mis');">Full MIS &#8594;</button>
+              </div>
+            </div>
+            <div class="v5-table-max"><table class="v5-table" id="fin-pl-table"><thead><tr><th class="td-center" style="width:40px">#</th><th>Company</th><th class="td-right">Revenue</th><th class="td-right">EBITDA</th><th class="td-right">PAT</th><th class="td-right">EBITDA%</th><th>Period</th></tr></thead><tbody id="fin-pl-tbody"><tr><td colspan="7" class="table-empty">Loading…</td></tr></tbody></table></div>
+          </div>
+        </div>
+
+        <!-- ── Budget vs Actual (moved here from former Financials section) ── -->
+        <div id="fin-bva" class="v5-subpane">
+          <div class="v5-panel">
+            <div class="v5-panel-header">
+              <div>
+                <div class="v5-panel-title">Budget vs Actual <span id="fin-bva-count" style="font-size:12px;color:var(--text3);font-weight:400;"></span></div>
+              </div>
+              <div style="display:flex;gap:8px;align-items:center;">
+                <input type="search" id="fin-bva-search" placeholder="Search company…" class="v5-search-input" oninput="filterFinBvA()" style="width:180px;">
+                <button class="v5-panel-btn" onclick="showPage('analytics');showSub('analytics','mis');">Full BvA &#8594;</button>
+              </div>
+            </div>
+            <div class="v5-table-max"><table class="v5-table" id="fin-bva-table"><thead><tr><th class="td-center" style="width:40px">#</th><th>Company</th><th>Line Item</th><th class="td-right">Budget</th><th class="td-right">Actual</th><th class="td-right">Variance</th><th class="td-center">Favorable?</th></tr></thead><tbody id="fin-bva-tbody"><tr><td colspan="7" class="table-empty">Loading…</td></tr></tbody></table></div>
+          </div>
+        </div>
+
+        <!-- ── Consolidated (moved here from former Financials section) ── -->
+        <div id="fin-consolidated" class="v5-subpane">
+          <div class="v5-panel"><div class="v5-panel-header"><div class="v5-panel-title">Consolidated MIS — Fund-level P&amp;L Rollup</div><a class="v5-panel-btn" href="mis-consolidation.html">Full View &#8594;</a></div><div class="v5-panel-body"><div style="color:var(--text3);font-size:11px">Loading consolidated data…</div></div></div>
+        </div>
+
       </div><!-- /portfolio -->
 
       <!-- ════════════ FUND ACCOUNTING PAGE ════════════ -->
       <div id="pg-accounting" class="v5-page">
         <div class="v5-page-header">
-          <div><div class="v5-page-title">Fund Accounting</div><div class="v5-page-subtitle">NAV · Waterfall · Capital Calls · Distributions · P&amp;L · Ledger · Carry · Fees · COA</div></div>
+          <div><div class="v5-page-title">Fund Reporting</div></div>
           <div class="v5-header-actions">
             <button class="v5-btn v5-btn-primary" id="btn-export-accounting-csv" onclick="exportAccountingCSV()">&#128228; Export CSV</button>
             <button class="v5-btn v5-btn-ghost" id="btn-export-accounting-pdf" onclick="exportAccountingPDF()">&#128196; Export PDF</button>
@@ -411,7 +428,7 @@
           <div class="v5-grid five v5-mb">
             <div class="v5-kpi-card blue"><div class="v5-kpi-label">Total NAV</div><div class="v5-kpi-value" id="acc-nav-val">—</div><div class="v5-kpi-sub">As of latest period</div><div class="v5-kpi-trend up" id="acc-nav-trend">—</div></div>
             <div class="v5-kpi-card green"><div class="v5-kpi-label">NAV / Unit</div><div class="v5-kpi-value" id="acc-nav-unit">—</div><div class="v5-kpi-sub" id="acc-units">Units outstanding</div></div>
-            <div class="v5-kpi-card gold"><div class="v5-kpi-label">Mgmt Fee YTD</div><div class="v5-kpi-value" id="acc-mgmt-fee">—</div><div class="v5-kpi-sub">2.0% p.a. on corpus</div></div>
+            <div class="v5-kpi-card gold"><div class="v5-kpi-label">Mgmt Fee YTD</div><div class="v5-kpi-value" id="acc-mgmt-fee">—</div><div class="v5-kpi-sub" id="acc-mgmt-fee-sub">—</div></div>
             <div class="v5-kpi-card purple"><div class="v5-kpi-label">Unrealized Gains</div><div class="v5-kpi-value" id="acc-unrealized">—</div><div class="v5-kpi-sub">Portfolio revaluation</div></div>
             <div class="v5-kpi-card cyan"><div class="v5-kpi-label">Realized Gains</div><div class="v5-kpi-value" id="acc-realized">—</div><div class="v5-kpi-sub">From exits</div></div>
           </div>
@@ -422,7 +439,7 @@
         </div>
         <div id="acc-waterfall" class="v5-subpane">
           <div class="v5-grid two">
-            <div class="v5-panel"><div class="v5-panel-header"><div class="v5-panel-title">Distribution Waterfall — European Model</div><div class="v5-panel-subtitle">8% Hurdle · 20% Carry · GP Catch-up 100%</div></div><div class="v5-panel-body" id="acc-wf"></div></div>
+            <div class="v5-panel"><div class="v5-panel-header"><div><div class="v5-panel-title" id="acc-wf-title">Distribution Waterfall</div><div class="v5-panel-subtitle" id="acc-wf-subtitle">Loading scheme terms…</div></div></div><div class="v5-panel-body" id="acc-wf"></div></div>
             <div class="v5-panel"><div class="v5-panel-header"><div class="v5-panel-title">Carry &amp; Clawback Analysis</div></div><div class="v5-panel-body" id="acc-carry"><div style="color:var(--text3);font-size:11px">Loading carry data…</div></div></div>
           </div>
           <!-- Waterfall Simulator -->
@@ -566,72 +583,6 @@
           </div>
         </div>
 
-        <!-- ══ MANAGEMENT FEES ══ -->
-        <div id="acc-fees" class="v5-subpane">
-          <div class="v5-panel">
-            <div class="v5-panel-header">
-              <div><div class="v5-panel-title">Management Fee Schedule</div><div class="v5-panel-subtitle">Periodic management fee computation · GST included · Invoice tracking</div></div>
-              <button class="v5-btn v5-btn-primary" id="acc-btn-new-fee">+ Add Fee Period</button>
-            </div>
-            <div class="v5-panel-body">
-              <div class="acc-table-wrap">
-                <table class="acc-table">
-                  <thead><tr><th>Scheme</th><th>Period</th><th>Fee Basis</th><th>Rate</th><th>Fee Amount</th><th>GST</th><th>Total (incl. GST)</th><th>Invoice #</th><th>Status</th><th>Actions</th></tr></thead>
-                  <tbody id="acc-fee-tbody"><tr><td colspan="10" class="acc-empty">Loading…</td></tr></tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- ══ CHART OF ACCOUNTS ══ -->
-        <div id="acc-coa" class="v5-subpane">
-          <div class="v5-panel">
-            <div class="v5-panel-header">
-              <div><div class="v5-panel-title">Chart of Accounts</div><div class="v5-panel-subtitle">Account hierarchy for double-entry bookkeeping · Assets · Liabilities · Equity · Income · Expenses</div></div>
-              <button class="v5-btn v5-btn-primary" id="acc-btn-new-account">+ Add Account</button>
-            </div>
-            <div class="v5-panel-body">
-              <div class="toolbar">
-                <div class="toolbar-left">
-                  <label>Type:</label>
-                  <select id="acc-coa-type" class="select-dark">
-                    <option value="">All Types</option>
-                    <option value="asset">Asset</option><option value="liability">Liability</option>
-                    <option value="equity">Equity</option><option value="income">Income</option>
-                    <option value="expense">Expense</option>
-                  </select>
-                </div>
-              </div>
-              <div class="acc-table-wrap">
-                <table class="acc-table">
-                  <thead><tr><th>Code</th><th>Account Name</th><th>Type</th><th>Parent Account</th><th>Description</th><th>Status</th><th>Actions</th></tr></thead>
-                  <tbody id="acc-coa-tbody"><tr><td colspan="7" class="acc-empty">Loading…</td></tr></tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- ══ TRIAL BALANCE ══ -->
-        <div id="acc-tb" class="v5-subpane">
-          <div class="v5-panel">
-            <div class="v5-panel-header">
-              <div><div class="v5-panel-title">Trial Balance</div><div class="v5-panel-subtitle">Aggregate debit &amp; credit balances per scheme · Validates debits = credits</div></div>
-            </div>
-            <div class="v5-panel-body">
-              <div class="toolbar">
-                <div class="toolbar-left">
-                  <label>As of Date:</label>
-                  <input type="date" id="acc-tb-date" class="select-dark" />
-                </div>
-                <button class="v5-btn v5-btn-primary" id="acc-btn-gen-tb">Generate Trial Balance</button>
-              </div>
-              <div id="acc-tb-output"></div>
-            </div>
-          </div>
-        </div>
-
         <!-- ══ FINANCIAL STATEMENTS ══ -->
         <div id="acc-finstat" class="v5-subpane">
           <div class="v5-panel">
@@ -676,76 +627,12 @@
       </div><!-- /accounting -->
 
       <!-- ════════════ FINANCIALS PAGE ════════════ -->
-      <div id="pg-financials" class="v5-page">
-        <div class="v5-page-header">
-          <div><div class="v5-page-title">Financials</div><div class="v5-page-subtitle">Company-level P&amp;L · Balance Sheet · Cash Flow · Budget vs Actual</div></div>
-          <div class="v5-header-actions">
-            <button class="v5-btn v5-btn-ghost" onclick="showPage('analytics');showSub('analytics','mis');">MIS Consolidation &#8594;</button>
-          </div>
-        </div>
-        <div id="fin-pl" class="v5-subpane active">
-          <div class="v5-panel">
-            <div class="v5-panel-header">
-              <div>
-                <div class="v5-panel-title">Company P&amp;L — Latest Period <span id="fin-pl-count" style="font-size:12px;color:var(--text3);font-weight:400;"></span></div>
-              </div>
-              <div style="display:flex;gap:8px;align-items:center;">
-                <input type="search" id="fin-pl-search" placeholder="Search company…" class="v5-search-input" oninput="filterFinPnl()" style="width:180px;">
-                <button class="v5-panel-btn" onclick="showPage('analytics');showSub('analytics','mis');">Full MIS &#8594;</button>
-              </div>
-            </div>
-            <div class="v5-table-max"><table class="v5-table" id="fin-pl-table"><thead><tr><th class="td-center" style="width:40px">#</th><th>Company</th><th class="td-right">Revenue</th><th class="td-right">EBITDA</th><th class="td-right">PAT</th><th class="td-right">EBITDA%</th><th>Period</th></tr></thead><tbody id="fin-pl-tbody"><tr><td colspan="7" class="table-empty">Loading…</td></tr></tbody></table></div>
-          </div>
-        </div>
-        <div id="fin-bva" class="v5-subpane">
-          <div class="v5-panel">
-            <div class="v5-panel-header">
-              <div>
-                <div class="v5-panel-title">Budget vs Actual <span id="fin-bva-count" style="font-size:12px;color:var(--text3);font-weight:400;"></span></div>
-              </div>
-              <div style="display:flex;gap:8px;align-items:center;">
-                <input type="search" id="fin-bva-search" placeholder="Search company…" class="v5-search-input" oninput="filterFinBvA()" style="width:180px;">
-                <button class="v5-panel-btn" onclick="showPage('analytics');showSub('analytics','mis');">Full BvA &#8594;</button>
-              </div>
-            </div>
-            <div class="v5-table-max"><table class="v5-table" id="fin-bva-table"><thead><tr><th class="td-center" style="width:40px">#</th><th>Company</th><th>Line Item</th><th class="td-right">Budget</th><th class="td-right">Actual</th><th class="td-right">Variance</th><th class="td-center">Favorable?</th></tr></thead><tbody id="fin-bva-tbody"><tr><td colspan="7" class="table-empty">Loading…</td></tr></tbody></table></div>
-          </div>
-        </div>
-        <div id="fin-consolidated" class="v5-subpane">
-          <div class="v5-panel"><div class="v5-panel-header"><div class="v5-panel-title">Consolidated MIS — Fund-level P&amp;L Rollup</div><a class="v5-panel-btn" href="mis-consolidation.html">Full View &#8594;</a></div><div class="v5-panel-body"><div style="color:var(--text3);font-size:11px">Loading consolidated data…</div></div></div>
-        </div>
-      </div><!-- /financials -->
-
-      <!-- ════════════ VALUATIONS PAGE ════════════ -->
-      <div id="pg-valuations" class="v5-page">
-        <div class="v5-page-header">
-          <div><div class="v5-page-title">Portfolio Valuations</div><div class="v5-page-subtitle">IPEV Guidelines · IBBI Registered Valuers</div></div>
-          <div class="v5-header-actions">
-            <button class="v5-btn v5-btn-primary" id="btn-val-report" onclick="exportValuationReportPDF()">&#128202; Generate Report</button>
-          </div>
-        </div>
-        <div id="val-summary" class="v5-subpane active">
-          <div class="v5-grid six v5-mb" id="val-kpis"></div>
-          <div class="v5-panel"><div class="v5-panel-header"><div class="v5-panel-title">Valuation Summary — All Portfolio Companies</div></div><div class="v5-table-max2"><table class="v5-table" id="val-table"><thead><tr><th>Company</th><th>Method</th><th>Level</th><th class="td-right">Cost (Cr)</th><th class="td-right">FV (Cr)</th><th class="td-right">MOIC</th><th>Valuation Date</th></tr></thead><tbody id="val-tbody"><tr><td colspan="7" class="table-empty">Loading…</td></tr></tbody></table></div></div>
-        </div>
-        <div id="val-method" class="v5-subpane">
-          <div class="v5-grid two">
-            <div class="v5-panel"><div class="v5-panel-header"><div class="v5-panel-title">Methodology Mix</div></div><div class="v5-panel-body" id="val-method-breakdown"></div></div>
-            <div class="v5-panel"><div class="v5-panel-header"><div class="v5-panel-title">IPEV Level Classification</div></div><div class="v5-panel-body" id="val-ipev-levels"></div></div>
-          </div>
-        </div>
-        <div id="val-bridge" class="v5-subpane">
-          <div class="v5-panel"><div class="v5-panel-header"><div class="v5-panel-title">Value Bridge — Cost to Fair Value by Sector</div></div><div class="v5-panel-body" id="val-bridge-body"></div></div>
-        </div>
-      </div><!-- /valuations -->
-
       <!-- ════════════ INVESTORS PAGE ════════════ -->
       <div id="pg-investors" class="v5-page">
         <div class="v5-page-header">
-          <div><div class="v5-page-title">Investors &amp; LP Relations</div><div class="v5-page-subtitle" id="inv-subtitle">LP commitments · Capital accounts · KYC/FATCA</div></div>
+          <div><div class="v5-page-title">LP Management</div></div>
           <div class="v5-header-actions">
             <a class="v5-btn v5-btn-ghost" href="lp-management.html">Full LP Portal &#8594;</a>
-            <button class="v5-btn v5-btn-primary">&#128421; Capital Account</button>
           </div>
         </div>
         <div id="inv-register" class="v5-subpane active">
@@ -766,7 +653,7 @@
       <!-- ════════════ COMPLIANCE PAGE ════════════ -->
       <div id="pg-compliance" class="v5-page">
         <div class="v5-page-header">
-          <div><div class="v5-page-title">Compliance &amp; Regulatory</div><div class="v5-page-subtitle">SEBI · FEMA · PMLA · TDS · Equity Thresholds</div></div>
+          <div><div class="v5-page-title">Compliance &amp; Regulatory</div></div>
           <div class="v5-header-actions">
             <a class="v5-btn v5-btn-ghost" href="compliance.html">Full Compliance &#8594;</a>
           </div>
@@ -786,6 +673,15 @@
         </div>
         <div id="comp-calendar" class="v5-subpane">
           <div class="v5-panel"><div class="v5-panel-header"><div class="v5-panel-title">Compliance Calendar</div></div><div class="v5-table-max"><table class="v5-table" id="cal-table"><thead><tr><th>Event</th><th>Due Date</th><th class="td-center">Status</th><th>Days Left</th></tr></thead><tbody id="cal-tbody"><tr><td colspan="4" class="table-empty">Loading…</td></tr></tbody></table></div></div>
+        </div>
+        <!-- Mirror of the AI Insights "Portfolio Risk Heatmap" — same data
+             source (/ai-insights/), same render helper. Stays in sync
+             automatically with the AI Analytics copy. -->
+        <div id="comp-heatmap" class="v5-subpane">
+          <div class="v5-panel">
+            <div class="v5-panel-header"><div class="v5-panel-title">Portfolio Risk Heatmap</div></div>
+            <div class="v5-panel-body" id="comp-risk-heatmap"></div>
+          </div>
         </div>
       </div><!-- /compliance -->
 
@@ -819,7 +715,7 @@
       <!-- ════════════ AI ANALYTICS PAGE ════════════ -->
       <div id="pg-analytics" class="v5-page">
         <div class="v5-page-header" id="analytics-page-header">
-          <div><div class="v5-page-title" id="analytics-page-title">AI Analytics &amp; Intelligence Hub</div><div class="v5-page-subtitle" id="analytics-page-subtitle">GPT-4o powered · ML risk scoring · Portfolio insights · MIS reports</div></div>
+          <div><div class="v5-page-title" id="analytics-page-title">AI Analytics &amp; Intelligence Hub</div><div class="v5-page-subtitle" id="analytics-page-subtitle"></div></div>
           <div class="v5-header-actions" id="analytics-header-actions">
             <button class="v5-btn v5-btn-ghost" onclick="showSub('analytics','chatbot')">&#9881; Configure AI</button>
             <button class="v5-btn v5-btn-primary" id="ai-run-analysis-btn" onclick="runAIAnalysis()">&#128302; Run Analysis</button>
@@ -1095,6 +991,23 @@
   </div>
   <div class="notif-filters" id="notif-filters"></div>
   <ul class="notif-list" id="notif-list"></ul>
+</div>
+
+<!-- Pass 4 provenance panel — opens when user clicks a derivable KPI -->
+<div id="prov-overlay" class="prov-overlay" onclick="closeProvenancePanel(event)">
+  <aside id="prov-panel" class="prov-panel" onclick="event.stopPropagation()">
+    <header class="prov-head">
+      <div>
+        <div class="prov-eyebrow">Metric Provenance</div>
+        <h3 id="prov-title">—</h3>
+        <div class="prov-sub" id="prov-sub">—</div>
+      </div>
+      <button class="prov-close" onclick="closeProvenancePanel()" aria-label="Close">&times;</button>
+    </header>
+    <section class="prov-body" id="prov-body">
+      <div style="color:var(--text3);">Loading…</div>
+    </section>
+  </aside>
 </div>
 
 <script src="auth.js"></script>

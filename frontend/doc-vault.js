@@ -35,8 +35,12 @@
     const user = Auth.getUser();
     document.getElementById('user-badge').textContent =
       `${user.first_name || user.username} · ${user.role.replace('_', ' ').toUpperCase()}`;
-    document.getElementById('org-label').textContent =
-      user.organization_name || 'Unknown Organization';
+    // org-label element was removed from the page header; null-guard so
+    // the JS keeps working if/when the element is re-added in the future.
+    const _orgLabel = document.getElementById('org-label');
+    if (_orgLabel) {
+      _orgLabel.textContent = user.organization_name || 'Unknown Organization';
+    }
 
     document.getElementById('btn-logout').onclick = () => Auth.logout();
     document.getElementById('btn-upload').onclick = openUploadModal;

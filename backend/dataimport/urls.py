@@ -10,4 +10,5 @@ urlpatterns = [
     path('jobs/<uuid:job_id>/', views.job_detail, name='dataimport-detail'),
     path('jobs/<uuid:job_id>/stream/', views.import_stream, name='dataimport-stream'),
     path('jobs/<uuid:job_id>/status/', views.job_status, name='dataimport-status'),
+    path('derived-metrics/', views.derived_metrics_list, name='dataimport-derived-metrics'),
 ]

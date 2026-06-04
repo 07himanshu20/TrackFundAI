@@ -136,10 +136,48 @@ SECTION_SUBDOMAINS = {
         'DISTRIBUTION REGISTER, PAYOUT SCHEDULE, PAYOUTS, DISTRIBUTION EVENTS'
     ),
     'nav_records': (
-        'NAV time-series data — NAV date, total NAV, NAV per unit, units outstanding, '
-        'investments at fair value, cash and equivalents. One row per period. '
-        'Example headers: NAV RECORDS, NAV HISTORY, NAV TIME SERIES, '
-        'NET ASSET VALUE, MONTHLY NAV, PERIODIC NAV, NAV & FUND ACCOUNTING'
+        'NAV TIME-SERIES — one row PER PERIOD (month/quarter). Required column '
+        'shape: a Date/Period column PLUS one or more amount columns (Total '
+        'NAV, NAV per unit, units outstanding, FV, cash). The presence of a '
+        'date column in the row data is mandatory; pick this subdomain ONLY '
+        'when rows are time-indexed. '
+        'Example section headers: NAV RECORDS, NAV HISTORY, MONTHLY NAV, '
+        'QUARTERLY NAV, PERIODIC NAV, NAV TIME SERIES, NAV HISTORY TABLE'
+    ),
+    'nav_breakdown': (
+        'NAV COMPONENT DECOMPOSITION — current-period NAV broken down by '
+        'component. Key-value layout: rows are NAV components (Total Fair '
+        'Value of Portfolio, Cash & Equivalents, Realised Gains, Management '
+        'Fee Payable, Performance Fee Payable, Borrowings, Other Liabilities, '
+        'etc.) and the value column carries the amount. Final row typically '
+        'sums to Total NAV. NO date column. NOT a time-series. '
+        'Example section headers: FUND NAV (CURRENT PERIOD), NAV BREAKDOWN, '
+        'NAV COMPONENTS, NAV BUILD-UP, NAV CALCULATION, NAV DECOMPOSITION'
+    ),
+    'nav_per_unit': (
+        'NAV PER UNIT calculation — key-value layout showing total fund NAV, '
+        'total units issued, NAV per unit, face value per unit, premium to '
+        'face value, NAV as % of committed capital. Single point in time. '
+        'NO date column. NOT a time-series. '
+        'Example section headers: NAV PER UNIT, UNIT NAV, NAV/UNIT, '
+        'PER UNIT VALUE, UNIT VALUATION'
+    ),
+    'fund_performance_breakdown': (
+        'FUND PERFORMANCE METRICS — key-value layout listing fund-level '
+        'performance multiples and returns (MOIC, TVPI, DPI, RVPI, Gross IRR, '
+        'Net IRR, Total Called Capital, Total Distributions, Total FV). '
+        'Rows are metric names, column carries the value. NO date column. '
+        'Use this for sheets like MOIC_TVPI_DPI that decompose fund-level KPIs. '
+        'Example section headers: FUND PERFORMANCE, FUND-LEVEL MULTIPLES, '
+        'PERFORMANCE METRICS, FUND KPIS, FUND RETURNS, FUND MULTIPLES'
+    ),
+    'waterfall_breakdown': (
+        'WATERFALL / CARRY computation — key-value layout showing waterfall '
+        'parameters (committed capital, called capital, preferred return / '
+        'hurdle, carry %, LP share, GP share, cumulative distributed, carry '
+        'amount, clawback provision). Rows are waterfall components. '
+        'Example section headers: WATERFALL, CARRY COMPUTATION, EUROPEAN '
+        'WATERFALL, AMERICAN WATERFALL, DEAL-BY-DEAL WATERFALL'
     ),
     'schemes': (
         'Scheme details within a fund — scheme name, vintage year, first/final close dates, '
@@ -673,6 +711,25 @@ DOMAIN_FIELDS = {
 # ---------------------------------------------------------------------------
 
 CANONICAL_VALUE_CATEGORIES = {
+    # Per-portfolio-company compliance OBLIGATION TYPE (column header in a tracker grid).
+    # Lives here (not in CANONICAL_ENUM_TYPES) because identity columns like
+    # "Company Name" / "Sector" / "S.No" MUST be allowed to return None — only
+    # the actual obligation columns should classify. classify_enum picks the
+    # closest match always (no None), which would mis-classify identity cols.
+    # Matches PortfolioCompanyCompliance.OBLIGATION_TYPE_CHOICES exactly.
+    'compliance_obligation_type': {
+        'roc_annual_return':   'ROC / MCA / ROC Annual Return / Annual Return / AOC-4 / MGT-7 / Registrar of Companies — corporate annual return filing',
+        'gst_gstr3b':          'GST / GSTR-3B / GST Return / Goods and Services Tax / GST Filing — GST monthly return',
+        'labour_pf_esi':       'Labour / Labour Laws / PF / ESI / EPF & ESIC / Provident Fund / Employee State Insurance — labour-law compliance',
+        'labour_factories_act':'Factories Act / Labour Welfare / Factories Compliance — factory-act compliance',
+        'epf_monthly':         'EPF Monthly Deposit / EPF Challan / EPF Payment — monthly EPF remittance',
+        'board_meeting':       'Board Meeting / Directors Meeting / Board Compliance / Quorum — board-meeting compliance',
+        'statutory_audit':     'Statutory Audit / Audit / Financial Audit / Auditor Report — statutory annual audit',
+        'income_tax_tds':      'TDS / Income Tax TDS / TDS Filing / Tax Deducted at Source — TDS compliance',
+        'income_tax_advance':  'Advance Tax / Income Tax Advance / Advance Income Tax — advance-tax instalments',
+        'rera':                'RERA / Real Estate Regulation / Real Estate Authority — RERA compliance',
+        'sector_specific':     'Sector Specific / Sector Compliance / Industry-specific / SEBI Sector / RBI Sector — sector-specific regulatory item',
+    },
     'pl_line_items': {
         'revenue': 'Revenue / Net Sales / Operating Revenue — primary income from business operations',
         'other_income': 'Other Income / Non-Operating Income — interest, dividends, miscellaneous income',
@@ -787,6 +844,28 @@ CANONICAL_VALUE_CATEGORIES = {
         'carry_gross': 'Carried Interest Amount / Carry Provision / GP Carry / Performance Fee Amount — total GP performance fee',
         'preferred_return': 'Preferred Return Amount / Hurdle Amount / Hurdle Return — LP hurdle return amount before carry kicks in',
     },
+    'fund_performance_metrics': {
+        # ----- Headline fund-level metrics (universal across PE/VC/Hedge) -----
+        # These categories are used by the universal label-value scanner in
+        # _extract_explicit_performance_metrics() to find pre-computed values
+        # ANYWHERE in the workbook (any sheet, any sub-table) without any
+        # keyword matching — purely via Gemini semantic equivalence.
+        'net_irr':                    'Net IRR / LP IRR / Net Internal Rate of Return — annualised return to LPs net of fees and carry',
+        'gross_irr':                  'Gross IRR / Fund-Level IRR / IRR (Gross) — annualised return at the fund level before fees',
+        'moic':                       'MOIC / Money Multiple / Investment Multiple / Total Value Multiple — (distributions + residual value) / invested capital',
+        'tvpi':                       'TVPI / Total Value to Paid-In — (distributions + residual fund NAV) / cumulative LP paid-in capital',
+        'dpi':                        'DPI / Distributions to Paid-In — cumulative distributions / cumulative LP paid-in',
+        'rvpi':                       'RVPI / Residual Value to Paid-In — residual fund NAV / cumulative LP paid-in',
+        'nav':                        'Total Fund NAV / Net Asset Value / Closing NAV — total fund net asset value at as-of date',
+        'nav_per_unit':               'NAV per Unit / Unit NAV / NAV/Unit — per-unit net asset value',
+        'total_called_capital':       'Total Called Capital / Cumulative Drawdown / Paid-In Capital — LP capital actually called to date',
+        'total_committed_capital':    'Total Committed Capital / Fund Size / Total Commitments',
+        'total_distributions':        'Total Distributions / Cumulative Distributions to LPs',
+        'total_realised_proceeds':    'Total Realised Proceeds / Exit Proceeds / Cumulative Realisations',
+        'total_unrealised_fair_value':'Total Unrealised Fair Value / Total Portfolio FV / Residual Portfolio Value',
+        'total_realised_gains':       'Total Realised Gains / Realised Profit on Exits',
+        'total_unrealised_gains':     'Total Unrealised Gains / Mark-to-Market Gains / Fair Value Appreciation',
+    },
     'burn_runway_metrics': {
         'gross_burn': 'Gross Burn / Total Burn / Monthly Expenses / Cash Outflow / Operating Expenses / Total Opex — total monthly cash outflow',
         'net_burn': 'Net Burn / Net Cash Burn / Net Outflow / Net Operating Cash Flow — net monthly cash burn after revenue',
@@ -892,6 +971,35 @@ CANONICAL_ENUM_TYPES = {
         'actual': 'Actual / Actuals / Real / Achieved / Reported / Realized — actual/realized figures',
         'variance': 'Variance / Var / Difference / Diff / Delta — difference between budget and actual',
     },
+    # Per-portfolio-company compliance status (RAG cell value in a tracker grid)
+    'compliance_company_status': {
+        'compliant': 'Compliant / Current / Filed / Up-to-date / OK / Done / Yes / Green / Filed On Time — obligation is fulfilled',
+        'due':       'Due Soon / Pending Review / Pending / Awaiting / Upcoming / Amber — needs attention within grace period',
+        'overdue':   'Overdue / Delayed / Late / Past Due / Missed / Default / Red — obligation breached / past deadline',
+        'not_applicable': 'N/A / NA / Not Applicable / Exempt / — / Blank / Grey — obligation does not apply',
+    },
+    # Fund-level SEBI / regulatory filing OBLIGATION (row label in a fund-filings table).
+    # These keys map to SEBIReport.report_type (qar / aar) where applicable; rows that
+    # don't fit QAR or AAR cleanly are routed to ComplianceCalendar instead with the
+    # matching compliance_type below.
+    'sebi_filing_type': {
+        'qar':     'SEBI QAR / Quarterly Activity Report / Quarterly Filing / Quarterly Return — SEBI quarterly filing',
+        'aar':     'SEBI AAR / Annual Activity Report / Annual Filing / Annual Return — SEBI annual filing',
+        'ctr':     'CTR / Compliance Test Report — annual compliance test report',
+        'fatca_crs': 'FATCA / CRS / Foreign Account Tax Compliance Act / Common Reporting Standard — FATCA/CRS report',
+        'fema':    'FEMA / FDI / ODI / Foreign Exchange Management Act / RBI Reporting — FEMA compliance',
+        'nav_depositories': 'NAV to Depositories / NSDL / CDSL / NAV Reporting / Depository NAV — quarterly NAV upload',
+        'valuation_certificate': 'Valuation Certificate / Valuation Report / Independent Valuation / Valuer Certificate',
+        'other':   'Other / Misc / Miscellaneous — anything not matching the above',
+    },
+    # SEBI / regulatory FILING STATUS (status cell in a fund-filings table).
+    # Maps to SEBIReport.FILING_STATUS_CHOICES via the renderer logic.
+    'compliance_filing_status': {
+        'filed':         'Filed / Filed On Time / Filed / Submitted / Done / Accepted / Received / Acknowledged — successfully filed',
+        'pending':       'Pending / Pending Review / Awaiting / In Progress / Data Collection / Under Review / In Review — not yet filed',
+        'overdue':       'Overdue / Late / Delayed / Missed / Past Due / Default — past deadline',
+        'not_started':   'Not Started / Open / To Do — work not begun',
+    },
 }
 
 CANONICAL_METADATA_FIELDS = {
@@ -916,5 +1024,184 @@ CANONICAL_METADATA_FIELDS = {
         'fund_pan': {'desc': 'PAN number of the fund entity', 'type': 'str'},
         'fund_gstin': {'desc': 'GSTIN of the fund entity', 'type': 'str'},
         'is_gift_city': {'desc': 'Whether this is a GIFT City / IFSC offshore AIF (yes/no/true/false)', 'type': 'bool'},
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Pass 4: Derivable Fund-Level Metrics
+# ---------------------------------------------------------------------------
+# Headline fund-level metrics that the dashboard must show. If a direct value
+# is missing in the imported Excel, Gemini is asked to (a) enumerate all
+# canonical formulas to compute the metric, (b) pick the formula whose inputs
+# are ALL present in DerivationContext, (c) compute the value.
+#
+# NO formulas are listed here — formula selection is entirely Gemini's job.
+# We only describe each metric so Gemini knows what we are asking it to derive.
+
+DERIVABLE_FUND_METRICS = {
+    'net_irr': {
+        'label': 'Net IRR',
+        'unit': 'percent',
+        'description': (
+            'Net Internal Rate of Return — the annualised, time-weighted rate of return '
+            'realised by LPs on their net cash flows into and out of the fund, net of all '
+            'fees, expenses and carried interest. Typically computed via XIRR over the full '
+            'series of LP contributions (capital calls, negative) and LP distributions '
+            '(positive), with the current residual NAV included as a synthetic terminal '
+            'inflow at the as-of date.'
+        ),
+    },
+    'moic': {
+        'label': 'MOIC (TVPI Gross of Cost)',
+        'unit': 'multiple',
+        'description': (
+            'Multiple on Invested Capital — total value (realised distributions + current '
+            'unrealised value) divided by total invested capital at the portfolio level. '
+            'Reflects gross multiple before LP-level fee drag.'
+        ),
+    },
+    'tvpi': {
+        'label': 'TVPI (Total Value to Paid-In)',
+        'unit': 'multiple',
+        'description': (
+            'Total Value to Paid-In — (cumulative distributions to LPs + residual fund NAV) '
+            'divided by cumulative LP paid-in capital (cumulative capital called from LPs).'
+        ),
+    },
+    'dpi': {
+        'label': 'DPI (Distributions to Paid-In)',
+        'unit': 'multiple',
+        'description': (
+            'Distributions to Paid-In — cumulative distributions paid to LPs divided by '
+            'cumulative LP paid-in capital. Measures realised return to date.'
+        ),
+    },
+    'rvpi': {
+        'label': 'RVPI (Residual Value to Paid-In)',
+        'unit': 'multiple',
+        'description': (
+            'Residual Value to Paid-In — current unrealised fund NAV divided by cumulative '
+            'LP paid-in capital. Measures unrealised value still in the fund.'
+        ),
+    },
+    'nav': {
+        'label': 'NAV (Net Asset Value)',
+        'unit': 'currency',
+        'description': (
+            'Net Asset Value of the fund as of the latest available date — the fair value '
+            'of all portfolio holdings plus cash and other assets, minus accrued expenses, '
+            'fees and carry provision. If no direct NAV record exists, derive from '
+            'aggregate fair value of investments minus liabilities.'
+        ),
+    },
+}
+
+
+# Inputs the derivation service makes available to Gemini for every Pass 4 call.
+# Each entry: {key, description, unit}. Values are filled at runtime from the
+# DB. Gemini is told which inputs have non-null values and which are missing,
+# and must pick a formula whose required inputs are all present.
+DERIVATION_CONTEXT_INPUTS = {
+    'total_committed_capital': {
+        'description': 'Sum of all LP commitments to the scheme (₹)',
+        'unit': 'currency',
+    },
+    'total_called_capital': {
+        'description': 'Cumulative LP capital actually called/drawn down to date (₹)',
+        'unit': 'currency',
+    },
+    'total_invested_capital': {
+        'description': 'Cumulative capital deployed into portfolio companies (₹). At the portfolio level this is the sum of Investment.total_invested across all live + exited investments.',
+        'unit': 'currency',
+    },
+    'total_distributions_to_lps': {
+        'description': 'Cumulative gross distributions paid to LPs to date (₹) — includes return of capital, profit distributions, income distributions.',
+        'unit': 'currency',
+    },
+    'total_realised_proceeds': {
+        'description': 'Cumulative gross proceeds from exits at the portfolio level (₹) — sum of ExitEvent.exit_proceeds across all exits.',
+        'unit': 'currency',
+    },
+    'total_realised_gains': {
+        'description': 'Cumulative realised gains (₹) — sum of (exit_proceeds - cost_of_exited_stake) across all exits.',
+        'unit': 'currency',
+    },
+    'total_unrealised_fair_value': {
+        'description': 'Aggregate latest fair value of unrealised holdings (₹) — sum of latest Valuation.fair_value for each live investment.',
+        'unit': 'currency',
+    },
+    'total_unrealised_gains': {
+        'description': 'Aggregate unrealised gains on live holdings (₹) — sum of (latest_fair_value - cost_basis) across live investments.',
+        'unit': 'currency',
+    },
+    'fund_nav_latest': {
+        'description': 'Most recent total NAV reported for the scheme, if a NAVRecord exists (₹).',
+        'unit': 'currency',
+    },
+    'fund_units_outstanding': {
+        'description': 'Total units outstanding on the most recent NAV date.',
+        'unit': 'units',
+    },
+    'cashflow_series': {
+        'description': (
+            'Time-stamped LP cashflow series for XIRR: list of {date, amount} where '
+            'capital calls are NEGATIVE (LP outflow) and distributions are POSITIVE '
+            '(LP inflow). The residual NAV at the as-of date is appended as a synthetic '
+            'POSITIVE terminal cashflow when computing IRR.'
+        ),
+        'unit': 'series',
+    },
+    'inception_date': {
+        'description': 'Scheme inception / first close date.',
+        'unit': 'date',
+    },
+    'as_of_date': {
+        'description': 'As-of date for the derivation (today).',
+        'unit': 'date',
+    },
+    'years_since_inception': {
+        'description': 'Years elapsed between inception_date and as_of_date.',
+        'unit': 'years',
+    },
+    'accrued_management_fees': {
+        'description': 'Cumulative accrued management fees on the scheme (₹), if computed.',
+        'unit': 'currency',
+    },
+    'accrued_carried_interest': {
+        'description': 'Cumulative accrued GP carry provision on the scheme (₹), if computed.',
+        'unit': 'currency',
+    },
+    # ----- LPA-extracted economic terms (Limited Partner Agreement) -----
+    # These come from the LPA / Private Placement Memorandum and are needed
+    # whenever a derivation must apply fee drag, hurdle compounding, or carry
+    # waterfall mechanics to convert gross numbers into net numbers.
+    'lpa_management_fee_pct': {
+        'description': 'Annual management fee % from the LPA (e.g. 2.0 means 2.0% p.a.). Apply to management_fee_basis amount to compute annual fee drag.',
+        'unit': 'percent',
+    },
+    'lpa_management_fee_basis': {
+        'description': 'Base on which management fee is charged per the LPA — "committed" (on committed capital), "called" (on called/drawn capital), or "nav" (on NAV). Determines which capital base the fee % applies to.',
+        'unit': 'enum',
+    },
+    'lpa_hurdle_rate_pct': {
+        'description': 'Preferred return / hurdle rate % from the LPA (e.g. 8.0 means LPs must earn 8.0% p.a. compounded before GP can take carry).',
+        'unit': 'percent',
+    },
+    'lpa_carry_pct': {
+        'description': 'Carried interest / performance fee % from the LPA (e.g. 20.0 means GP receives 20% of profits above hurdle).',
+        'unit': 'percent',
+    },
+    'lpa_carry_type': {
+        'description': 'Waterfall type from the LPA — "european" (whole-fund / aggregate waterfall) or "american" (deal-by-deal). Determines whether carry is computed on aggregate fund returns or per-investment.',
+        'unit': 'enum',
+    },
+    'lpa_sponsor_commitment_pct': {
+        'description': 'GP/sponsor commitment as % of total scheme size per the LPA.',
+        'unit': 'percent',
+    },
+    'lpa_tenure_years': {
+        'description': 'Scheme tenure / fund life in years per the LPA.',
+        'unit': 'years',
     },
 }

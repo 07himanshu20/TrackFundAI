@@ -65,10 +65,13 @@ def _call_gemini(prompt, context_label=''):
 
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
-            response = model.generate_content(
-                prompt,
-                request_options={'timeout': 60},
-            )
+            # NO HARDCODED TIMEOUT — production policy is "let Gemini take
+            # the time it needs to be accurate". The previous 60s ceiling
+            # caused NAV_CALC and other dense-prompt sheets to fail when
+            # Gemini was actually working correctly, just slowly. The Google
+            # SDK's internal default (~10 min) is the only safety net, and it
+            # only fires on a true network-level failure.
+            response = model.generate_content(prompt)
 
             # Check for empty/blocked responses
             if not response.text:
@@ -269,7 +272,7 @@ def classify_labels(labels, category_key, canonical_options, context=''):
     labels_text = '\n'.join(f'  - "{l}"' for l in unique_labels)
     context_line = f'\nDOMAIN CONTEXT: {context}\n' if context else ''
 
-    prompt = f"""You are a financial data classifier for an Alternative Investment Fund (AIF) Excel file.
+    prompt = SHARED_MISSION_PREAMBLE + f"""You are a financial data classifier for an Alternative Investment Fund (AIF) Excel file.
 You have 20+ years of experience in fund accounting, LP/GP economics, and financial reporting.
 
 TASK: Classify each label below into exactly one canonical category.
@@ -349,7 +352,7 @@ def classify_enum_values(values, enum_key, enum_options, context=''):
     values_text = '\n'.join(f'  - "{v}"' for v in unique_values)
     context_line = f'\nDOMAIN CONTEXT: {context}\n' if context else ''
 
-    prompt = f"""You are a financial data classifier for an Alternative Investment Fund (AIF) Excel file.
+    prompt = SHARED_MISSION_PREAMBLE + f"""You are a financial data classifier for an Alternative Investment Fund (AIF) Excel file.
 
 TASK: Classify each value below into exactly one of the allowed enum options.
 {context_line}
@@ -429,12 +432,15 @@ def extract_structured_metadata(label_value_pairs, field_definitions, context=''
         f'  "{k}": {fd["desc"]} (type: {fd["type"]})'
         for k, fd in field_definitions.items()
     )
+    # NO 100-pair cap: send every label-value pair to Gemini. Truncating to
+    # 100 silently dropped pairs from large metadata sheets (and the dropped
+    # tail often contained the field we needed).
     pairs_text = '\n'.join(
-        f'  "{l}" → "{v}"' for l, v in filtered[:100]
+        f'  "{l}" → "{v}"' for l, v in filtered
     )
     context_line = f'\nDOMAIN CONTEXT: {context}\n' if context else ''
 
-    prompt = f"""You are a financial data extractor for an Alternative Investment Fund (AIF) Excel file.
+    prompt = SHARED_MISSION_PREAMBLE + f"""You are a financial data extractor for an Alternative Investment Fund (AIF) Excel file.
 You have deep knowledge of fund structures, SEBI regulations, and fund accounting.
 
 TASK: Extract structured metadata from these key-value pairs found in Excel cells.
@@ -501,7 +507,7 @@ def detect_currency_and_unit(headers, sample_values=None, sheet_name=''):
     if cache_key in _classification_cache:
         return _classification_cache[cache_key]
 
-    prompt = f"""Detect the currency and numeric unit used in this financial spreadsheet sheet.
+    prompt = SHARED_MISSION_PREAMBLE + f"""Detect the currency and numeric unit used in this financial spreadsheet sheet.
 
 Sheet name: "{sheet_name}"
 Column headers: {headers_text}
@@ -546,7 +552,7 @@ Return JSON: {{"currency": "INR", "unit_multiplier": 10000000, "unit_label": "Cr
         return default_result
 
 
-def detect_sheet_layout(filepath, sheet_name, sample_top_rows=25, sample_bottom_rows=5):
+def detect_sheet_layout(filepath, sheet_name, sample_top_rows=None, sample_bottom_rows=None):
     """Pass 2.5 — Detect the table layout(s) inside ONE sheet via Gemini.
 
     Replaces the brittle Python heuristic (`_is_section_title_row` +
@@ -616,18 +622,21 @@ def detect_sheet_layout(filepath, sheet_name, sample_top_rows=25, sample_bottom_
         wb.close()
         return empty
 
-    # Sample the first N rows and the last few rows (to spot footer/total).
-    # 0-indexed for prompt clarity (matches the schema the model returns).
-    top_n    = min(sample_top_rows, max_row)
-    bot_n    = min(sample_bottom_rows, max(0, max_row - top_n))
-    top_idxs = list(range(0, top_n))
-    bot_idxs = list(range(max_row - bot_n, max_row)) if bot_n else []
-    # De-duplicate (small sheets may overlap)
-    seen, sample_idxs = set(), []
-    for i in top_idxs + bot_idxs:
-        if i not in seen:
-            sample_idxs.append(i)
-            seen.add(i)
+    # FULL-COVERAGE: send EVERY row of the sheet to Gemini. No sampling.
+    #
+    # Earlier this function sampled only first-25 + last-5 rows. That broke
+    # multi-section sheets (e.g. a 140-row Compliance Tracker with a
+    # per-company grid in rows 3-131 and a fund-level filings sub-table in
+    # rows 132-139): Gemini saw rows 0-24 + 135-139 and reported only ONE
+    # sub-table truncated at row 24, missing 80 % of the data and the
+    # entire second sub-table.
+    #
+    # Sending every row eliminates the entire class of "Gemini couldn't
+    # see the middle of the sheet" failures and is universal — applies to
+    # every domain and every sheet shape, with zero heuristics. The
+    # `sample_top_rows`/`sample_bottom_rows` parameters are kept on the
+    # signature for backwards compatibility but are now unused.
+    sample_idxs = list(range(0, max_row))
 
     def _cell_preview(v):
         if v is None:
@@ -649,13 +658,13 @@ def detect_sheet_layout(filepath, sheet_name, sample_top_rows=25, sample_bottom_
         for ridx, cells in rows_for_prompt
     )
 
-    prompt = f"""You are a precise table-layout detector for an Indian AIF (Alternative Investment Fund) Excel sheet.
+    prompt = SHARED_MISSION_PREAMBLE + f"""You are a precise table-layout detector for an Indian AIF (Alternative Investment Fund) Excel sheet.
 
 A data importer will use your output to read this sheet ROW-BY-ROW. Wrong row indices = wrong data imported. Be exact.
 
 SHEET NAME: "{sheet_name}"
 SHEET DIMENSIONS: {max_row} rows × {max_col} columns
-SHOWING {len(rows_for_prompt)} sampled rows (first {top_n} + last {bot_n}) with 0-BASED row indices and first {cap_col} columns:
+SHOWING ALL {len(rows_for_prompt)} rows of the sheet with 0-BASED row indices and first {cap_col} columns. You see the FULL sheet — there is no sampling, no truncation. Identify EVERY sub-table that exists; do not under-report:
 
 {rows_text}
 
@@ -797,6 +806,88 @@ Respond with ONLY the JSON object."""
     return final
 
 
+def classify_subtable_purpose(headers, sample_rows, allowed_purposes, context=''):
+    """Semantically classify what a sub-table inside a sheet actually IS.
+
+    Used by domain-specific importers (e.g. _import_compliance) as a
+    defense-in-depth check AFTER Pass 1 (sheet → domain) and Pass 2.5
+    (sheet → sub-tables). If Pass 1 mis-classifies a sheet — for example,
+    a workbook's "VALIDATION" sheet getting tagged as 'compliance' because
+    Gemini matched on the word "compliance test report" — this call lets
+    the importer cleanly reject sub-tables that don't actually carry the
+    expected kind of data, AND route legitimate sub-tables to the correct
+    write path without any keyword matching at all.
+
+    headers:           list[str] — header-row column labels for the sub-table
+    sample_rows:       list[list[str]] — up to ~5 representative data rows
+                       (one inner list per row, one string per cell)
+    allowed_purposes:  dict[str, str] — {purpose_key: description}
+                       PLUS an implicit 'other' bucket that means "doesn't
+                       match any of the allowed purposes". Callers should
+                       skip sub-tables that return 'other'.
+    context:           str — short free-form context for the prompt
+                       (e.g. "compliance domain sheet 'Compliance Tracker'")
+
+    Returns: one of the purpose_keys OR 'other' (never None).
+    """
+    if not allowed_purposes:
+        return 'other'
+
+    # Build a representation of the input — NO row or cell-text cap.
+    header_line = ' | '.join(str(h) for h in headers if h)
+    sample_text = '\n'.join(
+        '  Row ' + str(i + 1) + ': ' + ' | '.join(
+            (str(c) if c is not None else '') for c in row
+        )
+        for i, row in enumerate(sample_rows or [])
+    ) or '  (no sample rows)'
+
+    purpose_lines = '\n'.join(
+        f'  - {key}: {desc}'
+        for key, desc in allowed_purposes.items()
+    )
+    purpose_lines += '\n  - other: the sub-table is none of the above (e.g. instructions, legend, file-integrity validation rules, sample data, metadata, examples — anything that should NOT be written to the target tables)'
+
+    cache_key = (
+        'subtable_purpose',
+        tuple(allowed_purposes.keys()),
+        tuple(headers or []),
+        tuple(tuple(r) for r in (sample_rows or [])),
+    )
+    if cache_key in _classification_cache:
+        return _classification_cache[cache_key]
+
+    prompt = SHARED_MISSION_PREAMBLE + f"""You are classifying the purpose of a sub-table found inside an Indian AIF Excel sheet.
+
+CONTEXT: {context or '(no extra context)'}
+
+SUB-TABLE HEADERS:
+  {header_line}
+
+SUB-TABLE SAMPLE ROWS (first few real data rows):
+{sample_text}
+
+POSSIBLE PURPOSES:
+{purpose_lines}
+
+TASK: choose exactly ONE purpose key from the list above. Judge by the SEMANTIC content of the headers and rows together — what kind of information does this sub-table actually carry? Do NOT match on individual keywords. A sub-table whose rows describe file-integrity checks, formula validations, sample/test data, or instructional content is 'other' even if a header word happens to overlap one of the allowed purposes.
+
+RETURN STRICT JSON: {{"purpose": "<one_of_the_keys_or_other>"}}"""
+
+    try:
+        result = _call_gemini(prompt, context_label='subtable-purpose')
+        purpose = (result or {}).get('purpose') or 'other'
+    except Exception as e:
+        logger.warning(f'Sub-table purpose classification failed: {e}')
+        purpose = 'other'
+
+    if purpose not in allowed_purposes and purpose != 'other':
+        purpose = 'other'
+
+    _classification_cache[cache_key] = purpose
+    return purpose
+
+
 def _extract_sheet_previews(filepath):
     """
     Read an Excel file and extract sheet names + first 5 rows of each sheet.
@@ -808,7 +899,12 @@ def _extract_sheet_previews(filepath):
     IMPORTANT: Do NOT use read_only=True here. In read_only mode, openpyxl
     returns EmptyCell objects for empty cells — these lack .row and .column
     attributes, causing AttributeError crashes when we look up the xsheet_cache.
-    We only read max_row=6 per sheet, so memory/performance is not a concern.
+
+    No row-scan cap: production policy is "Gemini sees everything the sheet
+    has to offer". Previously this read only the first 6 rows per sheet which
+    silently dropped sheets whose meaningful data starts further down (e.g.
+    NAV_CALC's monthly history block at row 31). We now stream the entire
+    sheet; the per-row payload is small (string cells) so memory stays bounded.
 
     Returns {sheet_name: [[row1_values], [row2_values], ...]}
     """
@@ -822,7 +918,8 @@ def _extract_sheet_previews(filepath):
     for sheet_name in sheet_names:
         ws = wb[sheet_name]
         rows = []
-        for i, row in enumerate(ws.iter_rows(max_row=6)):
+        # NO row cap — iterate every populated row.
+        for i, row in enumerate(ws.iter_rows()):
             row_vals = []
             for cell in row:
                 # Prefer cached cross-sheet resolved value; fall back to cell value
@@ -842,7 +939,37 @@ def _extract_sheet_previews(filepath):
 # Pass 1: Sheet Classification
 # ---------------------------------------------------------------------------
 
-PASS1_PROMPT = """You are an AI engineer with 20+ years of experience in automating the finances of companies, specializing in Alternative Investment Funds (AIFs), Private Equity, and Venture Capital fund operations. You hold 25+ years of experience as a CA/CFO with deep knowledge of fund accounting, LP/GP economics, capital calls, distributions, carried interest, NAV calculation, and SEBI regulatory compliance for Indian AIFs.
+SHARED_MISSION_PREAMBLE = """================================================================================
+MISSION (READ FIRST — applies to every prompt in this pipeline)
+================================================================================
+Basically we have the terms and fields on the frontend dashboard which we need
+to either EXTRACT from the Excel data sheet using semantic analysis (as we are
+currently doing), or we need to CALCULATE them from other values that ARE
+present in the Excel.
+
+Every value displayed on the dashboard MUST be one of:
+  (a) DIRECTLY EXTRACTED from a labelled cell in the Excel (Pass 1 / 1.5 / 2 / 3
+      identify the value and stage it for the database), OR
+  (b) DERIVED by a formula you choose at Pass 4 from extracted inputs.
+
+CRUCIALITY: A missing value on the dashboard is a FAILURE. Indian PE / VC / LP
+clients consume this data to make investment, regulatory, and audit decisions.
+"Field shows —" because you skipped a row, mis-classified a section, or
+truncated input is unacceptable. Take whatever time and tokens you need to be
+thorough. There is NO row scan limit, NO time limit, NO column limit, and NO
+sample-count limit on you. Scan the whole sheet. Read every cell. Consider
+every section. If a label and a value can be matched semantically, match them.
+If a value can be computed from available inputs, compute it.
+
+Do NOT match by keyword. Match by MEANING. Section names, column headers, row
+labels, sub-table order, sheet layout, and currency notation all vary file to
+file. Semantic understanding is your job; the user has explicitly forbidden any
+keyword-driven shortcut.
+================================================================================
+"""
+
+
+PASS1_PROMPT = SHARED_MISSION_PREAMBLE + """You are an AI engineer with 20+ years of experience in automating the finances of companies, specializing in Alternative Investment Funds (AIFs), Private Equity, and Venture Capital fund operations. You hold 25+ years of experience as a CA/CFO with deep knowledge of fund accounting, LP/GP economics, capital calls, distributions, carried interest, NAV calculation, and SEBI regulatory compliance for Indian AIFs.
 
 You MUST use this financial domain expertise to correctly classify each sheet. The difference between an LP (investor) and a portfolio company (investee) is fundamental — confusing them would be like confusing a bank's depositors with its loan customers.
 
@@ -1110,7 +1237,7 @@ def classify_sheets(filepath, progress_cb=None):
 # Pass 1.5: Section Classification within Multi-Section Sheets
 # ---------------------------------------------------------------------------
 
-PASS1_5_PROMPT = """You are an AI engineer with 20+ years of experience in Alternative Investment Funds (AIFs), Private Equity, and Venture Capital fund operations across multiple countries. You hold deep expertise in fund accounting, LP/GP economics, capital calls, distributions, carried interest, NAV calculation, and regulatory compliance (SEBI for India, SEC for US, FCA for UK, MAS for Singapore, CSSF for Luxembourg).
+PASS1_5_PROMPT = SHARED_MISSION_PREAMBLE + """You are an AI engineer with 20+ years of experience in Alternative Investment Funds (AIFs), Private Equity, and Venture Capital fund operations across multiple countries. You hold deep expertise in fund accounting, LP/GP economics, capital calls, distributions, carried interest, NAV calculation, and regulatory compliance (SEBI for India, SEC for US, FCA for UK, MAS for Singapore, CSSF for Luxembourg).
 
 You are classifying SECTIONS found within multi-section Excel sheets from a fund data workbook. Each sheet has already been classified to a primary data domain. Now you must classify each section within those sheets to a specific sub-domain.
 
@@ -1143,8 +1270,27 @@ EXIT sections:
 DISTRIBUTION sections:
   "DISTRIBUTIONS", "DISTRIBUTION SCHEDULE", "LP DISTRIBUTIONS", "PAYOUTS" → distributions
 
-NAV sections:
-  "NAV RECORDS", "NAV HISTORY", "NET ASSET VALUE", "MONTHLY NAV" → nav_records
+NAV sections — distinguish by row STRUCTURE, not by section name alone:
+  "NAV RECORDS", "NAV HISTORY", "MONTHLY NAV", "QUARTERLY NAV" → nav_records
+    (sample rows MUST start with a date column — these are time-series)
+  "FUND NAV (CURRENT PERIOD)", "NAV BREAKDOWN", "NAV COMPONENTS",
+    "NAV CALCULATION (CURRENT)", "NAV BUILD-UP" → nav_breakdown
+    (sample rows are key-value: "Total Fair Value of Portfolio | 1165",
+     "Cash & Equivalents | 285", etc. — NO date column. Final row sums to Total NAV.)
+  "NAV PER UNIT", "UNIT NAV", "NAV/UNIT" → nav_per_unit
+    (sample rows are key-value: "Total Fund NAV | 1862", "Total Units Issued | 152000",
+     "NAV Per Unit | 1.22", etc.)
+
+FUND PERFORMANCE sections (NEW):
+  "FUND PERFORMANCE", "FUND-LEVEL MULTIPLES", "MOIC TVPI DPI",
+    "PERFORMANCE METRICS", "FUND KPIS" → fund_performance_breakdown
+    (key-value rows: "Total Invested Capital | 1520", "Gross MOIC | 0.88",
+     "Net IRR | 0.1612", etc.)
+
+WATERFALL sections (NEW):
+  "WATERFALL", "CARRY COMPUTATION", "EUROPEAN WATERFALL",
+    "AMERICAN WATERFALL" → waterfall_breakdown
+    (key-value rows describing waterfall parameters)
 
 SCHEME sections:
   "SCHEMES", "SCHEME DETAILS", "FUND SCHEMES", "SUB-FUND DETAILS" → schemes
@@ -1161,27 +1307,52 @@ VALUATION sections:
 Available sub-domains and their descriptions:
 {subdomains}
 
-HOW TO CLASSIFY — USE BOTH SECTION NAME AND COLUMN HEADERS:
+HOW TO CLASSIFY — USE SECTION NAME, COLUMN HEADERS, AND SAMPLE DATA ROWS:
 
-1. First, look at the section name for semantic meaning
-2. Then, look at the column headers to CONFIRM the classification:
-   - Columns like Company Name, Sector, Stage, City → portfolio_companies
-   - Columns like Instrument, Cost, Fair Value, Ownership% → investments
-   - Columns like Tranche#, Amount, Date, Round, Price/Share → investment_tranches
-   - Columns like Call#, Call Date, Call%, Total Amount → capital_call_headers
-   - Columns like Investor Name, Called Amount, Payment Status → capital_call_line_items
-   - Columns like Exit Type, Exit Date, Proceeds, MOIC → exit_events
-   - Columns like Distribution#, Dist Date, Gross Amount, TDS → distributions
-   - Columns like NAV Date, Total NAV, NAV/Unit, Units → nav_records
-3. If the section name is ambiguous, let the COLUMN HEADERS decide
-4. If column headers are not provided (empty), classify by section name + parent domain
+1. **First, inspect the SAMPLE DATA ROWS.** Row structure is the most reliable
+   signal because section names and column headers can be ambiguous, but the
+   shape of the data is unambiguous. Specifically:
+
+   a. If the FIRST data column carries a DATE in every sample row
+      (e.g. "2024-01-31", "Jan-24", "31/03/2025") AND subsequent columns
+      carry numeric amounts → this is a TIME-SERIES section. Pick
+      `nav_records`, `capital_call_headers`, `distributions`, etc.
+      according to what the amounts represent.
+
+   b. If the FIRST column carries a LABEL (e.g. "Total Fair Value of
+      Portfolio", "Cash & Equivalents", "Mgmt Fee Payable") and the
+      SECOND column carries a single amount → this is a KEY-VALUE
+      BREAKDOWN section. Pick `nav_breakdown`, `nav_per_unit`,
+      `fund_performance_breakdown`, `waterfall_breakdown`, or
+      `fund_master` according to what the labels describe.
+
+   c. If rows carry COMPANY NAMES + sector/stage/city → `portfolio_companies`
+      or `investments` (the latter if financial columns are also present).
+
+   d. If rows carry LP NAMES + commitment/called amounts → `entities` (LP
+      register) or `capital_call_line_items`.
+
+2. Use the column headers to confirm what the values represent.
+
+3. Use the section name as a tiebreaker only — it is the weakest signal.
+
+4. If sample rows are not provided (empty section), fall back to section
+   name + column headers + parent domain.
+
+CRITICAL: a NAV-related section is NOT automatically `nav_records`. It is
+`nav_records` ONLY when the rows are time-indexed (column 1 is a date).
+Otherwise it is `nav_breakdown` (component decomposition) or `nav_per_unit`
+(per-unit value table). Mis-classifying a key-value table as `nav_records`
+causes the importer to drop the data silently.
 
 CRITICAL RULES:
 1. "__default__" means the sheet has NO section headers (entire sheet is one flat table).
    Classify based on columns + parent domain:
    - parent=portfolio_investments + columns have Cost/FV → investments
    - parent=capital_calls → capital_call_headers
-   - parent=nav_accounting → nav_records
+   - parent=nav_accounting → nav_records (only if rows are time-indexed)
+   - parent=nav_calculation + rows time-indexed → nav_records
+   - parent=nav_calculation + rows key-value → nav_breakdown
    - parent=exits_distributions → exit_events
    - parent=organization_users + columns have Entity Type → entities
    - parent=fund_scheme_master → fund_master
@@ -1269,10 +1440,28 @@ def classify_sections(classifications, sheet_section_data, progress_cb=None):
             f'\n--- Sheet: "{sname}" (parent domain: {parent_domain}) ---'
         )
         for sec in secs:
-            cols_str = ', '.join(sec.get('columns', [])[:15]) or '(no columns detected)'
+            cols = sec.get('columns', []) or []
+            cols_str = ', '.join(cols) if cols else '(no columns detected)'
             section_data_parts.append(
-                f'  Section: "{sec["name"]}"\n    Columns: {cols_str}'
+                f'  Section: "{sec["name"]}"\n    Columns ({len(cols)}): {cols_str}'
             )
+            # Include sample data rows so Gemini can SEE the structure:
+            # rows starting with a date → time-series; rows with labels in
+            # column 1 + amounts in column 2 → key-value breakdown; etc.
+            samples = sec.get('sample_rows', []) or []
+            if samples:
+                section_data_parts.append(
+                    f'    Sample data rows ({len(samples)}):'
+                )
+                for i, row in enumerate(samples, 1):
+                    # Trim each cell to ~60 chars to keep prompt readable
+                    rendered = [
+                        (str(c)[:60] + ('…' if len(str(c)) > 60 else ''))
+                        for c in row
+                    ]
+                    section_data_parts.append(f'      row {i}: {rendered}')
+            else:
+                section_data_parts.append('    Sample data rows: (none)')
 
     prompt = PASS1_5_PROMPT.format(
         subdomains=subdomains_desc,
@@ -1318,7 +1507,7 @@ def classify_sections(classifications, sheet_section_data, progress_cb=None):
 # Pass 2: Column Mapping per Sheet
 # ---------------------------------------------------------------------------
 
-PASS2_PROMPT = """You are an AI engineer with 20+ years of experience in automating the finances of companies. You hold 20+ years of experience working with Python, and specialization in extraction, displaying and calculating data and accessing it from Excel/CSV/PDF sheets of multiple formats. You hold 15+ years of hands-on experience in software debugging and creating production-ready softwares and dashboards. You have robust knowledge of a CFO/CA to perform calculations on finance data.
+PASS2_PROMPT = SHARED_MISSION_PREAMBLE + """You are an AI engineer with 20+ years of experience in automating the finances of companies. You hold 20+ years of experience working with Python, and specialization in extraction, displaying and calculating data and accessing it from Excel/CSV/PDF sheets of multiple formats. You hold 15+ years of hands-on experience in software debugging and creating production-ready softwares and dashboards. You have robust knowledge of a CFO/CA to perform calculations on finance data.
 
 You are mapping Excel columns to canonical fund management database fields.
 
@@ -1465,7 +1654,8 @@ Rules:
 
 
 def map_columns_for_sheet(filepath, sheet_name, domains, sections,
-                          progress_cb=None, xsheet_cache=None, wb=None):
+                          progress_cb=None, xsheet_cache=None, wb=None,
+                          sections_data=None):
     """
     Pass 2: For a classified sheet, map its columns to canonical fields.
 
@@ -1476,6 +1666,14 @@ def map_columns_for_sheet(filepath, sheet_name, domains, sections,
     Args:
         xsheet_cache: Pre-built cross-sheet cache (optional; built if None)
         wb: Pre-opened workbook (optional; opened if None)
+        sections_data: list of dicts from `_detect_sections_lightweight`,
+            each with {name, columns, sample_rows}. When provided, Pass 2's
+            prompt is built from these per-section snapshots (so EVERY
+            sub-table's columns are visible to Gemini, not just the first
+            sheet-wide 20-row window). This is the production path for
+            sheets with multiple sub-tables (NAV_CALC, EXITS,
+            MOIC_TVPI_DPI, etc.). When None, falls back to the legacy
+            first-20-rows scan.
 
     Returns: dict with section-level column mappings
     """
@@ -1491,38 +1689,114 @@ def map_columns_for_sheet(filepath, sheet_name, domains, sections,
 
     ws = wb[sheet_name]
 
-    # Read more rows for mapping (up to 20 for context), resolving cross-sheet refs
+    # Use primary domain
+    primary_domain = domains[0] if domains else 'unknown'
+    if primary_domain == 'unknown' or primary_domain not in DOMAIN_FIELDS:
+        if close_wb:
+            wb.close()
+        return {'sections': [], 'overall_confidence': 0.0}
+
+    # Build canonical fields description (shared across all sub-table calls)
+    fields = DOMAIN_FIELDS[primary_domain]
+    fields_desc = '\n'.join(f'  - {k}: {v}' for k, v in fields.items())
+
+    # PRODUCTION PATH: one Gemini call PER SUB-TABLE.
+    # Previously every sub-table of a sheet was packed into one giant prompt,
+    # which made Gemini's confidence collapse on sheets with many sub-tables
+    # or many sample rows (PORTFOLIO_MASTER with 50 rows, LP_REGISTER, etc.)
+    # — every alias would come back with low confidence and the importer
+    # would silently filter them out via its 0.70 threshold, leaving 0
+    # records written to the LP / CapitalCall / ExitEvent tables. The fix
+    # is structural: each sub-table has its own column structure, so each
+    # gets its own focused Gemini call with just that sub-table's header +
+    # sample rows. No more confidence collapse from over-stuffed prompts.
+    if sections_data:
+        merged_sections = []
+        total_conf = 0.0
+        n_sub = 0
+        for sec in sections_data:
+            sec_name = sec.get('name', '__default__')
+            cols = sec.get('columns', []) or []
+            samples = sec.get('sample_rows', []) or []
+            if not cols and not samples:
+                continue
+
+            # Build a focused single-sub-table preview
+            sub_parts = [f'\n--- Section: "{sec_name}" ---']
+            if cols:
+                sub_parts.append(f'  Header columns ({len(cols)}): {cols}')
+            else:
+                sub_parts.append('  Header columns: (none detected)')
+            if samples:
+                sub_parts.append(f'  Sample data rows ({len(samples)}):')
+                for i, row in enumerate(samples, 1):
+                    rendered = [
+                        (str(c) if c is not None else '') for c in row
+                    ]
+                    sub_parts.append(f'    row {i}: {rendered}')
+
+            sub_prompt = PASS2_PROMPT.format(
+                domain=primary_domain,
+                domain_desc=SHEET_DOMAINS.get(primary_domain, ''),
+                sections=sec_name,
+                sheet_data='\n'.join(sub_parts),
+                canonical_fields=fields_desc,
+            )
+            try:
+                sub_result = _call_gemini(
+                    sub_prompt,
+                    context_label=f'Pass2-map({sheet_name}/{sec_name}:{primary_domain})',
+                )
+            except Exception as e:
+                logger.warning(
+                    f'Pass 2 per-section call failed for '
+                    f'"{sheet_name}/{sec_name}": {e}'
+                )
+                continue
+
+            # sub_result is shaped {sections: [{section_name, mappings, ...}], overall_confidence}
+            # Merge each section block into our running list.
+            for s in sub_result.get('sections', []):
+                merged_sections.append(s)
+                c = s.get('confidence') or s.get('overall_confidence') or 0.0
+                if isinstance(c, (int, float)):
+                    total_conf += float(c)
+                    n_sub += 1
+            sub_overall = sub_result.get('overall_confidence')
+            if isinstance(sub_overall, (int, float)) and n_sub == 0:
+                # Use the per-call overall confidence as a fallback
+                total_conf += float(sub_overall)
+                n_sub += 1
+
+        if close_wb:
+            wb.close()
+
+        overall = (total_conf / n_sub) if n_sub else 0.0
+        return {
+            'sections': merged_sections,
+            'overall_confidence': round(overall, 4),
+        }
+
+    # LEGACY FALLBACK PATH — no sections_data supplied. Stream the entire
+    # sheet into one prompt. (No row cap — previously 20.)
+    sheet_data_parts = []
     rows = []
-    for i, row in enumerate(ws.iter_rows(max_row=20)):
+    for row in ws.iter_rows():
         row_vals = []
         for cell in row:
             val = xsheet_cache.get((sheet_name, cell.row, cell.column), cell.value)
             row_vals.append(str(val) if val is not None else '')
         rows.append(row_vals)
-        if i >= 19:
-            break
-
-    if close_wb:
-        wb.close()
-
-    if not rows:
-        return {'sections': [], 'overall_confidence': 0.0}
-
-    # Use primary domain
-    primary_domain = domains[0] if domains else 'unknown'
-    if primary_domain == 'unknown' or primary_domain not in DOMAIN_FIELDS:
-        return {'sections': [], 'overall_confidence': 0.0}
-
-    # Build canonical fields description
-    fields = DOMAIN_FIELDS[primary_domain]
-    fields_desc = '\n'.join(f'  - {k}: {v}' for k, v in fields.items())
-
-    # Build sheet data preview
-    sheet_data_parts = []
     for i, row in enumerate(rows):
         non_empty = [v for v in row if v]
         if non_empty:
             sheet_data_parts.append(f'  Row {i+1}: {non_empty}')
+
+    if close_wb:
+        wb.close()
+
+    if not sheet_data_parts:
+        return {'sections': [], 'overall_confidence': 0.0}
 
     sections_str = ', '.join(sections) if sections else 'No explicit sections — treat entire sheet as one section'
 
@@ -1548,74 +1822,152 @@ def map_columns_for_sheet(filepath, sheet_name, domains, sections,
 def _detect_sections_lightweight(ws):
     """Detect section boundaries in a worksheet using layout-only heuristics.
 
-    Returns a list of dicts: [{name: str, columns: [str, ...]}]
-    where 'name' is the section title text (or '__default__' for the first
-    flat-table region with no section header) and 'columns' are the column
-    headers found immediately after that section title.
+    Returns a list of dicts:
+        [{name: str, columns: [str, ...], sample_rows: [[cell, ...], ...]}]
 
-    Detection is 100% format-agnostic — no keywords. A section title row is
-    identified by:
+    where:
+      - 'name' is the section title text (or '__default__' for the first
+        flat-table region with no section header)
+      - 'columns' are the column headers found immediately after the title
+      - 'sample_rows' are up to 5 data rows from the section, used by Pass 1.5
+        to distinguish key-value layouts from time-series layouts. With actual
+        row data, Gemini can see whether the first column carries dates
+        (time-series), labels (key-value), or company names (entity list).
+
+    Detection is 100% format-agnostic — no keyword matching. A section title
+    row is identified by:
       - 1-2 non-empty cells in the row
       - First cell text is predominantly uppercase (≥70% of alpha chars)
       - Text length > 3 characters
+
+    No column cap (was 15) — full headers ship to Gemini so the section's
+    real shape is visible.
     """
     max_row = ws.max_row or 0
     max_col = ws.max_column or 0
     sections = []
     seen_section = False
 
-    def _get_columns_from_header_row(start_r):
-        """Scan rows starting at start_r to find a header row (≥3 cells)."""
+    def _get_header_row_index(start_r):
+        """Find the first row at/after start_r with ≥3 non-empty cells."""
         for scan_r in range(start_r, min(start_r + 8, max_row + 1)):
-            cells = []
-            for c in range(1, max_col + 1):
-                v = ws.cell(scan_r, c).value
-                if v is not None:
-                    cells.append(str(v).strip())
-            if len(cells) >= 3:
-                return cells[:15]  # cap at 15 columns for prompt size
-        return []
+            count = sum(
+                1 for c in range(1, max_col + 1)
+                if ws.cell(scan_r, c).value is not None
+            )
+            if count >= 3:
+                return scan_r
+        return None
 
+    def _read_row(r):
+        return [
+            ws.cell(r, c).value for c in range(1, max_col + 1)
+        ]
+
+    def _collect_columns_and_samples(header_r, end_r):
+        """Return (columns, sample_rows). Columns come from header_r; sample
+        rows are up to 5 data rows from header_r+1 to end_r (stops on blank
+        rows or section boundaries)."""
+        cols = [
+            str(v).strip() for v in _read_row(header_r) if v is not None
+        ]
+        samples = []
+        blanks_in_a_row = 0
+        for r in range(header_r + 1, end_r + 1):
+            row_vals = _read_row(r)
+            nonnull = [v for v in row_vals if v is not None]
+            if not nonnull:
+                blanks_in_a_row += 1
+                if blanks_in_a_row >= 3:
+                    break
+                continue
+            blanks_in_a_row = 0
+            # Stringify each cell so dates / Decimals serialise cleanly in
+            # the prompt. None → '' to preserve column alignment.
+            samples.append([
+                ('' if v is None else
+                 (v.isoformat() if hasattr(v, 'isoformat') else str(v)))
+                for v in row_vals
+            ])
+            # NO sample-row cap. Every populated row in the section gets
+            # sent to Gemini so it can reason over the complete structure
+            # (a 36-row time-series shouldn't be truncated to 5).
+        return cols, samples
+
+    # First pass: locate every section-title row, recording (title_row, title_text)
+    section_title_rows = []
     r = 1
     while r <= max_row:
-        # Count non-empty cells
         cell_vals = []
         for c in range(1, max_col + 1):
             v = ws.cell(r, c).value
             if v is not None:
                 cell_vals.append(str(v).strip())
 
-        if not cell_vals:
-            r += 1
-            continue
-
-        first_str = cell_vals[0]
-
-        # Check if this row is a section title: 1-2 cells, mostly uppercase
-        if len(cell_vals) <= 2 and len(first_str) > 3:
-            alpha_chars = [ch for ch in first_str if ch.isalpha()]
-            upper_ratio = (
-                sum(1 for ch in alpha_chars if ch.isupper()) / len(alpha_chars)
-                if alpha_chars else 0.0
-            )
-            if upper_ratio >= 0.70:
-                # This is a section title row
-                cols = _get_columns_from_header_row(r + 1)
-                sections.append({'name': first_str.strip(), 'columns': cols})
-                seen_section = True
-                r += 1
-                continue
-
-        # If no section header seen yet and this row has ≥3 cells, it's a
-        # flat header row → __default__ section
-        if not seen_section and len(cell_vals) >= 3:
-            sections.append({'name': '__default__', 'columns': cell_vals[:15]})
-            seen_section = True
-            # Skip past data rows to look for more sections
-            r += 1
-            continue
-
+        if cell_vals:
+            first_str = cell_vals[0]
+            if len(cell_vals) <= 2 and len(first_str) > 3:
+                alpha_chars = [ch for ch in first_str if ch.isalpha()]
+                upper_ratio = (
+                    sum(1 for ch in alpha_chars if ch.isupper()) / len(alpha_chars)
+                    if alpha_chars else 0.0
+                )
+                if upper_ratio >= 0.70:
+                    section_title_rows.append((r, first_str))
         r += 1
+
+    # PRODUCTION FIX: always snapshot the pre-first-title area as a
+    # __default__ sub-table. Previously this only ran when ZERO titles
+    # were found, which meant sheets like PORTFOLIO_MASTER (main 50-company
+    # table at rows 5-54 + small "SUMMARY STATISTICS" title block at row 56)
+    # had their main data table SKIPPED — Pass 2 saw only the summary
+    # block. Same regression on LP_REGISTER / CAPITAL_CALLS / EXITS, where
+    # the main data table sits ABOVE a small validation/check sub-table.
+    #
+    # The pre-title area is the main data table whenever it contains a
+    # header-shaped row (≥3 non-empty cells). We snapshot that header +
+    # its sample rows independently of any title-block sub-tables that
+    # follow.
+    pre_title_end = (
+        section_title_rows[0][0] - 1 if section_title_rows else max_row
+    )
+    if pre_title_end >= 1:
+        for r in range(1, pre_title_end + 1):
+            count = sum(
+                1 for c in range(1, max_col + 1)
+                if ws.cell(r, c).value is not None
+            )
+            if count >= 3:
+                cols, samples = _collect_columns_and_samples(r, pre_title_end)
+                if cols or samples:
+                    sections.append({
+                        'name': '__default__',
+                        'columns': cols,
+                        'sample_rows': samples,
+                    })
+                    seen_section = True
+                break
+
+    # Then add each title-block sub-table.
+    if section_title_rows:
+        for idx, (title_r, title_text) in enumerate(section_title_rows):
+            end_r = (section_title_rows[idx + 1][0] - 1
+                     if idx + 1 < len(section_title_rows) else max_row)
+            header_r = _get_header_row_index(title_r + 1)
+            if header_r is None:
+                sections.append({
+                    'name': title_text,
+                    'columns': [],
+                    'sample_rows': [],
+                })
+                continue
+            cols, samples = _collect_columns_and_samples(header_r, end_r)
+            sections.append({
+                'name': title_text,
+                'columns': cols,
+                'sample_rows': samples,
+            })
+            seen_section = True
 
     return sections
 
@@ -1705,6 +2057,12 @@ def map_workbook_columns(filepath, progress_cb=None):
             mapping = map_columns_for_sheet(
                 filepath, sheet_name, domains, sections, progress_cb,
                 xsheet_cache=xsheet_cache, wb=wb_pass2,
+                # Production path: Pass 2 sees the same per-section
+                # snapshots that Pass 1.5 used (headers + sample rows for
+                # every sub-table). This makes column-mapping robust on
+                # multi-sub-table sheets like NAV_CALC whose later
+                # sub-tables fell outside the legacy 20-row scan window.
+                sections_data=sheet_section_data.get(sheet_name),
             )
             column_mappings[sheet_name] = {
                 'domains': domains,
@@ -1739,3 +2097,236 @@ def map_workbook_columns(filepath, progress_cb=None):
         'overall_confidence': round(avg_confidence, 2),
         'sheet_names': sheet_names,
     }
+
+
+# ---------------------------------------------------------------------------
+# Pass 4: Derive missing fund-level metrics
+# ---------------------------------------------------------------------------
+
+def derive_metric_via_gemini(metric_key, metric_meta, available_inputs,
+                             scheme_context=''):
+    """Ask Gemini to derive a missing fund-level metric.
+
+    Gemini is told:
+      - Which metric we need (with rich semantic description)
+      - The full menu of available inputs (with current values from DB and
+        which are missing)
+      - That it must enumerate the canonical formulas, pick the formula whose
+        inputs are ALL present and non-zero, and return the computed value
+        with full provenance.
+
+    No formulas are hardcoded — Gemini decides which formula applies given the
+    data we have. If no viable formula exists, Gemini returns null and the
+    metric is recorded as un-derivable with reasoning.
+
+    Args:
+        metric_key: e.g. 'net_irr', 'moic', 'tvpi'
+        metric_meta: dict from DERIVABLE_FUND_METRICS — {label, unit, description}
+        available_inputs: dict {input_key: {value, unit, description, available}}
+                          where value is a number/str/list, available is bool
+        scheme_context: human-readable scheme + fund summary string
+
+    Returns:
+        dict shaped:
+        {
+            'value':              <float|None>,
+            'formula_expression': '<human-readable formula>',
+            'inputs_used':        {input_key: <value>, ...},
+            'confidence':         <float 0-1>,
+            'reasoning':          '<why this formula was chosen>',
+            'candidates':         [{formula, inputs_required, available, reason_rejected}, ...]
+        }
+        On failure returns {'value': None, ...} with reasoning set.
+    """
+    # Build the "available inputs" section: for each input show description,
+    # whether it's available, and the current value (truncated for series).
+    lines = []
+    for key, meta in available_inputs.items():
+        avail = meta.get('available', False)
+        val = meta.get('value')
+        unit = meta.get('unit', '')
+        desc = meta.get('description', '')
+
+        # Render value. For lists (e.g. cashflow_series) show EVERY entry
+        # so Gemini can reason over the complete dataset — truncating misled
+        # earlier Gemini calls into refusing valid derivations.
+        if val is None:
+            val_repr = 'NULL'
+        elif isinstance(val, list):
+            val_repr = f'list of {len(val)} entries → {val}'
+        else:
+            val_repr = str(val)
+
+        marker = '[AVAILABLE]' if avail else '[MISSING]'
+        lines.append(f'  - {key} {marker} ({unit}): {desc}')
+        lines.append(f'      current_value = {val_repr}')
+
+    inputs_block = '\n'.join(lines)
+
+    prompt = SHARED_MISSION_PREAMBLE + f"""You are a CFO/CA with 20+ years of experience in Alternative Investment
+Fund (AIF) accounting and Private Equity / Venture Capital fund performance
+metrics. A fund-management dashboard needs a value for the metric below, and
+the imported Excel did NOT contain a direct value. You must derive it from
+available sub-inputs.
+
+METRIC TO DERIVE
+================
+key:         {metric_key}
+label:       {metric_meta.get('label', metric_key)}
+unit:        {metric_meta.get('unit', '')}
+description: {metric_meta.get('description', '')}
+
+SCHEME CONTEXT
+==============
+{scheme_context or '(no additional context)'}
+
+AVAILABLE INPUTS (from the database)
+====================================
+{inputs_block}
+
+LPA TERMS (Limited Partner Agreement economics)
+================================================
+Several inputs above are prefixed with "lpa_" — these are the fund's economic
+terms extracted from the Limited Partner Agreement / Private Placement
+Memorandum (annual management fee %, fee basis, hurdle rate %, carried
+interest %, waterfall type, sponsor commitment %, tenure). When a metric
+requires NET-of-fee or NET-of-carry treatment, or when a metric is defined on
+a fee/hurdle-adjusted base (e.g. Net IRR, NAV after fee accrual, preferred
+return), you MUST incorporate these LPA terms into the chosen formula. For
+example: if a fund charges 2% mgmt fee on committed capital, the annual fee
+drag is total_committed_capital × 0.02 × years_since_inception. If a hurdle
+of 8% applies, the preferred return is total_called_capital × (1.08^years - 1).
+Use the lpa_* inputs ANYWHERE they are relevant — do not silently drop them.
+
+YOUR TASK
+=========
+Step 1. Enumerate ALL canonical/textbook formulas to compute this metric. Be
+        exhaustive — list every standard PE/VC, accounting, or financial-math
+        formula you know for this metric, including LPA-driven variants
+        (net-of-fee / net-of-carry / hurdle-adjusted).
+Step 2. For EACH formula, list the inputs it requires and mark whether ALL
+        required inputs are AVAILABLE and non-zero from the inputs above.
+Step 3. Pick the SINGLE most appropriate formula whose inputs are ALL
+        available and non-null. Prefer the formula that is:
+          (a) the textbook industry-standard for this metric
+          (b) closest to the legal/SEBI definition
+          (c) the one requiring the fewest assumptions
+Step 4. Specify the chosen formula and the exact inputs to plug in.
+        Python will do the numerical evaluation — you do NOT need to compute
+        the final number yourself. Your job is to pick the formula and supply
+        the inputs.
+
+        - For IRR-class metrics: set "formula_expression" to exactly the
+          string "XIRR(cashflow_series)". In "inputs_used", include a single
+          key "cashflow_series" mapped to the list of {{date, amount}} objects
+          you want XIRR computed on. Sign convention: contributions NEGATIVE,
+          distributions POSITIVE. If the cashflow_series lacks a terminal
+          residual NAV inflow, append a synthetic entry
+          {{date: as_of_date, amount: +fund_nav_latest}} so XIRR has a
+          terminal value.
+
+        - For ratio/multiple metrics (MOIC/TVPI/DPI/RVPI): set
+          "formula_expression" to a plain arithmetic expression using ONLY
+          the available input keys as variable names — e.g.
+          "(total_distributions_to_lps + total_unrealised_fair_value) / total_called_capital".
+          In "inputs_used", supply the numeric value of EACH input the formula
+          references (exact values from the AVAILABLE inputs above — do not
+          invent or round).
+
+        - For NAV/currency metrics: set "formula_expression" to a plain
+          arithmetic expression of available input keys (e.g.
+          "total_unrealised_fair_value - accrued_management_fees - accrued_carried_interest"
+          or simply "fund_nav_latest"). In "inputs_used", supply the numeric
+          value of each referenced input.
+
+        Python will mechanically substitute inputs_used into formula_expression
+        and compute the result. You do NOT predict the final value field —
+        leave "value" as null; Python will populate it after evaluating.
+
+Step 5. If NO formula has all required inputs available, return value = null,
+        formula_expression = "" and explain in reasoning what is missing.
+
+CONSTRAINTS
+===========
+- DO NOT invent numeric values. Use ONLY values from the AVAILABLE inputs.
+- DO NOT pick a formula whose required inputs are MISSING.
+- DO NOT pick a formula whose required inputs are zero (would produce
+  meaningless result).
+- For percentages, return as a number (e.g. 18.5 for 18.5%), NEVER as a
+  fraction (0.185).
+- For multiples, return as a number (e.g. 1.85 for 1.85x).
+- For currency, return in the SAME units as the input values (₹ raw — do not
+  divide by Cr or Lakhs).
+
+RETURN STRICT JSON ONLY (no markdown fences, no commentary outside JSON):
+{{
+  "value":              null,
+  "formula_expression": "<chosen formula, plain text — leave empty if not derivable>",
+  "inputs_used":        {{"<input_key>": <numeric value or list>, ...}},
+  "confidence":         <float 0.0 - 1.0>,
+  "reasoning":          "<1-3 sentence explanation of why this formula was chosen>",
+  "candidates":         [
+    {{
+      "formula":           "<formula name or expression>",
+      "inputs_required":   ["<input_key>", ...],
+      "all_inputs_available": <bool>,
+      "reason_rejected":   "<empty string if chosen, else why rejected>"
+    }},
+    ...
+  ]
+}}
+"""
+
+    try:
+        # _call_gemini already returns parsed JSON (it runs _parse_json_response
+        # internally). Use the dict directly — do NOT parse again.
+        result = _call_gemini(prompt, context_label=f'Pass4-derive-{metric_key}')
+
+        # Normalise
+        if not isinstance(result, dict):
+            return {
+                'value': None,
+                'formula_expression': '',
+                'inputs_used': {},
+                'confidence': 0.0,
+                'reasoning': 'Gemini returned non-dict response',
+                'candidates': [],
+            }
+
+        # Coerce value to float when possible
+        val = result.get('value')
+        if val is not None:
+            try:
+                val = float(val)
+            except (TypeError, ValueError):
+                val = None
+
+        out = {
+            'value': val,
+            'formula_expression': str(result.get('formula_expression') or '').strip(),
+            'inputs_used': result.get('inputs_used') or {},
+            'confidence': float(result.get('confidence') or 0.0),
+            'reasoning': str(result.get('reasoning') or '').strip(),
+            'candidates': result.get('candidates') or [],
+        }
+
+        logger.info(
+            f'[GEMINI Pass4] derive_metric({metric_key}): '
+            f'value={out["value"]} formula="{out["formula_expression"]}" '
+            f'confidence={out["confidence"]}'
+        )
+        return out
+
+    except Exception as e:
+        # DO NOT silently swallow API errors here. The previous behaviour
+        # (return confidence=0.0) made an API failure look identical to a
+        # "Gemini correctly decided no formula applies" outcome — so the
+        # caller couldn't retry, and the user saw 4 metrics return null
+        # without anyone realising the API itself had failed. Re-raise so
+        # the orchestrator (MetricDerivationService._derive_one) can apply
+        # its own retry/backoff and surface a distinct "api_error" status.
+        logger.error(
+            f'Gemini derive_metric API call failed for {metric_key}: '
+            f'{type(e).__name__}: {e}'
+        )
+        raise

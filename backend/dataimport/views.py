@@ -716,3 +716,72 @@ def delete_imported_file(request, file_id):
         'fund_name': fund_name,
         'deleted': deleted_summary,
     })
+
+
+@api_view(['GET'])
+@permission_classes([IsGPUser])
+def derived_metrics_list(request):
+    """Return Pass 4 derived fund-level metrics with full provenance.
+
+    Query params:
+        fund:   funds.Fund UUID (returns derived metrics for all schemes of fund)
+        scheme: funds.Scheme UUID (returns derived metrics for one scheme only)
+
+    Response shape:
+        {
+            "metrics": [
+                {
+                    "scheme_id":          "<uuid>",
+                    "scheme_name":        "...",
+                    "metric_key":         "moic",
+                    "value":              1.85,
+                    "formula_expression": "(total_distributions_to_lps + total_unrealised_fair_value) / total_called_capital",
+                    "inputs_used":        {input_key: {value, unit, source, description}},
+                    "confidence":         0.95,
+                    "gemini_reasoning":   "...",
+                    "candidate_formulas": [...],
+                    "derived_at":         "2026-06-04T...",
+                    "source":             "derived"  // or "imported_direct"
+                },
+                ...
+            ]
+        }
+    """
+    from .models import DerivedMetric
+    from .canonical_schema import DERIVABLE_FUND_METRICS
+
+    org = request.organization
+    if not org:
+        return Response({'detail': 'No organization.'}, status=403)
+
+    qs = DerivedMetric.objects.filter(organization=org).select_related('scheme')
+
+    fund_id = request.GET.get('fund')
+    scheme_id = request.GET.get('scheme')
+    if scheme_id:
+        qs = qs.filter(scheme_id=scheme_id)
+    elif fund_id:
+        qs = qs.filter(scheme__fund_id=fund_id)
+
+    metrics = []
+    for dm in qs:
+        meta = DERIVABLE_FUND_METRICS.get(dm.metric_key, {})
+        source = 'imported_direct' if dm.formula_expression == '(direct value imported)' else 'derived'
+        metrics.append({
+            'scheme_id':          str(dm.scheme_id),
+            'scheme_name':        dm.scheme.name,
+            'metric_key':         dm.metric_key,
+            'metric_label':       meta.get('label', dm.metric_key),
+            'metric_unit':        meta.get('unit', ''),
+            'metric_description': meta.get('description', ''),
+            'value':              float(dm.value) if dm.value is not None else None,
+            'formula_expression': dm.formula_expression,
+            'inputs_used':        dm.inputs_used or {},
+            'confidence':         dm.confidence,
+            'gemini_reasoning':   dm.gemini_reasoning,
+            'candidate_formulas': dm.candidate_formulas or [],
+            'derived_at':         dm.derived_at.isoformat() if dm.derived_at else None,
+            'source':             source,
+        })
+
+    return Response({'metrics': metrics})

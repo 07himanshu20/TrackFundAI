@@ -282,7 +282,11 @@ def ai_insights(request):
     heatmap = []
     sector_data = defaultdict(lambda: {'moics': [], 'irrs': [], 'risks': [], 'count': 0})
 
-    for co in companies_qs[:60]:
+    # No row cap — render every active company in the scoped fund. The
+    # previous [:60] cap was hiding portfolios larger than 60, which
+    # silently truncated both the heatmap AND the sector summary
+    # (sectors that only appeared in companies > 60 were missing).
+    for co in companies_qs:
         inv = Investment.objects.filter(portfolio_company=co).order_by('-investment_date').first()
         val = Valuation.objects.filter(investment__portfolio_company=co).order_by('-valuation_date').first()
         risk = CompanyRiskScore.objects.filter(portfolio_company=co).order_by('-score_date').first()

@@ -186,6 +186,22 @@ body {
 .v5-nav-tab:hover { background: rgba(37,99,235,0.1); color: var(--text); }
 .v5-nav-tab.active { background: var(--accent); color: #fff; }
 
+/* Two-line modifier — used by tabs whose label is intentionally wrapped
+   over two rows (e.g. "Fund\nPerformance", "LP\nManagement"). Keeps the
+   navbar's vertical rhythm tight while permitting the inner <br>. */
+.v5-nav-tab-2line {
+  white-space: normal;
+  line-height: 1.05;
+  padding-top: 3px;
+  padding-bottom: 3px;
+  text-align: left;
+}
+.v5-nav-tab-2line .nav-tab-label {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+}
+
 /* Nav right actions */
 .v5-nav-right {
   display: flex;
@@ -282,6 +298,9 @@ body {
   padding: 0 14px 6px;
   text-transform: uppercase;
   letter-spacing: 0.1em;
+  /* Honor literal newlines in the label string so multi-line section
+     names render as two lines (e.g. "Fund\nPerformance"). */
+  white-space: pre-line;
 }
 
 .v5-sidebar-item {
@@ -2320,4 +2339,139 @@ html:not([data-theme="light"]) .v5-sector-track {
 html:not([data-theme="light"]) .v5-sector-fill {
   background: #3892E8 !important;
   border-radius: 999px;
+}
+
+/* ── Pass 4 Provenance Panel ─────────────────────────────────────────── */
+.prov-overlay {
+  display: none;
+  position: fixed; inset: 0;
+  background: rgba(8,12,22,0.45);
+  z-index: 12000;
+  backdrop-filter: blur(2px);
+}
+.prov-overlay.open { display: block; }
+.prov-panel {
+  position: fixed; top: 0; right: 0;
+  width: 460px; max-width: 92vw; height: 100vh;
+  background: var(--surface, #fff);
+  border-left: 1px solid var(--border, #e2e8f0);
+  box-shadow: -12px 0 32px rgba(8,12,22,0.18);
+  overflow-y: auto;
+  transform: translateX(100%);
+  transition: transform 220ms ease-out;
+  display: flex; flex-direction: column;
+}
+.prov-overlay.open .prov-panel { transform: translateX(0); }
+.prov-head {
+  padding: 18px 22px 14px;
+  border-bottom: 1px solid var(--border, #e2e8f0);
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 14px;
+}
+.prov-eyebrow {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text3, #94a3b8); font-weight: 600;
+}
+.prov-head h3 {
+  margin: 4px 0 2px; font-size: 17px; font-weight: 700;
+  color: var(--text1, #0f172a);
+}
+.prov-sub { font-size: 12px; color: var(--text3, #94a3b8); }
+.prov-close {
+  background: transparent; border: 0; font-size: 26px;
+  cursor: pointer; color: var(--text3, #94a3b8); line-height: 1;
+  padding: 0 4px;
+}
+.prov-close:hover { color: var(--text1, #0f172a); }
+.prov-body { padding: 18px 22px 32px; font-size: 13px; color: var(--text1, #1e293b); }
+.prov-section { margin-bottom: 18px; }
+.prov-section h4 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+  font-weight: 700; color: var(--text2, #475569);
+  margin: 0 0 8px;
+}
+.prov-source-pill {
+  display: inline-block; padding: 3px 10px; border-radius: 999px;
+  font-size: 11px; font-weight: 600;
+}
+.prov-source-pill.derived  { background: rgba(99,102,241,0.12); color: #4338ca; }
+.prov-source-pill.imported { background: rgba(34,197,94,0.12); color: #15803d; }
+.prov-formula {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: rgba(99,102,241,0.06); border: 1px solid rgba(99,102,241,0.18);
+  border-radius: 8px; padding: 10px 12px; font-size: 12px;
+  word-break: break-word; line-height: 1.55; color: var(--text1, #0f172a);
+}
+.prov-value-big {
+  font-size: 28px; font-weight: 800; color: var(--text1, #0f172a);
+  margin-bottom: 2px;
+}
+.prov-value-meta { font-size: 12px; color: var(--text3, #94a3b8); }
+.prov-inputs-table {
+  width: 100%; border-collapse: collapse; font-size: 12px;
+}
+.prov-inputs-table th, .prov-inputs-table td {
+  text-align: left; padding: 6px 8px;
+  border-bottom: 1px solid var(--border, #e2e8f0);
+  vertical-align: top;
+}
+.prov-inputs-table th {
+  font-weight: 600; color: var(--text2, #475569);
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+}
+.prov-inputs-table td.k { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #4338ca; }
+.prov-inputs-table td.v { font-variant-numeric: tabular-nums; }
+.prov-inputs-table td.s { color: var(--text3, #94a3b8); font-size: 11px; }
+.prov-candidate {
+  border: 1px solid var(--border, #e2e8f0); border-radius: 8px;
+  padding: 8px 10px; margin-bottom: 6px;
+}
+.prov-candidate-head {
+  display: flex; justify-content: space-between; gap: 8px;
+  font-size: 12px; font-weight: 600; color: var(--text1, #0f172a);
+}
+.prov-candidate-reason { color: var(--text3, #94a3b8); font-size: 11px; margin-top: 4px; }
+.prov-confidence-bar {
+  height: 6px; background: rgba(99,102,241,0.15);
+  border-radius: 99px; overflow: hidden; margin-top: 6px;
+}
+.prov-confidence-fill {
+  height: 100%; background: linear-gradient(90deg, #4338ca, #6366f1);
+}
+
+/* Click affordance on KPI values backed by provenance */
+.v5-kpi-value.has-prov, .v5-kpi-value[data-prov-key] {
+  cursor: pointer;
+  position: relative;
+}
+.v5-kpi-value[data-prov-key]:hover { opacity: 0.85; }
+
+/* AT-A-GLANCE provenance badge — distinguishes IMPORTED (extracted from
+   Excel cell) vs DERIVED (computed by Gemini Pass 4 formula). The badge
+   sits in the corner of the KPI tile so the user can read every tile's
+   source without clicking. Click still opens the full provenance side-panel. */
+.v5-kpi-value[data-prov-source]::after {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  vertical-align: middle;
+  line-height: 14px;
+  transform: translateY(-3px);
+}
+.v5-kpi-value[data-prov-source="extracted"]::after {
+  content: 'Extracted';
+  background: rgba(34, 197, 94, 0.18);
+  color: #15803d;
+  border: 1px solid rgba(34, 197, 94, 0.35);
+}
+.v5-kpi-value[data-prov-source="derived"]::after {
+  content: 'Derived';
+  background: rgba(99, 102, 241, 0.18);
+  color: #4338ca;
+  border: 1px solid rgba(99, 102, 241, 0.40);
 }

@@ -98,93 +98,130 @@ def _check_rate_limit(user_id: str) -> bool:
 # Database Schema (embedded so Gemini knows exact table/column names)
 # ---------------------------------------------------------------------------
 
-DB_SCHEMA = """
--- Portfolio Companies
-investments_portfoliocompany: id(UUID PK), organization_id(FK→accounts_organization), name(Char), sector(Char), sub_sector(Char), cin(Char), pan(Char), incorporation_date(Date), headquarters_city(Char), is_active(Bool), is_quoted(Bool), listing_exchange(Char), created_at(DateTime)
-
--- Investments (linked via scheme→fund)
-investments_investment: id(UUID PK), scheme_id(FK→funds_scheme), portfolio_company_id(FK→investments_portfoliocompany), company_name(Char), instrument_type(Char choices: equity/ccps/ccd/ncd/preference_shares/warrants), ownership_pct(Decimal), percentage_stake_fully_diluted(Decimal), total_invested(Decimal), investment_date(Date), currency(Char), status(Char choices: active/partially_exited/fully_exited/written_off), sector(Char)
-
--- Tranches
-investments_investmenttranche: id(UUID PK), investment_id(FK), tranche_number(Int), amount(Decimal), date(Date), shares_acquired(Decimal), price_per_share(Decimal), pre_money_valuation(Decimal), post_money_valuation(Decimal), round_name(Char)
-
--- Valuations (IPEV-based fair value per investment)
-investments_valuation: id(UUID PK), investment_id(FK), valuation_date(Date), methodology(Char), fair_value(Decimal), fair_value_of_holding(Decimal), enterprise_value(Decimal), cost_basis(Decimal), unrealized_gain_loss(Decimal), multiple(Decimal), ipev_level(Int)
-
--- KPI Definitions & Values
-investments_kpidefinition: id(UUID PK), organization_id(FK), name(Char), slug(Slug), format(Char), frequency(Char), is_system_kpi(Bool)
-investments_portfoliokpi: id(UUID PK), investment_id(FK), portfolio_company_id(FK), kpi_definition_id(FK), period(Date), value(Decimal), status(Char)
-
--- Company Financials (burn/runway)
-investments_companyfinancials: id(UUID PK), investment_id(FK), portfolio_company_id(FK), period(Date), gross_burn(Decimal), net_burn(Decimal), cash_balance(Decimal), runway_months(Decimal)
-
--- Exit Events
-investments_exitevent: id(UUID PK), investment_id(FK), exit_type(Char choices: ipo/secondary/buyback/strategic_sale/merger/write_off), is_actual(Bool), exit_date(Date), exit_valuation(Decimal), proceeds(Decimal), net_exit_proceeds(Decimal), realized_gain_loss(Decimal), moic(Decimal), irr_pct(Decimal), buyer_name(Char)
-
--- Board Meetings
-investments_boardmeeting: id(UUID PK), investment_id(FK), meeting_date(Date), meeting_type(Char), agenda(Text), minutes_summary(Text), key_decisions(Text)
-
--- ═══════════════════════════════════════════════════════════════
--- FUND METADATA — CRITICAL for fund_info queries
--- ═══════════════════════════════════════════════════════════════
-
--- Funds (AIF fund master — SEBI registration, corpus, structure, entity linkages)
-funds_fund: id(UUID PK), organization_id(FK), name(Char), sebi_registration_number(Char — SEBI AIF reg like IN/AIF2/14-15/0123), fund_category_id(FK→funds_fundcategory), structure_type(Char choices: trust/company/llp), inception_date(Date), corpus_target(Decimal — target corpus in Cr), base_currency(Char default INR), is_gift_city(Bool), fund_status(Char choices: active/closed/winding_up), pan(Char — fund PAN), gstin(Char), manager_entity_id(FK→funds_entity — Investment Manager), trustee_entity_id(FK→funds_entity — Trustee), sponsor_entity_id(FK→funds_entity — Sponsor), custodian_entity_id(FK→funds_entity — Custodian), auditor_entity_id(FK→funds_entity — Statutory Auditor), description(Text)
-
--- Schemes (sub-funds under a Fund — vintage, size, carry, fees, tenure)
-funds_scheme: id(UUID PK), fund_id(FK→funds_fund), name(Char), vintage_year(Int), first_close_date(Date), final_close_date(Date), dissolution_date(Date), scheme_size(Decimal — target size in Cr), tenure_years(Int), hurdle_rate_pct(Decimal — e.g. 8.00), carry_pct(Decimal — e.g. 20.00), carry_type(Char choices: european/american), management_fee_basis(Char choices: committed/called/nav), management_fee_pct(Decimal — e.g. 2.00), sponsor_commitment_pct(Decimal), scheme_status(Char choices: fundraising/investing/harvesting/dissolved), is_active(Bool)
-
--- Fund Categories (SEBI AIF categories)
-funds_fundcategory: id(UUID PK), sebi_category_code(Char — e.g. CAT_I_VCF, CAT_II, CAT_III_LVF), name(Char — e.g. Category II AIF), sub_category(Char — e.g. PE Fund, VCF, Hedge Fund), leverage_permitted(Bool)
-
--- Entities (Investment Manager, Trustee, Custodian, Auditor, etc.)
-funds_entity: id(UUID PK), organization_id(FK), entity_type(Char choices: manager/trustee/sponsor/custodian/statutory_auditor/legal_counsel/registrar/valuer), entity_name(Char), pan(Char), gstin(Char), sebi_registration(Char — SEBI reg number for custodian/manager), contact_person(Char), email(Email), phone(Char), address(Text), city(Char), state(Char), country(Char)
-
--- LP / Investors
-lp_investor: id(UUID PK), organization_id(FK), investor_name(Char), investor_type(Char choices: individual/corporate/hni/fpi/family_office/sovereign_wealth/dfi/bank/insurance/pension/endowment), email(Email), city(Char), country(Char), pan(Char), kyc_status(Char choices: pending/verified/expired/rejected)
-lp_commitment: id(UUID PK), investor_id(FK), scheme_id(FK), commitment_amount(Decimal), commitment_date(Date), units_allocated(Decimal), commitment_status(Char choices: active/redeemed/transferred)
-lp_capitalcall: id(UUID PK), scheme_id(FK), call_number(Int), call_date(Date), payment_due_date(Date), call_percentage(Decimal), total_call_amount(Decimal), call_status(Char choices: draft/sent/partially_received/fully_received/overdue)
-lp_distribution: id(UUID PK), scheme_id(FK), distribution_number(Int), distribution_date(Date), distribution_type(Char choices: income/capital_return/capital_gain/dividend), total_gross_amount(Decimal), total_tds_amount(Decimal), total_net_amount(Decimal), distribution_status(Char)
-lp_lpcapitalaccount: id(UUID PK), commitment_id(FK→lp_commitment), as_of_date(Date), committed_capital(Decimal), called_capital(Decimal), uncalled_capital(Decimal), distributed_capital(Decimal), unrealized_value(Decimal), total_value(Decimal), irr(Decimal), tvpi(Decimal), dpi(Decimal), rvpi(Decimal), moic(Decimal)
-
--- Accounting
-accounting_navrecord: id(UUID PK), scheme_id(FK), nav_date(Date), total_nav(Decimal), total_units_outstanding(Decimal), nav_per_unit(Decimal), investments_at_fair_value(Decimal), cash_and_equivalents(Decimal), receivables(Decimal), management_fee_payable(Decimal), other_liabilities(Decimal), unrealized_gains(Decimal), realized_gains(Decimal)
-accounting_carriedinterest: id(UUID PK), scheme_id(FK), calculation_date(Date), total_distributions(Decimal), total_called_capital(Decimal), preferred_return_amount(Decimal), profit_above_hurdle(Decimal), carry_amount_gross(Decimal), carry_amount_net(Decimal), carry_escrow_balance(Decimal)
-accounting_fundledger: id(UUID PK), scheme_id(FK), entry_date(Date), description(Char), amount(Decimal), reference_type(Char choices: capital_call/investment/distribution/management_fee/carried_interest/valuation_adjustment/expense/other)
-accounting_managementfeeschedule: id(UUID PK), scheme_id(FK), period_start(Date), period_end(Date), fee_basis_amount(Decimal), fee_rate(Decimal), fee_amount(Decimal), fee_status(Char choices: draft/approved/invoiced/paid)
-
--- Compliance
-compliance_sebireport: id(UUID PK), fund_id(FK), scheme_id(FK), report_type(Char choices: qar/aar/ctr/annual_return), due_date(Date), filing_status(Char choices: pending/filed/overdue), filed_date(Date)
-compliance_compliancecalendar: id(UUID PK), organization_id(FK), fund_id(FK), title(Char), due_date(Date), status(Char choices: pending/completed/overdue), completed_date(Date)
-compliance_equitythresholdalert: id(UUID PK), investment_id(FK), threshold_breached(Bool), breach_date(Date), stake_percentage(Decimal), severity(Char), resolved(Bool)
-compliance_fundcompliancescore: id(UUID PK), fund_id(FK), score_date(Date), combined_score(Decimal)
-compliance_femacompliance: id(UUID PK), investment_id(FK), fema_status(Char), filing_date(Date)
-
--- MIS / Budget vs Actual
-mis_consolidation_budgetvsactual: id(UUID PK), portfolio_company_id(FK), fund_id(FK), organization_id(FK), period_year(Int), period_month(Int), line_item(Char choices: revenue/ebitda/pat/cogs/employee_cost/total_opex/depreciation/interest/tax/other_income/other_expense), budget_inr(Decimal), actual_inr(Decimal), variance_inr(Decimal), variance_pct(Decimal), is_favorable(Bool)
-mis_consolidation_consolidatedmis: id(UUID PK), organization_id(FK), fund_id(FK), period_year(Int), period_month(Int), line_item(Char), total_actual_inr(Decimal), total_budget_inr(Decimal), company_count(Int)
-mis_consolidation_misanomalyalert: id(UUID PK), organization_id(FK), fund_id(FK), alert_type(Char), severity(Char), description(Text), is_resolved(Bool)
-
--- IC Workflow / Deal Pipeline
-ic_workflow_dealpipeline: id(UUID PK), organization_id(FK), fund_id(FK), company_name(Char), sector(Char), stage(Char choices: sourced/initial_screen/deep_dive/term_sheet/ic_presentation/approved/rejected/closed/passed), proposed_investment_inr(Decimal), sourced_date(Date)
-
--- Data Import Files (tracks uploaded Excel files)
-dataimport_importjob: id(UUID PK), organization_id(FK), status(Char choices: pending/processing/completed/completed_with_errors/failed), total_files(Int), result_summary(JSON), created_at(DateTime), completed_at(DateTime)
-dataimport_importfile: id(UUID PK), job_id(FK→dataimport_importjob), original_filename(Char), file_size(Int), status(Char), fund_id(FK→funds_fund NULL), fund_name(Char), sheet_names(JSON — list of sheet names in the Excel), column_mapping(JSON — Gemini column mapping), created_at(DateTime)
-
--- ═══════════════════════════════════════════════════════════════
--- KEY RELATIONSHIPS & QUERY PATTERNS
--- ═══════════════════════════════════════════════════════════════
--- investments_investment.scheme_id → funds_scheme.id → funds_scheme.fund_id → funds_fund.id → funds_fund.organization_id
--- investments_investment.portfolio_company_id → investments_portfoliocompany.id
--- To get companies for a fund: JOIN investments_investment i ON i.scheme_id = s.id JOIN funds_scheme s ON s.fund_id = f.id WHERE f.id = X
--- To get fund metadata (SEBI reg, corpus, manager): SELECT f.*, fc.name AS category, me.entity_name AS manager FROM funds_fund f LEFT JOIN funds_fundcategory fc ON f.fund_category_id=fc.id LEFT JOIN funds_entity me ON f.manager_entity_id=me.id
--- To get trustee/custodian: JOIN funds_entity te ON f.trustee_entity_id=te.id / ce ON f.custodian_entity_id=ce.id
--- To get total committed capital for a fund: SUM(lp_commitment.commitment_amount) WHERE scheme_id IN (SELECT id FROM funds_scheme WHERE fund_id=X)
--- To get latest NAV: SELECT * FROM accounting_navrecord WHERE scheme_id IN (...) ORDER BY nav_date DESC LIMIT 1
--- To get latest capital call: SELECT * FROM lp_capitalcall WHERE scheme_id IN (...) ORDER BY call_date DESC LIMIT 1
--- All amounts in Cr (Crores INR) unless from mis_consolidation tables (those are in Lakhs).
+# Static cross-table query hints that auto-introspection genuinely cannot
+# derive — they describe application-level conventions (unit denomination,
+# canonical JOIN paths) that live in business knowledge, not in the ORM.
+# Kept tiny on purpose. Per-field business annotations are deliberately
+# OMITTED (we will add them surgically only if Gemini is observed to
+# misinterpret a specific field — never speculatively).
+_QUERY_HINTS = """\
+-- KEY CONVENTIONS (application-level, not derivable from ORM introspection):
+-- • All monetary amounts are in INR Crore (₹ Cr) UNLESS the column lives in a
+--   mis_consolidation_* table — those values are in Lakhs.
+-- • UUIDs are stored WITHOUT hyphens in the DB.
+-- • Canonical JOIN path for fund-scoped data:
+--      investments_investment.scheme_id → funds_scheme.id → funds_scheme.fund_id → funds_fund.id → funds_fund.organization_id
+-- • Common queries:
+--      Companies in a fund: JOIN investments_investment i ON i.scheme_id = s.id JOIN funds_scheme s ON s.fund_id = f.id WHERE f.id = X
+--      Latest NAV per scheme: SELECT * FROM accounting_navrecord WHERE scheme_id = X ORDER BY nav_date DESC LIMIT 1
+--      Total commitment per fund: SUM(lp_commitment.commitment_amount) WHERE scheme_id IN (SELECT id FROM funds_scheme WHERE fund_id=X)
 """
+
+
+# Auto-generated schema cache — built once per process lifetime.
+_DB_SCHEMA_CACHE = None
+# Apps deliberately excluded from the schema (Django internals, auth scaffolding,
+# transient stores). Add to this set if a new internal app is added.
+_DB_SCHEMA_EXCLUDED_APPS = {
+    # Django internals / scaffolding
+    'admin', 'auth', 'contenttypes', 'sessions', 'messages',
+    'sites', 'staticfiles', 'humanize',
+    # Third-party transient/infra tables — not business data the chatbot
+    # should answer questions about
+    'django_celery_beat', 'django_celery_results',
+}
+
+
+def _format_field(field) -> str:
+    """Render one model field as 'colname(Type[, extras])' for the schema string.
+
+    Pulls everything from Django's field metadata — no hand-written types,
+    no hand-written FK target tables, no hand-written choice lists. If the
+    field is added/removed/renamed in a model, this output updates on the
+    next process restart with zero human effort.
+    """
+    from django.db import models
+    col = field.column
+    type_name = field.get_internal_type()  # e.g. CharField, DecimalField, ForeignKey
+    extras = []
+
+    # ForeignKey → 'FK→<target_table>'
+    if isinstance(field, models.ForeignKey):
+        try:
+            target_table = field.related_model._meta.db_table
+            extras.append(f'FK→{target_table}')
+        except Exception:
+            pass
+
+    # choices=(('a','A'), …) → 'choices: a/b/c'
+    if getattr(field, 'choices', None):
+        choice_keys = '/'.join(str(c[0]) for c in field.choices)
+        extras.append(f'choices: {choice_keys}')
+
+    # NULL-able vs required
+    if getattr(field, 'primary_key', False):
+        extras.append('PK')
+    elif getattr(field, 'null', False):
+        extras.append('nullable')
+
+    extras_str = (' ' + ', '.join(extras)) if extras else ''
+    return f'{col}({type_name}{extras_str})'
+
+
+def _build_db_schema_from_django_models() -> str:
+    """Introspect every installed Django app and emit a schema string Gemini
+    can use to write correct SQL.
+
+    Universal: zero hardcoded table names, zero hardcoded column lists. Any
+    table that exists in the current Django app registry is described; any
+    table that does NOT exist is automatically absent. Adding a new model
+    requires zero changes here — the next process restart picks it up.
+    """
+    from django.apps import apps
+    lines = []
+    # Group by app for readability
+    by_app = {}
+    for model in apps.get_models():
+        if model._meta.app_label in _DB_SCHEMA_EXCLUDED_APPS:
+            continue
+        by_app.setdefault(model._meta.app_label, []).append(model)
+
+    for app_label in sorted(by_app):
+        lines.append(f'\n-- App: {app_label}')
+        for model in sorted(by_app[app_label], key=lambda m: m._meta.db_table):
+            table = model._meta.db_table
+            field_strs = []
+            for field in model._meta.get_fields():
+                # Skip reverse-side relations (ManyToOneRel, OneToOneRel) — they
+                # are not real columns. Only render fields that have a `column`
+                # attribute (= actual DB columns).
+                if not hasattr(field, 'column') or field.column is None:
+                    continue
+                try:
+                    field_strs.append(_format_field(field))
+                except Exception:
+                    continue
+            if field_strs:
+                lines.append(f'{table}: ' + ', '.join(field_strs))
+    return '\n'.join(lines)
+
+
+def get_db_schema() -> str:
+    """Return the schema string for Gemini prompts.
+
+    Cached for the process lifetime — schema introspection happens once on
+    first call, then re-uses the cached string for every subsequent chatbot
+    query. To force a rebuild (e.g. after a `migrate` in dev), reset the
+    module-level _DB_SCHEMA_CACHE to None.
+    """
+    global _DB_SCHEMA_CACHE
+    if _DB_SCHEMA_CACHE is None:
+        _DB_SCHEMA_CACHE = (
+            _build_db_schema_from_django_models()
+            + '\n\n'
+            + _QUERY_HINTS
+        )
+    return _DB_SCHEMA_CACHE
 
 
 # ---------------------------------------------------------------------------
@@ -1006,8 +1043,43 @@ def build_sql_query(query: str, intent: str, context: Dict, time_filter: Optiona
         genai.configure(api_key=settings.GEMINI_API_KEY)
         model = genai.GenerativeModel(getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash'))
 
-        db_engine = settings.DATABASES.get('default', {}).get('ENGINE', '')
-        db_type = 'SQLite' if 'sqlite' in db_engine else 'PostgreSQL'
+        # ── Dialect awareness (Postgres-ready, SQLite-compatible today) ──
+        # `connection.vendor` is Django's portable way to identify the active
+        # database engine — 'sqlite', 'postgresql', 'mysql', 'oracle'. It
+        # reflects whatever DATABASES['default']['ENGINE'] is set to, so this
+        # code adapts automatically the day we migrate to PostgreSQL. Gemini
+        # is told the dialect explicitly and given the dialect's syntax rails.
+        from django.db import connection as _conn
+        vendor = _conn.vendor  # 'sqlite' or 'postgresql' (or 'mysql' / 'oracle')
+        db_type = {
+            'sqlite':     'SQLite',
+            'postgresql': 'PostgreSQL',
+            'mysql':      'MySQL',
+            'oracle':     'Oracle',
+        }.get(vendor, vendor.title())
+
+        # Dialect-specific syntax to AVOID (asymmetric — what's natural in
+        # one dialect breaks the other). Updated to match the active DB so
+        # the warning is always for the wrong-dialect features, never for
+        # features Gemini could legitimately use.
+        if vendor == 'sqlite':
+            dialect_warnings = (
+                "Do NOT use PostgreSQL-only constructs: DISTINCT ON, "
+                "FILTER (WHERE ...), LATERAL joins, ::type casts, ILIKE, "
+                "or array/JSONB operators. Use standard SQL only."
+            )
+        elif vendor == 'postgresql':
+            dialect_warnings = (
+                "Do NOT use SQLite-only constructs: STRFTIME(), DATETIME(), "
+                "JULIANDAY(), `||` for date math, or relying on type "
+                "affinity. Use standard PostgreSQL syntax (TO_CHAR, EXTRACT, "
+                "DATE_TRUNC, AGE)."
+            )
+        else:
+            dialect_warnings = (
+                f"Use standard SQL features compatible with {db_type}; "
+                "avoid vendor-specific extensions."
+            )
 
         prompt = f"""You are a SQL query builder for a {db_type} database powering TrackFundAI, a fund management platform for Indian AIFs.
 Generate a read-only SELECT query to answer the user's question.
@@ -1015,7 +1087,7 @@ Generate a read-only SELECT query to answer the user's question.
 USER QUESTION: "{query}"
 
 DATABASE SCHEMA:
-{DB_SCHEMA}
+{get_db_schema()}
 
 QUERY CONTEXT:
 Intent: {intent}
@@ -1032,7 +1104,7 @@ IMPORTANT: UUIDs in this database are stored WITHOUT hyphens (e.g., '{context['o
 MANDATORY RULES:
 1. ONLY use SELECT statements — never INSERT, UPDATE, DELETE, DROP
 2. ALWAYS filter by organization: use organization_id directly or via JOINs through fund→scheme→investment
-3. Maximum LIMIT 50
+3. LIMIT policy — DO NOT add an arbitrary safety LIMIT. The runtime applies a memory cap separately. Use LIMIT only when the user's question itself implies one ("top 10", "first 5", "latest 3"). For "list all", "show every", "breakdown by", "how many in each" — emit NO LIMIT clause.
 4. Use proper JOINs to traverse: investment → scheme → fund → organization
 5. Return ONLY the raw SQL query text, no markdown, no explanation
 6. If you truly cannot build a safe query, return exactly: CANNOT_ANSWER
@@ -1040,9 +1112,11 @@ MANDATORY RULES:
 8. For aggregations, include both the aggregate and GROUP BY columns
 9. Prefer LEFT JOIN over INNER JOIN to avoid losing data
 10. All monetary amounts are in Cr (Crores) unless from mis_consolidation tables (those are in Lakhs)
-11. Do NOT use PostgreSQL-specific syntax like DISTINCT ON, FILTER, LATERAL. Use standard SQL or {db_type}-compatible syntax only.
-12. For "latest record per group" use ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...) in a subquery, not DISTINCT ON.
+11. {dialect_warnings}
+12. For "latest record per group" use ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...) in a subquery — this works in every dialect.
 13. Keep queries simple — avoid unnecessary complexity.
+14. If the user mentions a category / sector / status / type word (e.g. "healthcare", "financial", "active", "exited"), translate it into a WHERE filter on the appropriate column using ILIKE / LIKE — never ignore it.
+15. For detail (row-listing) queries, ORDER BY a deterministic, non-null column such as the entity name (pc.name, inv.investor_name, etc.) — never order by a column that may be all-NULL or all-zero, which makes truncation non-deterministic.
 
 INTENT-SPECIFIC GUIDANCE:
 - fund_info: Query funds_fund + funds_fundcategory + funds_entity (via manager_entity_id, trustee_entity_id, custodian_entity_id, etc.) + funds_scheme. If entity name is mentioned, filter by f.name ILIKE '%entity%'. If fund_id is given, use WHERE f.id = 'fund_id'.
@@ -1094,23 +1168,229 @@ def _is_sql_safe(sql: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Dual-SQL Builder — aggregate (truth) + detail (sample)
+# ---------------------------------------------------------------------------
+#
+# Why two queries per turn:
+#   The single-query approach forced one SQL to answer both "how many X in
+#   total" and "give me the rows" at once. The result was always biased: a
+#   LIMIT N detail query never carries the true counts, and renderers that
+#   summarized from the truncated rows hallucinated ("20 financial companies"
+#   when the DB had 30; "all are Consumer & Retail" when 4 sectors existed).
+#
+#   Splitting into two queries gives the renderer separate authoritative
+#   sources: the aggregate is the truth for any count / distribution claim;
+#   the detail is the rows the user wants to inspect, scoped strictly by
+#   their filter words. Neither steps on the other.
+#
+# Both queries:
+#   • Are generated by Gemini in a single call (returns JSON {aggregate_sql,
+#     detail_sql, grouping_dimension}) — no keyword templates, no regex.
+#   • Honor the natural-language filter words from the user query as WHERE
+#     clauses (e.g. "healthcare" → WHERE pc.sector ILIKE '%healthcare%').
+#   • Pass through _is_sql_safe() before execution.
+
+def build_aggregate_and_detail_sql(
+    query: str, intent: str, context: Dict,
+    time_filter: Optional[str], entity: Optional[str],
+) -> Optional[Dict[str, Optional[str]]]:
+    """Return {'aggregate_sql': str|None, 'detail_sql': str|None, 'grouping_dimension': str|None}.
+
+    aggregate_sql: GROUP BY query producing authoritative counts/sums for
+        the grouping dimension implied by the user's question. MUST NOT
+        apply the user's category filter — it shows the FULL distribution
+        so the renderer knows what categories exist and how many rows each
+        has. If the question is purely scalar ("what is total NAV?"), this
+        is the fund-wide aggregate without GROUP BY.
+    detail_sql: row-level query that DOES apply the user's category filter.
+        Used to surface the specific rows the user asked about. May be NULL
+        when the user only wanted aggregates ("breakdown by sector").
+    grouping_dimension: human-readable name of the dimension grouped on
+        (e.g. "sector", "investor_type"). NULL when no grouping applies.
+    """
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=settings.GEMINI_API_KEY)
+        model = genai.GenerativeModel(getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash'))
+
+        from django.db import connection as _conn
+        vendor = _conn.vendor
+        db_type = {
+            'sqlite':     'SQLite',
+            'postgresql': 'PostgreSQL',
+            'mysql':      'MySQL',
+            'oracle':     'Oracle',
+        }.get(vendor, vendor.title())
+
+        if vendor == 'sqlite':
+            dialect_note = "SQLite — use LIKE not ILIKE; LIKE in SQLite is case-insensitive by default for ASCII."
+        elif vendor == 'postgresql':
+            dialect_note = "PostgreSQL — use ILIKE for case-insensitive matching."
+        else:
+            dialect_note = f"{db_type} — use standard SQL only."
+
+        prompt = f"""You are a SQL planner for a {db_type} database powering TrackFundAI, a fund management platform for Indian AIFs.
+
+USER QUESTION: "{query}"
+
+INTENT: {intent}
+FUND ID:    {context.get('fund_id') or 'not specified — query across all funds in the org'}
+ORG ID:     {context['organization_id']}
+COMPANY ID: {context.get('company_id') or 'not specified'}
+ENTITY MENTIONED IN QUERY: {entity or 'none'}
+TIME FILTER: {time_filter or 'most recent / all-time'}
+
+DATABASE SCHEMA:
+{get_db_schema()}
+
+YOUR JOB
+========
+Produce TWO complementary SELECT queries that together answer the question accurately, with no sampling bias:
+
+1. aggregate_sql — the AUTHORITATIVE TRUTH query.
+   • Groups by the dimension the user's question implies (sector, investor_type, instrument_type, status, exit_type, etc.).
+   • Returns per-group COUNTs / SUMs across the full scoped dataset.
+   • MUST NOT apply the user's category filter (e.g. don't filter to just "healthcare") — it must show the FULL distribution so the renderer knows every group and its true size. The filter belongs in detail_sql only.
+   • If the question has NO natural grouping (e.g. "what is the total NAV?" — a scalar query), aggregate_sql is the fund-wide SUM/COUNT without GROUP BY.
+   • Emit NO LIMIT — the natural cardinality of GROUP BY is the bound. (Runtime has a memory safety cap.)
+   • Always include organization/fund scoping in the WHERE.
+
+2. detail_sql — the FILTERED ROW LIST.
+   • Selects the per-row columns the user wants to see (name, dates, values, etc.).
+   • Applies the user's category filter using LIKE/ILIKE on the appropriate text column (per dialect: {dialect_note}).
+   • If the user said "list all" / "show every" — NO LIMIT clause. If the user said "top N" / "first N" / "latest N" — use LIMIT N exactly. Otherwise emit NO LIMIT.
+   • ORDER BY a deterministic, non-null column such as the entity name (pc.name, inv.investor_name, ee.exit_date). NEVER order by a column that may be all-NULL or all-zero (e.g. fair_value when valuations are absent), because that makes any cap non-deterministic and hides rows arbitrarily.
+   • If the question is purely about aggregates ("breakdown by X", "how many Y in each Z"), detail_sql may be NULL.
+
+3. grouping_dimension — short human label for the dimension you grouped on (e.g. "sector", "investor_type", "exit_type"), or null when no grouping.
+
+HARD RULES
+==========
+• Only SELECT — no DML/DDL.
+• Always scope to organization/fund via the canonical JOIN: scheme → fund → organization.
+• UUIDs are stored WITHOUT hyphens.
+• All monetary columns are in INR Crore (Cr) unless the table starts with mis_consolidation_ (those are Lakhs).
+• Use standard SQL compatible with {db_type}.
+• {dialect_note}
+• If you genuinely cannot construct a safe pair, return both fields as null.
+
+RETURN FORMAT — JSON ONLY, no markdown fences:
+{{
+  "aggregate_sql": "SELECT ...",
+  "detail_sql": "SELECT ...",
+  "grouping_dimension": "sector"
+}}
+"""
+        response = model.generate_content(prompt)
+        text = response.text.strip()
+        text = re.sub(r'^```(?:json)?\s*', '', text)
+        text = re.sub(r'\s*```$', '', text)
+        parsed = json.loads(text)
+
+        agg = parsed.get('aggregate_sql')
+        det = parsed.get('detail_sql')
+        dim = parsed.get('grouping_dimension')
+
+        # Validate each independently — one may be null by design.
+        if agg and not _is_sql_safe(agg):
+            logger.warning(f'Unsafe aggregate SQL rejected: {agg[:200]}')
+            agg = None
+        if det and not _is_sql_safe(det):
+            logger.warning(f'Unsafe detail SQL rejected: {det[:200]}')
+            det = None
+
+        return {'aggregate_sql': agg, 'detail_sql': det, 'grouping_dimension': dim}
+    except Exception as e:
+        logger.warning(f'Dual-SQL builder error: {e}')
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Data Fetcher
 # ---------------------------------------------------------------------------
 
-def execute_query(sql: str, max_rows: int = 50) -> Tuple[List[str], List[tuple]]:
+# Safety cap on rows fetched per query. NOT a presentation cap and NOT
+# auto-injected as a LIMIT clause. Exists only to keep a runaway query from
+# streaming millions of rows into memory. Real GROUP BY aggregates almost
+# never exceed a few hundred groups; real per-fund detail queries
+# (companies, LPs, NAV history) are likewise typically well below this. If
+# the cap is hit, `meta['truncated']` is set and render_response() tells
+# Gemini explicitly that the visible rows are a partial slice.
+ROW_SAFETY_CAP = 2000
+
+
+def execute_query(sql: str, max_rows: int = ROW_SAFETY_CAP) -> Tuple[List[str], List[tuple]]:
+    """Run Gemini-generated SQL and return (columns, rows).
+
+    Backward-compatible 2-tuple return. For truncation metadata use
+    execute_query_with_meta().
+    """
+    cols, rows, _ = execute_query_with_meta(sql, max_rows=max_rows)
+    return cols, rows
+
+
+def execute_query_with_meta(sql: str, max_rows: int = ROW_SAFETY_CAP) -> Tuple[List[str], List[tuple], Dict]:
+    """Run SQL with truncation detection.
+
+    Does NOT force-inject a LIMIT clause. Whatever LIMIT the SQL itself
+    contains (or doesn't contain) is honored; the executor only enforces a
+    memory safety cap of max_rows. The previous behavior — auto-appending
+    `LIMIT 50` to every Gemini-generated query — was the root of the "20 of
+    30 financial companies visible" class of bug: a sector-clustered
+    insertion order would systematically hide later groups beneath the
+    arbitrary 50-row cap.
+    """
+    meta = {'truncated': False, 'true_count': None}
     if not sql or not _is_sql_safe(sql):
-        return [], []
-    if 'limit' not in sql.lower():
-        sql = sql.rstrip(';') + f' LIMIT {max_rows}'
+        return [], [], meta
     try:
         with connection.cursor() as cursor:
             cursor.execute(sql)
             columns = [col[0] for col in cursor.description] if cursor.description else []
-            rows = cursor.fetchmany(max_rows)
-        return columns, rows
+            # Fetch one extra row past the safety cap so we can detect when
+            # the real result set is bigger than what we kept.
+            rows = cursor.fetchmany(max_rows + 1)
+        if len(rows) > max_rows:
+            meta['truncated'] = True
+            rows = rows[:max_rows]
+        return columns, rows, meta
     except Exception as e:
         logger.warning(f'SQL execution error: {e} | SQL: {sql[:200]}')
-        return [], []
+        return [], [], meta
+
+
+def _build_dataset_profile(columns: List[str], rows: List[tuple]) -> str:
+    """Compute a faithful distinct-value frequency profile from the FULL
+    returned rows (not just the first 25 the prompt shows).
+
+    For each column with <= 20 distinct values, list every value with its
+    visible-sample count.  For high-cardinality columns (names, dates),
+    just report the cardinality.  This gives Gemini the TRUE distribution
+    of the visible data, so it cannot wrongly claim "all are X" based on
+    a sample-window slice.
+    """
+    if not rows or not columns:
+        return '(no data)'
+    lines = []
+    for ci, cname in enumerate(columns):
+        vals = [r[ci] for r in rows if r[ci] is not None]
+        if not vals:
+            lines.append(f'  {cname}: all NULL ({len(rows)} rows)')
+            continue
+        unique = {}
+        for v in vals:
+            key = str(v) if not isinstance(v, str) else v
+            unique[key] = unique.get(key, 0) + 1
+            if len(unique) > 21:
+                break
+        if len(unique) <= 20:
+            # Low cardinality — full breakdown
+            sorted_vals = sorted(unique.items(), key=lambda kv: -kv[1])
+            shown = ', '.join(f'"{k}"={v}' for k, v in sorted_vals)
+            lines.append(f'  {cname} ({len(unique)} distinct): {shown}')
+        else:
+            lines.append(f'  {cname}: {len(unique)}+ distinct values (high cardinality — sample-only)')
+    return '\n'.join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -1125,30 +1405,61 @@ CHART_INTENTS = {
 }
 
 
-def _suggest_chart(intent: str, columns: List[str], rows: List[tuple], query: str) -> Optional[Dict]:
-    """Decide if a chart would help and return chart config if so."""
-    if intent not in CHART_INTENTS or len(rows) < 2:
+def _suggest_chart(
+    intent: str, columns: List[str], rows: List[tuple], query: str,
+    agg_columns: Optional[List[str]] = None,
+    agg_rows: Optional[List[tuple]] = None,
+    grouping_dimension: Optional[str] = None,
+) -> Optional[Dict]:
+    """Decide if a chart would help and return chart config if so.
+
+    The aggregate result (already grouped & summed across the full scoped
+    dataset) is preferred whenever it has 2+ groups — that is the chart
+    that actually answers "show me the breakdown" without the sample-bias
+    that plagued the prior chart logic. If the aggregate is scalar (1 row
+    of totals) or absent, we fall back to the detail rows.
+    """
+    if intent not in CHART_INTENTS:
+        return None
+
+    # Choose source: prefer aggregate when it has >= 2 groups (i.e. a real
+    # breakdown). Otherwise fall back to detail rows. This makes the chart
+    # mirror the same TRUTH the renderer used, not a truncated slice.
+    if agg_rows and agg_columns and len(agg_rows) >= 2:
+        src_cols, src_rows = agg_columns, agg_rows
+        from_aggregate = True
+    elif rows and len(rows) >= 2:
+        src_cols, src_rows = columns, rows
+        from_aggregate = False
+    else:
         return None
 
     label_col = None
     num_cols = []
-    for i, col in enumerate(columns):
-        sample_vals = [r[i] for r in rows[:5] if r[i] is not None]
+    for i, col in enumerate(src_cols):
+        sample_vals = [r[i] for r in src_rows[:5] if r[i] is not None]
         if sample_vals and all(isinstance(v, (int, float)) or _is_numeric(v) for v in sample_vals):
             num_cols.append(i)
-        elif not label_col and sample_vals:
+        elif label_col is None and sample_vals:
             label_col = i
 
     if label_col is None or not num_cols:
         return None
 
-    labels = [str(r[label_col] or '')[:30] for r in rows[:20]]
+    # Chart breadth: aggregate is already condensed → show all groups.
+    # Detail can be long → cap visual width.
+    visual_cap = len(src_rows) if from_aggregate else min(len(src_rows), 20)
+
+    labels = [str(r[label_col] or '')[:30] for r in src_rows[:visual_cap]]
 
     datasets = []
     colors = ['#00d4ff', '#7c3aed', '#10b981', '#f59e0b', '#ef4444', '#3b82f6']
     for idx, ci in enumerate(num_cols[:3]):
-        col_name = columns[ci]
-        values = [float(r[ci]) if r[ci] is not None and _is_numeric(r[ci]) else 0 for r in rows[:20]]
+        col_name = src_cols[ci]
+        values = [
+            float(r[ci]) if r[ci] is not None and _is_numeric(r[ci]) else 0
+            for r in src_rows[:visual_cap]
+        ]
         datasets.append({
             'label': col_name.replace('_', ' ').title(),
             'data': values,
@@ -1160,17 +1471,18 @@ def _suggest_chart(intent: str, columns: List[str], rows: List[tuple], query: st
     if any(kw in q_lower for kw in ['trend', 'over time', 'history', 'monthly', 'quarterly']):
         chart_type = 'line'
     elif any(kw in q_lower for kw in ['distribution', 'breakdown', 'split', 'mix', 'composition', 'proportion']):
-        chart_type = 'doughnut' if len(rows) <= 8 else 'bar'
+        chart_type = 'doughnut' if len(src_rows) <= 8 else 'bar'
     elif any(kw in q_lower for kw in ['compare', 'comparison', 'vs', 'versus']):
         chart_type = 'bar'
-    elif len(rows) <= 6 and len(num_cols) == 1:
+    elif len(src_rows) <= 6 and len(num_cols) == 1:
         chart_type = 'doughnut'
 
+    title_base = (grouping_dimension or src_cols[label_col]).replace('_', ' ').title()
     return {
         'type': chart_type,
         'labels': labels,
         'datasets': datasets,
-        'title': columns[label_col].replace('_', ' ').title() + ' Analysis',
+        'title': f'{title_base} Breakdown' if from_aggregate else f'{title_base} Analysis',
     }
 
 
@@ -1188,17 +1500,75 @@ def _is_numeric(val) -> bool:
 # Response Renderer
 # ---------------------------------------------------------------------------
 
-def render_response(query: str, intent: str, columns: List[str], rows: List[tuple], context: Dict) -> str:
-    if not rows:
+def render_response(
+    query: str, intent: str, columns: List[str], rows: List[tuple],
+    context: Dict, meta: Optional[Dict] = None,
+    agg_columns: Optional[List[str]] = None,
+    agg_rows: Optional[List[tuple]] = None,
+    agg_meta: Optional[Dict] = None,
+    grouping_dimension: Optional[str] = None,
+) -> str:
+    """Generate the user-facing prose answer.
+
+    Two result sets are supported:
+      • aggregate (agg_columns/agg_rows) — authoritative TRUTH from a
+        GROUP BY / aggregate query that scanned the full scoped dataset.
+        Used for every count / distribution / "how many" claim.
+      • detail (columns/rows) — the filtered row list the user wants to
+        inspect (e.g. only the healthcare companies). Used to name and
+        quote individual entities.
+
+    Either may be empty; if both are empty we fall back. The renderer
+    forwards `truncated` flags so Gemini never overclaims on a partial
+    sample.
+    """
+    if not rows and not agg_rows:
         return _fallback_response(intent, context, query)
+
+    meta = meta or {}
+    agg_meta = agg_meta or {}
+    detail_truncated = bool(meta.get('truncated'))
+    agg_truncated = bool(agg_meta.get('truncated'))
 
     try:
         import google.generativeai as genai
         genai.configure(api_key=settings.GEMINI_API_KEY)
         model = genai.GenerativeModel(getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash'))
 
-        data_str = ' | '.join(columns) + '\n'
-        data_str += '\n'.join(' | '.join(str(v) for v in row) for row in rows[:25])
+        # ── TRUE TOTALS block (aggregate) ────────────────────────
+        if agg_columns and agg_rows:
+            truth_str = ' | '.join(agg_columns) + '\n'
+            truth_str += '\n'.join(' | '.join(str(v) for v in row) for row in agg_rows)
+            truth_count_note = (
+                f'Aggregate scanned the FULL scoped dataset and produced {len(agg_rows)} group(s)'
+                + (' (capped — there are more groups than shown).' if agg_truncated else '.')
+            )
+            if grouping_dimension:
+                truth_count_note += f' Grouping dimension: **{grouping_dimension}**.'
+        else:
+            truth_str = '(no aggregate query was applicable for this question)'
+            truth_count_note = ''
+
+        # ── DETAIL SAMPLE block ──────────────────────────────────
+        if columns and rows:
+            sample_preview_limit = 25
+            sample_str = ' | '.join(columns) + '\n'
+            sample_str += '\n'.join(' | '.join(str(v) for v in row) for row in rows[:sample_preview_limit])
+            profile_str = _build_dataset_profile(columns, rows)
+            if detail_truncated:
+                detail_visibility = (
+                    f'DETAIL VISIBILITY WARNING: the detail query returned MORE rows '
+                    f'than the {len(rows)}-row memory safety cap. The visible rows are '
+                    f'a partial slice — for any total / count claim, USE TRUE TOTALS only.'
+                )
+            else:
+                detail_visibility = (
+                    f'DETAIL is COMPLETE: all {len(rows)} matching detail rows are shown.'
+                )
+        else:
+            sample_str = '(no detail rows — the question was answered purely by the aggregate)'
+            profile_str = '(n/a)'
+            detail_visibility = ''
 
         prompt = f"""You are a senior financial analyst AI assistant for TrackFundAI, a portfolio management platform for Indian AIFs (Alternative Investment Funds).
 
@@ -1207,28 +1577,58 @@ You are speaking with {context.get('user_name', 'the user')} (address them as "{
 User asked: "{query}"
 Fund context: {context.get('fund_name') or 'All funds'}
 
-Data retrieved ({len(rows)} rows, {len(columns)} columns):
-{data_str}
+═══════════════════════════════════════════════════════════════════
+TRUE TOTALS (AUTHORITATIVE — scanned the full scoped dataset)
+═══════════════════════════════════════════════════════════════════
+{truth_count_note}
 
-Provide a clear, professional response that:
-1. Directly answers {context.get('user_first_name', 'the user')}'s question using the data above — lead with the answer, not filler
-2. Highlights key numbers — use bold (**value**) for important figures
-3. For INR amounts, format as Rs.XX.XX Cr or Rs.XX.XX L (avoid raw decimals)
-4. Notes any important trends, anomalies, or concerns visible in the data
-5. If the data shows multiple records, summarize with a brief analysis (top performers, outliers, averages)
-6. Use markdown formatting: **bold** for emphasis, bullet points for lists
-7. Keep it concise (3-6 sentences for simple queries, more for complex analysis)
-8. If comparing data, provide percentage differences
-9. End with a brief insight or recommendation if relevant
-10. If the data includes NULL or None values, note what information is missing
+{truth_str}
 
-Do NOT include raw tables in the response — integrate numbers into prose. Do NOT say "based on the data" or "according to the query". Do NOT repeat the question back. Do NOT address the user as a company, firm, or organization — only by their personal name."""
+═══════════════════════════════════════════════════════════════════
+DETAIL SAMPLE (the rows matching the user's filter, for naming / quoting)
+═══════════════════════════════════════════════════════════════════
+{detail_visibility}
+
+{sample_str}
+
+DETAIL PROFILE (distinct-value frequencies across the {len(rows)} detail rows shown):
+{profile_str}
+
+═══════════════════════════════════════════════════════════════════
+ANSWERING RULES — read carefully. The prior renderer hallucinated counts because it conflated SAMPLE with TRUTH.
+
+A. AUTHORITY ORDER (this is the single most important rule)
+   1. For ANY "how many X", "count of Y", "breakdown by Z", "all the W",
+      "what percentage", "what sectors / types / categories exist" claim
+      → use TRUE TOTALS. ONLY TRUE TOTALS.
+   2. For naming specific entities or quoting per-row values
+      ("which healthcare companies", "what was Acme's FV", "list the LPs")
+      → use DETAIL SAMPLE.
+   3. NEVER derive a total / count / "all are" claim from DETAIL SAMPLE
+      or DETAIL PROFILE. Those describe only the visible filtered slice.
+
+B. NO HALLUCINATION
+   • Do not invent rows, names, or numbers that are absent from both blocks.
+   • If the user asks for a category that does NOT appear in TRUE TOTALS,
+     say it is not present in the data — then list what IS present using
+     TRUE TOTALS rows.
+   • If a value is NULL across the visible rows, say so explicitly.
+
+C. FORMATTING
+   • Lead with the direct answer — no filler, no restating the question.
+   • Bold (**value**) the key numbers.
+   • INR amounts: Rs.XX.XX Cr or Rs.XX.XX L.
+   • Markdown bullets for lists.
+   • Concise: 3–6 sentences for simple queries, more for analysis.
+   • Address the user as "{context.get('user_first_name', 'there')}" — never as a company / firm / fund.
+   • Never say "based on the data", "according to the query", "the dataset shows".
+"""
 
         response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
         logger.warning(f'Response render error: {e}')
-        return _table_response(columns, rows)
+        return _table_response(columns, rows) if rows else _table_response(agg_columns, agg_rows)
 
 
 def _fallback_response(intent: str, context: Dict, query: str = '') -> str:
@@ -1391,44 +1791,112 @@ class ChatbotHandler:
                 'chart': None,
             }
 
-        # Step 3: Build SQL — try template first, then Gemini
-        sql = _try_template_query(query, intent, ctx)
-        columns = []
-        rows = []
+        # Step 3: Build SQL.
+        #
+        # Routing decision:
+        #   • Multi-row data intents (portfolio_summary, fund_performance,
+        #     lp_information, valuation_analysis, kpi_analysis,
+        #     exit_analysis, risk_analysis, accounting_query,
+        #     company_financials, compliance_status) go through the dual-SQL
+        #     path: Gemini produces an authoritative aggregate (truth) +
+        #     a filtered detail query (sample). The renderer then quotes
+        #     numbers from the aggregate, never from the truncated detail —
+        #     fixing the entire class of "20 of 30 visible" bugs.
+        #   • Bounded intents (fund_info — 1 fund; deal_pipeline,
+        #     import_data — small admin sets) keep the keyword template
+        #     fast path: their results are naturally small and there is no
+        #     sample bias to worry about.
+        DUAL_SQL_INTENTS = {
+            'portfolio_summary', 'fund_performance', 'lp_information',
+            'valuation_analysis', 'kpi_analysis', 'exit_analysis',
+            'risk_analysis', 'accounting_query', 'company_financials',
+            'compliance_status',
+        }
 
-        if sql:
-            columns, rows = execute_query(sql)
+        sql = None
+        columns: List[str] = []
+        rows: List[tuple] = []
+        result_meta: Dict = {'truncated': False}
+        agg_columns: List[str] = []
+        agg_rows: List[tuple] = []
+        agg_meta: Dict = {'truncated': False}
+        grouping_dim: Optional[str] = None
 
-        # If template returned no rows or no template matched, try Gemini
-        if not rows:
-            gemini_sql = build_sql_query(query, intent, ctx, time_filter, entity)
-            if gemini_sql:
-                cols2, rows2 = execute_query(gemini_sql)
-                if rows2:
-                    columns, rows = cols2, rows2
-                    sql = gemini_sql
+        if intent in DUAL_SQL_INTENTS:
+            # Dual-SQL path — replaces the brittle keyword templates that
+            # caused the sample-bias bugs. Gemini sees the user's natural
+            # language entity ("healthcare", "financial") and translates it
+            # into a WHERE clause; the aggregate carries the truth counts.
+            sql_pair = build_aggregate_and_detail_sql(query, intent, ctx, time_filter, entity)
+            if sql_pair:
+                grouping_dim = sql_pair.get('grouping_dimension')
+                agg_sql = sql_pair.get('aggregate_sql')
+                detail_sql = sql_pair.get('detail_sql')
+                if agg_sql:
+                    agg_columns, agg_rows, agg_meta = execute_query_with_meta(agg_sql)
+                if detail_sql:
+                    columns, rows, result_meta = execute_query_with_meta(detail_sql)
+                    sql = detail_sql
 
-        # Step 4b: If still no rows and we have a fund context, retry Gemini
-        # with a broader hint
-        if not rows and ctx.get('fund_id'):
+            # Last-resort fallback: if dual-SQL yielded nothing at all, try
+            # the single-pass builder (still no keyword templates).
+            if not rows and not agg_rows:
+                gemini_sql = build_sql_query(query, intent, ctx, time_filter, entity)
+                if gemini_sql:
+                    cols2, rows2, meta2 = execute_query_with_meta(gemini_sql)
+                    if rows2:
+                        columns, rows, result_meta = cols2, rows2, meta2
+                        sql = gemini_sql
+        else:
+            # Bounded-cardinality intents — keyword templates are still safe
+            # here because the natural row count is small (1 fund, a few
+            # schemes, a handful of deal-pipeline rows). No sample bias.
+            sql = _try_template_query(query, intent, ctx)
+            if sql:
+                columns, rows, result_meta = execute_query_with_meta(sql)
+            if not rows:
+                gemini_sql = build_sql_query(query, intent, ctx, time_filter, entity)
+                if gemini_sql:
+                    cols2, rows2, meta2 = execute_query_with_meta(gemini_sql)
+                    if rows2:
+                        columns, rows, result_meta = cols2, rows2, meta2
+                        sql = gemini_sql
+
+        # Step 4b: If still nothing and we have a fund context, broaden once.
+        if not rows and not agg_rows and ctx.get('fund_id'):
             sql2 = build_sql_query(
                 query + ' (HINT: previous SQL returned 0 rows — try broader joins, different tables, or remove restrictive filters)',
                 intent, ctx, time_filter, entity,
             )
             if sql2 and sql2 != sql:
-                cols3, rows3 = execute_query(sql2)
+                cols3, rows3, meta3 = execute_query_with_meta(sql2)
                 if rows3:
-                    columns, rows = cols3, rows3
+                    columns, rows, result_meta = cols3, rows3, meta3
                     sql = sql2
 
-        # Step 5: Render response
-        response_text = render_response(query, intent, columns, rows, ctx)
+        # Step 5: Render — give renderer both truth (aggregate) and sample
+        # (detail) so it never overclaims from a partial slice.
+        response_text = render_response(
+            query, intent, columns, rows, ctx, result_meta,
+            agg_columns=agg_columns, agg_rows=agg_rows, agg_meta=agg_meta,
+            grouping_dimension=grouping_dim,
+        )
 
-        # Step 6: Generate chart if appropriate
-        chart = _suggest_chart(intent, columns, rows, query)
+        # Step 6: Chart — prefers aggregate when present so the picture
+        # matches the truth instead of a biased slice.
+        chart = _suggest_chart(
+            intent, columns, rows, query,
+            agg_columns=agg_columns, agg_rows=agg_rows,
+            grouping_dimension=grouping_dim,
+        )
 
         # Log to DB
         message_id = self._log_query(query, intent, response_text)
+
+        # Frontend table preview: prefer detail rows; fall back to aggregate
+        # (e.g. when the user only asked for a breakdown).
+        preview_cols = columns if rows else agg_columns
+        preview_rows = rows if rows else agg_rows
 
         return {
             'response': response_text,
@@ -1437,8 +1905,8 @@ class ChatbotHandler:
             'confidence': intent_result.get('confidence', 0),
             'message_id': str(message_id) if message_id else None,
             'data': {
-                'columns': columns,
-                'rows': [list(r) for r in rows[:20]],
+                'columns': preview_cols,
+                'rows': [list(r) for r in preview_rows[:20]],
             },
             'chart': chart,
             'sql_used': sql if settings.DEBUG else None,

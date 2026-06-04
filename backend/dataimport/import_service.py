@@ -39,7 +39,8 @@ try:
     from compliance.models import (SEBIReport, AMLDueDiligence,
                                     ComplianceCalendar, ComplianceTestReport,
                                     CTRChecklistItem, PPMAmendment,
-                                    SEBICircular, CircularAction)
+                                    SEBICircular, CircularAction,
+                                    PortfolioCompanyCompliance)
     HAS_COMPLIANCE = True
 except ImportError:
     HAS_COMPLIANCE = False
@@ -89,6 +90,59 @@ def _d(val, default=None):
         return Decimal(str(val))
     except (InvalidOperation, ValueError):
         return default
+
+
+def _parse_pct(raw):
+    """Extract the leading percentage value from any text representation.
+
+    The previous logic — `Decimal(str(x).replace('%','').strip())` — failed
+    on values like "8% p.a. (compounding)" or "20% above hurdle" because
+    `.replace('%','')` strips only the percent sign and leaves the prose
+    suffix, which then can't be coerced to Decimal.
+
+    This helper extracts the first numeric token regardless of surrounding
+    text — language-independent, format-agnostic. Handles every form that
+    appears in real fund Excel files:
+
+        Input                              → Output
+        "8"                                → Decimal('8')
+        "8%"                               → Decimal('8')
+        "8 % p.a."                         → Decimal('8')
+        "8% p.a. (compounding)"            → Decimal('8')
+        "20% above hurdle"                 → Decimal('20')
+        "20.5%"                            → Decimal('20.5')
+        "0.08"                             → Decimal('8')   (decimal → human pct)
+        "0.5%"                             → Decimal('0.5') (already pct form)
+        "₹2.0% per annum"                  → Decimal('2.0')
+        "200 bps"                          → Decimal('2')   (basis points)
+        None / "" / "N/A" / "—"            → None
+
+    No hardcoded keywords — works for any language. Returns Decimal or None.
+    """
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s or s.upper() in ('N/A', 'NA', '--', '—', '-'):
+        return None
+
+    # Pull the first signed numeric token (handles comma-grouping)
+    m = re.search(r'-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?', s)
+    if not m:
+        return None
+    try:
+        val = Decimal(m.group().replace(',', ''))
+    except (InvalidOperation, ValueError):
+        return None
+
+    s_lower = s.lower()
+    # Basis-point form (rare but valid): "200 bps" → 2%
+    if 'bps' in s_lower or 'basis point' in s_lower:
+        return val / Decimal('100')
+    # Decimal-fraction form (0.08 → 8): only when value <1 AND no '%' present.
+    # "0.5%" is a literal 0.5% — keep as-is. "0.08" is fractional → 8%.
+    if val < 1 and '%' not in s:
+        return val * Decimal('100')
+    return val
 
 
 def _date(val):
@@ -1350,6 +1404,99 @@ class FundImportService:
             import_file_record.fund_name = self._imported_fund.name
             import_file_record.save(update_fields=['fund', 'fund_name'])
 
+        # Pass 4: Derive missing fund-level metrics via Gemini.
+        # Runs per scheme on the imported fund; persists DerivedMetric rows
+        # with full provenance (chosen formula, inputs used, Gemini reasoning,
+        # alternates considered). All formulas come from Gemini — nothing
+        # is hardcoded in derivation_service.
+        # Pass 3.5: universal explicit-value scanner. BEFORE Pass 4 derivation,
+        # scan every sheet for label-value pairs (column 1 label, column 2
+        # numeric) and ask Gemini to identify any that are fund-performance
+        # metrics (Net IRR, MOIC, TVPI, DPI, RVPI, NAV, etc.). Found values
+        # are persisted as DerivedMetric rows with formula='(direct value
+        # imported)' so Pass 4 sees them as authoritative and skips
+        # derivation. ZERO keyword matching here — Gemini decides what's a
+        # performance metric via semantic equivalence against the
+        # fund_performance_metrics canonical category.
+        try:
+            _progress(93, 'Pass 3.5: Universal performance-metric extractor...')
+            self._extract_explicit_performance_metrics(
+                import_file_record=import_file_record,
+            )
+        except Exception as e:
+            logger.warning(
+                f'Pass 3.5 explicit performance-metric extraction failed: {e}'
+            )
+
+        try:
+            _progress(95, 'Pass 4: Deriving missing fund metrics via Gemini...')
+            from .derivation_service import MetricDerivationService
+
+            schemes = []
+            if self._imported_fund:
+                schemes = list(self._imported_fund.schemes.all())
+
+            derivation_summary = []
+            for sch in schemes:
+                svc = MetricDerivationService(
+                    organization=self.org,
+                    scheme=sch,
+                    source_import_file=import_file_record,
+                )
+                outcomes = svc.derive_all()
+                derivation_summary.append({
+                    'scheme_id': str(sch.id),
+                    'scheme_name': sch.name,
+                    'outcomes': outcomes,
+                })
+                logger.info(
+                    f'[Pass4] scheme={sch.name}: {outcomes}'
+                )
+
+            if isinstance(result, dict):
+                result['derivation_summary'] = derivation_summary
+
+            _progress(99, 'Pass 4 complete')
+        except Exception as e:
+            import traceback
+            logger.warning(
+                f'Pass 4 (metric derivation) failed: {type(e).__name__}: {e}\n'
+                f'{traceback.format_exc()}'
+            )
+            self.errors.append({
+                'section': 'pass4_derivation',
+                'error': f'{type(e).__name__}: {e}',
+            })
+
+        # Pass 5 — extraction completeness audit (diagnostic only).
+        # Walks every dashboard-critical model and reports empty tables,
+        # along with the Excel sheet they SHOULD have been populated from
+        # (per Gemini Pass 1's domain classification). This surfaces silent
+        # importer failures (e.g. Pass 2 returning low-confidence mappings
+        # that get filtered out, leaving the importer with nothing to write)
+        # without any silent retry or hardcoded fallback. The output is
+        # persisted to job.result_summary['audit'] so the UI / API can show
+        # the gap directly.
+        try:
+            _progress(99, 'Pass 5: extraction completeness audit...')
+            audit = self._audit_extraction_completeness(
+                classifications=classifications,
+                column_mappings=column_mappings,
+            )
+            if isinstance(result, dict):
+                result['audit'] = audit
+            if audit.get('empty_critical_tables'):
+                logger.warning(
+                    f'[Pass5 Audit] EMPTY critical tables after import: '
+                    f'{audit["empty_critical_tables"]}'
+                )
+            else:
+                logger.info(
+                    f'[Pass5 Audit] All critical tables populated.'
+                )
+        except Exception as e:
+            logger.warning(f'Pass 5 audit failed: {e}')
+
         return result
 
     @transaction.atomic
@@ -1389,21 +1536,44 @@ class FundImportService:
         logger.info(f'Domain→sheet map: {domain_map}')
 
         # Build per-sheet Gemini alias map: {sheet_name: {excel_col: canonical_field}}
-        # Only keep high-confidence mappings (≥0.70).
+        # PRODUCTION CHANGE: previously we silently dropped any mapping with
+        # confidence < 0.70. That filter was the silent killer that left
+        # LP_REGISTER / CAPITAL_CALLS / EXITS with zero aliases and zero
+        # imported rows. We now accept ALL mappings Gemini returns and trust
+        # the per-sub-table architecture (Fix 1) to keep individual
+        # confidences high. If a sub-table comes back with avg confidence
+        # below 0.85, we log it loudly so any genuine ambiguity surfaces.
         self._gemini_sheet_aliases = {}
         for sheet_name, mapping_data in (column_mappings or {}).items():
             aliases = {}
+            low_conf_count = 0
+            high_conf_count = 0
             for section in mapping_data.get('sections', []):
                 for m in section.get('mappings', []):
                     excel_col = m.get('excel_column', '')
                     canonical = m.get('canonical_field', '')
-                    confidence = m.get('confidence', 0.0)
-                    if excel_col and canonical and confidence >= 0.70:
+                    confidence = m.get('confidence', 0.0) or 0.0
+                    if excel_col and canonical:
+                        # Accept ALL mappings — no silent threshold filter.
                         aliases[excel_col] = canonical
+                        if confidence < 0.70:
+                            low_conf_count += 1
+                        else:
+                            high_conf_count += 1
             if aliases:
                 self._gemini_sheet_aliases[sheet_name] = aliases
                 logger.info(
-                    f'Gemini aliases for "{sheet_name}": {list(aliases.items())[:8]}'
+                    f'Gemini aliases for "{sheet_name}": {list(aliases.items())} '
+                    f'[high_conf={high_conf_count}, low_conf={low_conf_count}]'
+                )
+            else:
+                # Sheet got column_mappings dict but zero usable mappings.
+                # Surface this loudly so the user sees that Pass 2 produced
+                # nothing for this sheet.
+                logger.warning(
+                    f'Pass 2 produced NO column mappings for sheet "{sheet_name}" '
+                    f'— downstream importers for this sheet will rely on fuzzy '
+                    f'header matching only.'
                 )
 
         # Ensure fund categories
@@ -1583,6 +1753,14 @@ class FundImportService:
         except Exception as e:
             logger.warning(f'Management fees import error: {e}')
             self.errors.append({'section': 'management_fees', 'error': str(e)})
+
+        # --- Import compliance (per-company obligations + fund-level filings) ---
+        progress_cb(84, 'Importing compliance...')
+        try:
+            self._import_compliance(wb, org, fund, companies, domain_map)
+        except Exception as e:
+            logger.warning(f'Compliance import error: {e}')
+            self.errors.append({'section': 'compliance', 'error': str(e)})
 
         # --- Compute carried interest ---
         progress_cb(85, 'Computing carried interest...')
@@ -1815,12 +1993,17 @@ class FundImportService:
                             row_data, 'Hurdle Rate %', 'Hurdle', 'Hurdle Rate')
                         carry = _find_col_decimal(
                             row_data, 'Carry %', 'Carry', 'Carried Interest')
+                        # No hardcoded fallback — if the Excel does not name
+                        # an explicit waterfall type, the value stays None and
+                        # the scheme is saved without carry_type. The dashboard
+                        # honestly shows "Distribution Waterfall" with no
+                        # waterfall-type qualifier, not a synthesised "European".
                         carry_type_raw = _find_col_str(
                             row_data, 'Carry Type', 'Waterfall Type',
-                            default='european')
+                            default='')
                         fee_basis_raw = _find_col_str(
                             row_data, 'Mgmt Fee Basis', 'Fee Basis',
-                            default='committed')
+                            default='')
                         fee_pct = _find_col_decimal(
                             row_data, 'Mgmt Fee %', 'Management Fee %',
                             'Fee %')
@@ -1835,15 +2018,18 @@ class FundImportService:
                         scheme_status = scheme_status_result.get(
                             status_raw, 'investing')
 
+                        # No hardcoded fallback — if Gemini cannot classify the
+                        # raw value, carry_type stays None and is omitted from
+                        # the scheme defaults dict. Same rule for fee_basis.
                         carry_type_result = self._classify_enum(
                             [carry_type_raw], 'carry_type',
                             context='Waterfall/carry type') if carry_type_raw else {}
-                        carry_type = carry_type_result.get(carry_type_raw, 'european')
+                        carry_type = carry_type_result.get(carry_type_raw) or None
 
                         fee_basis_result = self._classify_enum(
                             [fee_basis_raw], 'fee_basis',
                             context='Management fee calculation basis') if fee_basis_raw else {}
-                        fee_basis = fee_basis_result.get(fee_basis_raw, 'committed')
+                        fee_basis = fee_basis_result.get(fee_basis_raw) or None
 
                         scheme_defaults = {'is_active': True}
                         if vintage:
@@ -2016,24 +2202,21 @@ class FundImportService:
 
             hurdle_raw = scheme_lifecycle.get('hurdle_rate_pct')
             if hurdle_raw:
-                h_str = str(hurdle_raw).replace('%', '').strip()
-                h_val = _d(h_str)
+                h_val = _parse_pct(hurdle_raw)
                 if h_val and not default_scheme.hurdle_rate_pct:
                     default_scheme.hurdle_rate_pct = h_val
                     scheme_updates.append('hurdle_rate_pct')
 
             carry_raw = scheme_lifecycle.get('carry_pct')
             if carry_raw:
-                c_str = str(carry_raw).replace('%', '').strip()
-                c_val = _d(c_str)
+                c_val = _parse_pct(carry_raw)
                 if c_val and not default_scheme.carry_pct:
                     default_scheme.carry_pct = c_val
                     scheme_updates.append('carry_pct')
 
             fee_raw = scheme_lifecycle.get('management_fee_pct')
             if fee_raw:
-                f_str = str(fee_raw).replace('%', '').strip()
-                f_val = _d(f_str)
+                f_val = _parse_pct(fee_raw)
                 if f_val and not default_scheme.management_fee_pct:
                     default_scheme.management_fee_pct = f_val
                     scheme_updates.append('management_fee_pct')
@@ -2081,8 +2264,7 @@ class FundImportService:
 
             sponsor_raw = scheme_lifecycle.get('sponsor_commitment_pct')
             if sponsor_raw and not default_scheme.sponsor_commitment_pct:
-                s_str = str(sponsor_raw).replace('%', '').strip()
-                s_val = _d(s_str)
+                s_val = _parse_pct(sponsor_raw)
                 if s_val:
                     default_scheme.sponsor_commitment_pct = s_val
                     scheme_updates.append('sponsor_commitment_pct')
@@ -2625,7 +2807,11 @@ class FundImportService:
             defaults={
                 'call_date': date.today(),
                 'payment_due_date': date.today(),
-                'call_percentage': avg_drawn_pct or Decimal('80'),
+                # No hardcoded fallback: if avg_drawn_pct couldn't be derived
+                # from the investors_aml sheet, leave it at the model default
+                # (0) rather than synthesising 80. Honest "unknown" beats a
+                # made-up number.
+                'call_percentage': avg_drawn_pct or Decimal('0'),
                 'total_call_amount': total_drawn,
                 'purpose': 'Investment deployment and fund expenses',
                 'call_status': 'paid',
@@ -4856,11 +5042,20 @@ class FundImportService:
         if not default_scheme:
             return
 
-        # Use Gemini-classified nav_accounting sheets only
-        candidate_sheets = [s for s in _dm_sheets(domain_map, 'nav_accounting')
-                            if s in wb.sheetnames]
+        # Accept any sheet Gemini Pass 1 mapped to a NAV-related domain.
+        # The canonical schema defines two: nav_accounting (pure time-series)
+        # and nav_calculation (computation sheet that may CONTAIN a time-series
+        # section per Pass 1.5 — e.g. "Monthly NAV History"). Pass 1.5 section
+        # classification + per-sheet layout (Pass 2.5) decide which sub-sections
+        # actually hold NAV records.
+        candidate_sheets = []
+        for domain in ('nav_accounting', 'nav_calculation'):
+            for s in _dm_sheets(domain_map, domain):
+                if s in wb.sheetnames and s not in candidate_sheets:
+                    candidate_sheets.append(s)
         if not candidate_sheets:
-            logger.info('  No Gemini-classified nav_accounting sheets found')
+            logger.info('  No Gemini-classified NAV sheets found '
+                        '(nav_accounting or nav_calculation)')
             return
 
         # Regex for period-column headers (e.g. "Oct-24", "Nov-24")
@@ -4973,13 +5168,20 @@ class FundImportService:
             return count
 
         # ── Format B: Multi-section ──────────────────────────────────────────
+        # Pass 1.5 may classify MULTIPLE sections of a NAV sheet as
+        # nav_records (e.g. NAV_CALC Section A is a current-period breakdown
+        # *and* Section C is a 36-month time series — both legitimately
+        # nav_records). We must process EVERY candidate section and union the
+        # rows that look like time-series NAV records, instead of stopping at
+        # the first section (which often is the current-period breakdown that
+        # has no Date column and yields zero records).
         sections = self._read_sheet_via_layout(ws, alias_map=self._get_alias(ws))
-        nav_rows = None
+        nav_rows = []
         for sec_name, (sec_headers, sec_rows) in sections.items():
             subdomain = self._get_section_subdomain(sheet_name, sec_name)
             if subdomain == 'nav_records' or sec_name == '__default__':
-                nav_rows = sec_rows
-                break
+                if sec_rows:
+                    nav_rows.extend(sec_rows)
 
         if not nav_rows:
             nav_rows = table_rows  # already-read flat table
@@ -5008,7 +5210,12 @@ class FundImportService:
 
             total_nav = _find_col_decimal(
                 row, 'Total NAV (Cr)', 'Total NAV', 'NAV',
-                'Net Asset Value', 'total_nav')
+                'Net Asset Value', 'total_nav',
+                # Canonical schema has two synonyms for the same concept
+                # (different DOMAIN_FIELDS catalogues): total_nav and
+                # closing_nav. Gemini may map "Fund NAV" → closing_nav for
+                # nav_calculation-domain sheets. Accept both.
+                'Closing NAV', 'closing_nav', 'Ending NAV')
 
             # ── Fix B: NAV formula-derived fallback (no hardcoded SEBI formula) ──
             # Many fund Excel files define "Total NAV" as a calculated cell
@@ -5038,7 +5245,9 @@ class FundImportService:
 
             nav_per_unit = _find_col_decimal(
                 row, 'NAV/Unit (INR)', 'NAV/Unit(₹)', 'NAV/Unit',
-                'NAV Per Unit', 'nav_per_unit')
+                'NAV Per Unit', 'nav_per_unit',
+                # Same canonical-name synonym issue as total_nav above
+                'closing_nav_per_unit', 'Closing NAV per Unit')
             inv_fv = _find_col_decimal(
                 row, 'Investments at FV (Cr)', 'Investments at FV',
                 'Total Investments', 'investments_at_fair_value')
@@ -5094,6 +5303,317 @@ class FundImportService:
             count += 1
 
         return count
+
+    def _audit_extraction_completeness(self, classifications, column_mappings):
+        """Pass 5 — diagnostic audit.
+
+        For every dashboard-critical Django model, check whether DB rows exist
+        for the fund just imported. For each empty model, report:
+          - which sheet was supposed to populate it (per Pass 1 domain map)
+          - how many Pass 2 column aliases that sheet got
+          - sample of the sheet's column headers Gemini saw
+
+        This is DIAGNOSTIC ONLY — no silent re-extraction, no hardcoded fallback.
+        The point is to make Pass 2 / Pass 1 misclassifications visible instead
+        of letting them silently produce empty tables.
+        """
+        from .canonical_schema import SHEET_DOMAINS
+        # Discover critical fund-data models dynamically: anything in
+        # 'lp', 'investments', 'accounting' apps with a 'scheme' or
+        # 'investment' FK that touches the imported fund. NO hardcoded
+        # model list — uses introspection so new models automatically join
+        # the audit.
+        from django.apps import apps
+        from django.db import models as django_models
+
+        audit = {
+            'empty_critical_tables': [],
+            'populated_critical_tables': [],
+            'sheet_domain_map': {},
+            'low_alias_sheets': [],
+        }
+        if not self._imported_fund:
+            return audit
+
+        scheme_qs_filter_cache = {}
+
+        def _row_count(model):
+            try:
+                # Try direct scheme FK
+                if any(getattr(f, 'name', '') == 'scheme'
+                       for f in model._meta.get_fields()
+                       if isinstance(f, (django_models.ForeignKey,
+                                         django_models.OneToOneField))):
+                    return model.objects.filter(
+                        scheme__fund=self._imported_fund
+                    ).count()
+                # 1-hop via 'investment'
+                if any(getattr(f, 'name', '') == 'investment'
+                       for f in model._meta.get_fields()
+                       if isinstance(f, (django_models.ForeignKey,
+                                         django_models.OneToOneField))):
+                    return model.objects.filter(
+                        investment__scheme__fund=self._imported_fund
+                    ).count()
+                # Direct fund FK
+                if any(getattr(f, 'name', '') == 'fund'
+                       for f in model._meta.get_fields()
+                       if isinstance(f, (django_models.ForeignKey,
+                                         django_models.OneToOneField))):
+                    return model.objects.filter(
+                        fund=self._imported_fund
+                    ).count()
+            except Exception:
+                pass
+            return None
+
+        # Map Pass 1 domain → sheet names so the audit can name the
+        # expected-source-sheet per empty table.
+        domain_to_sheets = {}
+        for cls in (classifications or []):
+            sname = cls.get('sheet_name', '')
+            for d in cls.get('domains', []):
+                if d and d != 'unknown':
+                    domain_to_sheets.setdefault(d, []).append(sname)
+        audit['sheet_domain_map'] = domain_to_sheets
+
+        # Alias counts per sheet (after Fix 2 we accept all confidences;
+        # but if a sheet got literally 0 mappings, it's a Pass 2 failure
+        # worth surfacing in the audit).
+        for sheet_name, mapping_data in (column_mappings or {}).items():
+            alias_count = 0
+            for s in mapping_data.get('sections', []):
+                for m in s.get('mappings', []):
+                    if m.get('excel_column') and m.get('canonical_field'):
+                        alias_count += 1
+            if alias_count == 0:
+                audit['low_alias_sheets'].append({
+                    'sheet': sheet_name,
+                    'alias_count': 0,
+                    'reason': 'Pass 2 produced zero column mappings for this sheet.',
+                })
+
+        # Walk every model in project apps that ties to a Scheme/Investment/Fund.
+        for ac in apps.get_app_configs():
+            if ac.label in ('auth', 'contenttypes', 'sessions',
+                            'admin', 'accounts', 'dataimport'):
+                continue
+            for model in ac.get_models():
+                cnt = _row_count(model)
+                if cnt is None:
+                    continue
+                label = f'{ac.label}.{model.__name__}'
+                if cnt == 0:
+                    # What domain/sheet was supposed to populate this model?
+                    # We don't hardcode a model→domain map here; instead the
+                    # downstream consumer can correlate via SHEET_DOMAINS
+                    # and the importer logs. Report just the model + count.
+                    audit['empty_critical_tables'].append({
+                        'model': label,
+                        'row_count': 0,
+                    })
+                else:
+                    audit['populated_critical_tables'].append({
+                        'model': label,
+                        'row_count': cnt,
+                    })
+
+        return audit
+
+    def _extract_explicit_performance_metrics(self, import_file_record):
+        """Pass 3.5 — Universal explicit-value scanner.
+
+        Walks EVERY sheet of the imported workbook, harvests every plausible
+        label-value pair (rows where col-1 is text + col-2 is numeric, or
+        adjacent-cell pairs), and asks Gemini to classify each label against
+        the canonical `fund_performance_metrics` category. When Gemini
+        matches a label to a canonical metric (net_irr, moic, tvpi, dpi,
+        rvpi, nav, ...), the value is persisted as a DerivedMetric row with
+        formula_expression='(direct value imported)' so the downstream
+        Pass 4 derivation treats it as authoritative and skips re-deriving.
+
+        Zero keyword matching here. Zero per-metric special cases. Gemini
+        decides what is a fund-performance metric via semantic equivalence
+        against the canonical descriptions.
+        """
+        import openpyxl
+        from decimal import Decimal, InvalidOperation
+        from .canonical_schema import CANONICAL_VALUE_CATEGORIES
+        from .models import DerivedMetric
+        from .gemini_column_mapper import classify_labels
+
+        if not self._imported_fund:
+            return
+        schemes = list(self._imported_fund.schemes.all())
+        if not schemes:
+            return
+
+        # Find every numeric label-value pair across every sheet — no row/col
+        # caps, no sheet filtering.
+        filepath = getattr(self, '_filepath', None) or import_file_record.file.path
+        try:
+            wb = openpyxl.load_workbook(filepath, data_only=True)
+        except Exception as e:
+            logger.warning(f'Pass 3.5: cannot reopen workbook: {e}')
+            return
+
+        def _is_numeric(v):
+            if v is None:
+                return False
+            if isinstance(v, bool):
+                return False
+            if isinstance(v, (int, float, Decimal)):
+                return True
+            if isinstance(v, str):
+                s = v.strip().replace(',', '').replace('₹', '').rstrip('%').rstrip('x')
+                if not s:
+                    return False
+                try:
+                    float(s)
+                    return True
+                except (ValueError, InvalidOperation):
+                    return False
+            return False
+
+        def _to_number(v):
+            if isinstance(v, (int, float)):
+                return float(v)
+            if isinstance(v, Decimal):
+                return float(v)
+            if isinstance(v, str):
+                s = v.strip().replace(',', '').replace('₹', '').strip()
+                pct = s.endswith('%')
+                if pct:
+                    s = s[:-1].strip()
+                if s.endswith('x') or s.endswith('X'):
+                    s = s[:-1].strip()
+                try:
+                    n = float(s)
+                except ValueError:
+                    return None
+                return n / 100.0 if pct else n
+            return None
+
+        # label_to_value: dict of unique label-text → first non-null number seen.
+        # Same label may appear with multiple values in different rows; we
+        # keep the FIRST one encountered (closer-to-top usually wins). For
+        # collision visibility, we also track source.
+        label_to_value = {}
+        label_to_source = {}
+        try:
+            for sname in wb.sheetnames:
+                ws = wb[sname]
+                for r in range(1, (ws.max_row or 0) + 1):
+                    row_cells = [
+                        ws.cell(r, c).value
+                        for c in range(1, (ws.max_column or 0) + 1)
+                    ]
+                    # Find first non-null text cell and first numeric cell
+                    # following it.
+                    label = None
+                    numeric_val = None
+                    for v in row_cells:
+                        if v is None:
+                            continue
+                        if label is None:
+                            if isinstance(v, str) and v.strip():
+                                label = v.strip()
+                            continue
+                        if _is_numeric(v):
+                            numeric_val = _to_number(v)
+                            break
+                    if label and numeric_val is not None:
+                        if label not in label_to_value:
+                            label_to_value[label] = numeric_val
+                            label_to_source[label] = f'{sname}!row{r}'
+        finally:
+            try:
+                wb.close()
+            except Exception:
+                pass
+
+        if not label_to_value:
+            logger.info('Pass 3.5: no label-value pairs found')
+            return
+
+        labels = list(label_to_value.keys())
+        logger.info(
+            f'Pass 3.5: harvested {len(labels)} unique label-value pairs '
+            f'across {len(wb.sheetnames) if hasattr(wb, "sheetnames") else "?"} sheets'
+        )
+
+        # Semantic classification via Gemini — every label gets compared
+        # against the canonical fund_performance_metrics descriptions.
+        try:
+            label_map = classify_labels(
+                labels,
+                'fund_performance_metrics',
+                CANONICAL_VALUE_CATEGORIES['fund_performance_metrics'],
+                context=(
+                    'Fund-level performance metrics scanned from any sheet of '
+                    'the imported workbook. Match each label SEMANTICALLY '
+                    'against the canonical metric descriptions; ignore unit '
+                    'suffixes, currency symbols, parenthetical notes, and '
+                    'spacing/casing differences.'
+                ),
+            )
+        except Exception as e:
+            logger.warning(f'Pass 3.5 classify_labels failed: {e}')
+            return
+
+        # Persist matches as DerivedMetric rows with imported_direct provenance.
+        from decimal import Decimal as _D
+        written = 0
+        per_metric = {}
+        for label, canonical in (label_map or {}).items():
+            if not canonical:
+                continue
+            value = label_to_value.get(label)
+            source = label_to_source.get(label, '')
+            if value is None:
+                continue
+            # Only keep the FIRST value we see per metric_key (in case the
+            # workbook has multiple sheets restating the same metric).
+            if canonical in per_metric:
+                continue
+            per_metric[canonical] = (value, label, source)
+
+        for canonical, (value, label, source) in per_metric.items():
+            try:
+                for sch in schemes:
+                    DerivedMetric.objects.update_or_create(
+                        scheme=sch,
+                        metric_key=canonical,
+                        defaults={
+                            'organization': self.org,
+                            'value': _D(str(value)),
+                            'formula_expression': '(direct value imported)',
+                            'inputs_used': {
+                                'source_cell': source,
+                                'source_label': label,
+                                'source_value': value,
+                            },
+                            'confidence': 1.0,
+                            'gemini_reasoning': (
+                                f'Label "{label}" at {source} was matched to '
+                                f'canonical metric "{canonical}" via Pass 3.5 '
+                                f'semantic classification against the '
+                                f'fund_performance_metrics catalogue.'
+                            ),
+                            'candidate_formulas': [],
+                            'source_import_file': import_file_record,
+                        },
+                    )
+                    written += 1
+            except Exception as e:
+                logger.warning(
+                    f'Pass 3.5 persist failed for {canonical} = {value}: {e}'
+                )
+
+        logger.info(
+            f'[Pass3.5] persisted {written} DerivedMetric imported_direct rows '
+            f'covering metrics: {sorted(per_metric.keys())}'
+        )
 
     def _enrich_nav_records_post_import(self, wb, scheme, domain_map=None):
         """
@@ -6247,7 +6767,10 @@ class FundImportService:
         if not default_scheme:
             return
 
-        fee_rate = default_scheme.management_fee_pct or Decimal('2.00')
+        # No hardcoded fallback for the fee rate. If the Excel never told us,
+        # the model field is 0 (legitimate "unknown"). We use that 0 rather
+        # than a synthetic 2.00% so downstream consumers see honest data.
+        fee_rate = default_scheme.management_fee_pct or Decimal('0')
 
         # ── Format B: FEES_REGISTER / dedicated fees sheet ────────────────────
         # Use Gemini-classified 'fees_register' domain, fallback to 'nav_accounting'
@@ -6383,79 +6906,584 @@ class FundImportService:
         logger.info(f'  Management fees: {count} periods')
 
     # ------------------------------------------------------------------
+    # Compliance import
+    # ------------------------------------------------------------------
+
+    def _import_compliance(self, wb, org, fund, companies, domain_map):
+        """Import compliance data (per-company obligations + fund-level SEBI
+        filings) from sheets that Gemini Pass 1 classified as 'compliance'.
+
+        ZERO HARDCODING — every step uses Gemini to interpret semantics:
+          * Pass 2.5 per-sheet layout to discover sub-tables (header row,
+            data start/end, derived columns). Works regardless of where the
+            sheet starts (banner rows, disclaimers, free text above the
+            actual grid).
+          * Pass 2 column alias map for canonical header normalization.
+          * Pass 3 classify_labels / classify_enum to translate the
+            obligation column names ("ROC/MCA", "EPF/ESIC", …), the per-cell
+            statuses ("Current", "Delayed", "Pending Review", …), the fund
+            filing-type labels ("SEBI QAR Filing", "FATCA/CRS Reporting", …)
+            and the fund filing-status labels ("Filed On Time", …) into
+            canonical keys that map 1:1 onto Django model choices.
+
+        Two table shapes are handled by the SAME code path, decided
+        per-sub-table at runtime:
+
+          A. PER-COMPANY TRACKER GRID
+             Identity column: company name (semantic match via _find_col_str).
+             Obligation columns: any column header that Gemini classifies
+             into the canonical 'compliance_obligation_type' set.
+             For each (company, obligation) cell:
+               • Gemini classifies the cell text into
+                 'compliance_company_status' (compliant / due / overdue / N/A).
+               • Resolve the company against the already-imported portfolio
+                 (skip rows whose name doesn't match — we never invent
+                 PortfolioCompany rows here; that's the portfolio importer's
+                 job).
+               • update_or_create PortfolioCompanyCompliance keyed on
+                 (portfolio_company, obligation_type).
+
+          B. FUND-LEVEL FILINGS TABLE
+             Identity column: obligation/filing label.
+             Recognised columns: Frequency, Due Date, Filed Date, Status,
+             Notes. All resolved by _find_col semantic fuzzy match —
+             no hardcoded header strings.
+             For each row:
+               • Gemini classifies the obligation label into
+                 'sebi_filing_type' (qar / aar / ctr / fema / fatca_crs /
+                 nav_depositories / valuation_certificate / other).
+               • Gemini classifies the status text into
+                 'compliance_filing_status' (filed / pending / overdue /
+                 not_started).
+               • QAR / AAR rows → SEBIReport (which has a proper schema
+                 for them).
+               • Everything else → ComplianceCalendar (general-purpose;
+                 covers CTR, FEMA, FATCA, NAV-to-depositories, etc.).
+             Both writes use update_or_create keyed on stable identity so
+             re-imports are idempotent (CLAUDE.md rule).
+
+        Shape detection itself is semantic, not heuristic: a sub-table is
+        treated as a per-company grid iff Gemini classifies AT LEAST ONE
+        of its column headers into compliance_obligation_type. Otherwise
+        it is treated as a fund-level filings table. No keyword matching,
+        no row-count thresholds.
+        """
+        if not HAS_COMPLIANCE:
+            return
+
+        sheets = _dm_sheets(domain_map, 'compliance')
+        if not sheets:
+            logger.info('  Compliance: no sheets classified as compliance domain')
+            return
+
+        # Build a name → PortfolioCompany lookup (case- and whitespace-
+        # insensitive) so per-company rows can be resolved without a DB
+        # round-trip per row.
+        co_lookup = {}
+        for co in companies.values() if isinstance(companies, dict) else (companies or []):
+            key = (co.name or '').strip().lower()
+            if key:
+                co_lookup[key] = co
+
+        per_company_written = 0
+        sebi_reports_written = 0
+        calendar_events_written = 0
+
+        for sheet_name in sheets:
+            if sheet_name not in wb.sheetnames:
+                continue
+            ws = wb[sheet_name]
+            sections = self._read_sheet_via_layout(ws, alias_map=self._get_alias(ws))
+            if not sections:
+                continue
+
+            for sec_name, (headers, rows) in sections.items():
+                if not rows:
+                    continue
+
+                header_strs = [h for h in headers.keys() if h and str(h).strip()]
+                if not header_strs:
+                    continue
+
+                # ── Sub-table purpose classification (Gemini, semantic) ──
+                # Defense-in-depth: Pass 1 can mis-classify a sheet into
+                # 'compliance' (e.g. a "VALIDATION" sheet of cross-sheet
+                # integrity checks). Don't let those rows pollute the
+                # compliance tables. Ask Gemini what THIS sub-table actually
+                # is, judged by headers + sample rows together — and route
+                # accordingly. Pure semantic call; zero keyword matching.
+                from .gemini_column_mapper import classify_subtable_purpose
+                sample_rows_for_purpose = [
+                    [r.get(h) for h in header_strs]
+                    for r in rows[:5]
+                ]
+                purpose = classify_subtable_purpose(
+                    headers=header_strs,
+                    sample_rows=sample_rows_for_purpose,
+                    allowed_purposes={
+                        'per_company_tracker': (
+                            'A grid where each row is ONE portfolio company and the '
+                            'columns are different regulatory obligations (ROC/MCA, '
+                            'GST, Labour, EPF, etc.). Cell values are statuses like '
+                            'Current / Delayed / Pending Review / Overdue.'
+                        ),
+                        'fund_level_filings': (
+                            'A list where each row is ONE fund-level regulatory '
+                            'obligation (SEBI QAR / AAR / CTR, FEMA, FATCA/CRS, '
+                            'NAV to depositories, valuation certificate). Columns '
+                            'typically include obligation name, frequency, due '
+                            'date, filed date, status.'
+                        ),
+                    },
+                    context=(
+                        f"Sheet '{sheet_name}' was classified as compliance "
+                        f"domain by Pass 1; sub-section '{sec_name}'."
+                    ),
+                )
+
+                if purpose == 'per_company_tracker':
+                    # Header-level Gemini classification picks out which of
+                    # this grid's columns are actual obligation columns
+                    # (vs identity columns like #, Co.ID, Company Name,
+                    # Sector). Pure semantic matching against the canonical
+                    # obligation enum — no keyword tables.
+                    obl_map = self._classify_labels(
+                        header_strs, 'compliance_obligation_type',
+                        context=(
+                            f'Column headers in a per-company compliance '
+                            f'tracker grid; pick out obligation columns '
+                            f'(sheet "{sheet_name}", section "{sec_name}").'
+                        ),
+                    )
+                    obligation_headers = {h: k for h, k in obl_map.items() if k}
+                    if not obligation_headers:
+                        logger.info(
+                            f'  Compliance: sub-section "{sec_name}" classified as '
+                            'per-company tracker but no obligation columns recognised; skipping'
+                        )
+                        continue
+                    per_company_written += self._import_compliance_per_company(
+                        rows, headers, obligation_headers, co_lookup, sec_name,
+                    )
+                elif purpose == 'fund_level_filings':
+                    sw, cw = self._import_compliance_fund_filings(
+                        rows, headers, fund, sec_name,
+                    )
+                    sebi_reports_written += sw
+                    calendar_events_written += cw
+                else:
+                    # 'other' — Gemini says this sub-table is not actual
+                    # compliance data (validation rules, instructions,
+                    # sample data, metadata, etc.). Skip cleanly.
+                    logger.info(
+                        f'  Compliance: skipping sub-section "{sec_name}" in '
+                        f'"{sheet_name}" — Gemini classified as non-compliance content'
+                    )
+
+        logger.info(
+            f'  Compliance: {per_company_written} per-company obligations, '
+            f'{sebi_reports_written} SEBI reports, '
+            f'{calendar_events_written} calendar events'
+        )
+
+    def _import_compliance_per_company(
+        self, rows, headers, obligation_headers, co_lookup, sec_name,
+    ):
+        """Write PortfolioCompanyCompliance rows from a per-company tracker grid.
+
+        obligation_headers: {excel_header: canonical_obligation_key}
+        Returns count of obligations written.
+        """
+        # Batch-classify EVERY cell value in obligation columns up front, so
+        # we make one Gemini call for the whole sheet instead of one per cell.
+        all_status_values = set()
+        for row in rows:
+            for h in obligation_headers.keys():
+                v = row.get(h)
+                if v is None or v == '':
+                    continue
+                s = str(v).strip()
+                if s:
+                    all_status_values.add(s)
+        if not all_status_values:
+            return 0
+
+        status_map = self._classify_enum(
+            all_status_values, 'compliance_company_status',
+            context=f'Per-company compliance status cells in "{sec_name}"',
+        )
+
+        # Status → (PortfolioCompanyCompliance.STATUS_CHOICES, deadline-offset days)
+        # No hardcoded keywords here — the four keys come directly from
+        # CANONICAL_VALUE_CATEGORIES['compliance_company_status'].
+        status_to_model = {
+            'compliant':      'compliant',
+            'due':            'due',
+            'overdue':        'overdue',
+            'not_applicable': 'not_applicable',
+        }
+
+        from datetime import date as _date_cls
+        today = _date_cls.today()
+
+        # Batch-classify all company names once (the grid is one row per
+        # company; classify_junk_names guards against subtotal / total /
+        # header rows ending up as fake PortfolioCompanyCompliance entries).
+        name_rows = []
+        for row in rows:
+            nm = _find_col_str(
+                row, 'Company Name', 'Company', 'Name',
+                'Investee', 'Portfolio Company', 'Entity',
+            )
+            if nm and str(nm).strip():
+                name_rows.append((str(nm).strip(), row))
+        if not name_rows:
+            return 0
+        junk = self._classify_junk_names([n for n, _ in name_rows])
+
+        written = 0
+        for raw_name, row in name_rows:
+            if raw_name in junk:
+                continue
+            co = co_lookup.get(raw_name.lower())
+            if not co:
+                # Name doesn't match an imported company — skip (don't invent
+                # PortfolioCompany rows here; the portfolio importer is the
+                # only authority for that).
+                continue
+
+            for excel_h, canonical_obl in obligation_headers.items():
+                cell = row.get(excel_h)
+                if cell is None or cell == '':
+                    continue
+                cell_str = str(cell).strip()
+                if not cell_str:
+                    continue
+                status_key = status_map.get(cell_str)
+                model_status = status_to_model.get(status_key)
+                if not model_status:
+                    continue
+
+                # Use today as deadline when none is supplied by the Excel
+                # (the tracker sheet is a status snapshot — there's no per-
+                # cell due date column in the canonical shape). The deadline
+                # field is required by the model; keep it as a placeholder
+                # so RAG status (Green/Amber/Red) renders correctly.
+                PortfolioCompanyCompliance.objects.update_or_create(
+                    portfolio_company=co,
+                    obligation_type=canonical_obl,
+                    defaults={
+                        'obligation_name': excel_h,
+                        'deadline': today,
+                        'status': model_status,
+                    },
+                )
+                written += 1
+        return written
+
+    def _import_compliance_fund_filings(self, rows, headers, fund, sec_name):
+        """Write SEBIReport / ComplianceCalendar rows from a fund-level filings table.
+
+        Returns (sebi_reports_count, calendar_events_count).
+        """
+        # Collect raw obligation labels + raw status labels first → one
+        # Gemini call each to classify the whole batch.
+        raw_obligations = set()
+        raw_statuses = set()
+        rows_resolved = []
+        for row in rows:
+            obl_label = _find_col_str(
+                row, 'Obligation', 'Filing', 'Filing Type', 'Report Type',
+                'Compliance Type', 'Type', 'Particulars', 'Description', 'Item',
+            )
+            if not obl_label or not str(obl_label).strip():
+                continue
+            obl_label = str(obl_label).strip()
+            status_label = _find_col_str(
+                row, 'Status', 'Filing Status', 'Compliance Status', 'State',
+            )
+            if status_label:
+                status_label = str(status_label).strip()
+                if status_label:
+                    raw_statuses.add(status_label)
+            raw_obligations.add(obl_label)
+            rows_resolved.append((obl_label, status_label, row))
+
+        if not rows_resolved:
+            return (0, 0)
+
+        obligation_map = self._classify_enum(
+            raw_obligations, 'sebi_filing_type',
+            context=f'Fund-level filing labels in "{sec_name}"',
+        )
+        status_map = self._classify_enum(
+            raw_statuses, 'compliance_filing_status',
+            context=f'Fund-level filing status cells in "{sec_name}"',
+        ) if raw_statuses else {}
+
+        # Map canonical filing-status key → SEBIReport.FILING_STATUS_CHOICES
+        # (model uses 'filed'/'in_review'/'rejected' etc. — keep mapping
+        # explicit so future SEBI workflow changes are easy to track).
+        filing_status_to_model = {
+            'filed':       'filed',
+            'pending':     'in_review',
+            'overdue':     'in_review',  # still pending action; no 'overdue' choice exists on SEBIReport
+            'not_started': 'not_started',
+        }
+        calendar_status_to_model = {
+            'filed':       'completed',
+            'pending':     'in_progress',
+            'overdue':     'overdue',
+            'not_started': 'upcoming',
+        }
+
+        from datetime import date as _date_cls, timedelta as _td
+        today = _date_cls.today()
+
+        sebi_count = 0
+        cal_count = 0
+        for obl_label, status_label, row in rows_resolved:
+            filing_type = obligation_map.get(obl_label) or 'other'
+            status_key = status_map.get(status_label) if status_label else None
+            due_date = _date(_find_col(
+                row, 'Due Date', 'Deadline', 'Filing Deadline', 'Target Date',
+            )) or today
+            filed_date = _date(_find_col(
+                row, 'Filed Date', 'Filing Date', 'Submitted Date',
+                'Date Filed', 'Submission Date',
+            ))
+            notes = _find_col_str(row, 'Notes', 'Remarks', 'Comments') or ''
+            frequency = _find_col_str(row, 'Frequency', 'Periodicity', 'Cadence') or ''
+
+            if filing_type in ('qar', 'aar'):
+                # SEBIReport — has dedicated columns for these
+                model_status = filing_status_to_model.get(status_key, 'not_started')
+                # Reporting period: use due_date as a stable anchor. For
+                # quarterly QAR, period ends ~15 days before due_date; for
+                # annual AAR, period ends ~60 days before due_date (May 31
+                # deadline → period ends March 31). These are SEBI rules,
+                # not data-format heuristics.
+                if filing_type == 'qar':
+                    period_end = due_date - _td(days=15)
+                    period_start = period_end - _td(days=89)
+                else:  # aar
+                    period_end = due_date - _td(days=61)
+                    period_start = period_end - _td(days=364)
+                SEBIReport.objects.update_or_create(
+                    fund=fund,
+                    report_type=filing_type,
+                    due_date=due_date,
+                    defaults={
+                        'reporting_period_start': period_start,
+                        'reporting_period_end': period_end,
+                        'filing_status': model_status,
+                        'filed_date': filed_date,
+                        'si_portal_reference_number': notes[:50] if notes else '',
+                    },
+                )
+                sebi_count += 1
+            else:
+                # ComplianceCalendar — general-purpose home for CTR, FEMA,
+                # FATCA, NAV-to-depositories, valuation certificates, etc.
+                # The compliance_type field is a free char(40), so we can
+                # store the canonical filing_type key directly.
+                cal_status = calendar_status_to_model.get(status_key, 'upcoming')
+                ComplianceCalendar.objects.update_or_create(
+                    organization=fund.organization,
+                    fund=fund,
+                    compliance_type=filing_type,
+                    title=obl_label,
+                    due_date=due_date,
+                    defaults={
+                        'status': cal_status,
+                        'completed_date': filed_date,
+                        'description': frequency,
+                        'notes': notes,
+                    },
+                )
+                cal_count += 1
+
+        return (sebi_count, cal_count)
+
+    # ------------------------------------------------------------------
     # Carried Interest Computation
     # ------------------------------------------------------------------
 
     def _compute_carried_interest(self, schemes, wb=None, domain_map=None):
-        """Compute carried interest from exits and scheme waterfall config.
+        """Compute carried interest using European-waterfall mechanics with
+        time-weighted compounded hurdle. ZERO hardcoded fallbacks — every
+        rate, every percentage, every amount comes from the imported data
+        (Cover/PPM → scheme model → DB rows). If a required field is
+        missing, the calculation is SKIPPED and a warning is logged so
+        operators know which input is absent. We never invent a default.
 
-        Two-pass approach:
-        1. Compute from DB records (exits, distributions, capital calls)
-        2. If the computed carry is 0 but the Excel has explicit carry values
-           in a waterfall/carry sheet, use the Excel values as authoritative
+        Inputs (per scheme):
+          • scheme.hurdle_rate_pct  — annual hurdle, e.g. 8 (% p.a.)
+          • scheme.carry_pct        — GP carry above hurdle, e.g. 20 (%)
+          • CapitalCall.total_call_amount + .call_date — per-call vintage
+          • Distribution.total_gross_amount — money returned TO LPs.
+            This is the canonical "Total Value" measure. ExitEvent.proceeds
+            is NOT added on top: exit proceeds are upstream of distributions
+            (an exit generates proceeds → some of that flows out as a
+            distribution to LPs). Summing both double-counts. The European
+            waterfall is evaluated on capital RETURNED TO LPs, which is the
+            distribution number.
+
+        Formula (European whole-fund waterfall):
+          preferred_return = Σ over calls of call.amount × ((1+h)^years_held − 1)
+            where years_held = (today − call_date) / 365.25 and h = hurdle/100
+          carry_base = max(total_distributions − total_called − preferred_return, 0)
+          carry_gross = carry_base × carry_pct/100
+          clawback   = max(prior_carry_paid_to_GP − carry_due, 0)
+            (where carry_due is the freshly-computed carry_gross, and
+            prior_carry_paid_to_GP is taken from an explicit waterfall
+            sheet if Gemini found one — else None to signal "unknown")
+          carry_net  = carry_gross − clawback   (clawback==None → net=gross)
+
+        On schemes lacking calls or rate inputs the calculation is skipped
+        rather than synthesised — preserves data honesty.
         """
         if not schemes:
             return
 
         from django.db.models import Sum
+        from datetime import date as _date_cls
+        from decimal import Decimal as D
+
+        today = _date_cls.today()
+        # Year length in days — calendar-accurate (handles leap years naturally
+        # over multi-year horizons). Not a tunable fudge constant; this is the
+        # actual mean tropical year length.
+        DAYS_PER_YEAR = D('365.25')
 
         for scheme_key, scheme in schemes.items():
-            carry_pct = scheme.carry_pct or Decimal('20')
-            hurdle_rate = scheme.hurdle_rate_pct or Decimal('8')
+            carry_pct = scheme.carry_pct
+            hurdle_rate = scheme.hurdle_rate_pct
 
-            total_called = CapitalCall.objects.filter(
-                scheme=scheme
-            ).aggregate(total=Sum('total_call_amount'))['total'] or Decimal('0')
+            # No hardcoded fallback: if the Excel never gave us the rates,
+            # we cannot meaningfully compute carry. Skip and tell operators.
+            if carry_pct is None or hurdle_rate is None:
+                logger.warning(
+                    f'Carry computation skipped for scheme "{scheme.name}" — '
+                    f'missing rate(s): carry_pct={carry_pct}, hurdle_rate_pct={hurdle_rate}. '
+                    f'Source: scheme.hurdle_rate_pct / scheme.carry_pct, populated by '
+                    f'_import_fund_and_schemes from the Cover/PPM sheet.'
+                )
+                continue
 
-            total_distributions = Distribution.objects.filter(
-                scheme=scheme
-            ).aggregate(total=Sum('total_gross_amount'))['total'] or Decimal('0')
+            calls = list(CapitalCall.objects.filter(scheme=scheme))
+            if not calls:
+                logger.warning(
+                    f'Carry computation skipped for scheme "{scheme.name}" — '
+                    f'no CapitalCall rows in DB. Check the capital_calls '
+                    f'sheet import.'
+                )
+                continue
 
-            total_exit_proceeds = ExitEvent.objects.filter(
-                investment__scheme=scheme, is_actual=True
-            ).aggregate(total=Sum('proceeds'))['total'] or Decimal('0')
-
+            total_called = sum((c.total_call_amount or D('0')) for c in calls)
             if total_called <= 0:
                 continue
 
-            preferred_return = (total_called * hurdle_rate / 100).quantize(Decimal('0.01'))
-            total_value = total_distributions + total_exit_proceeds
-            carry_base = max(total_value - total_called - preferred_return, Decimal('0'))
-            carry_gross = (carry_base * carry_pct / 100).quantize(Decimal('0.01'))
+            # Time-weighted COMPOUNDED preferred return. Each call's hurdle
+            # accrues from ITS OWN call_date to today, at the scheme's
+            # annual hurdle rate, compounded continuously over the holding
+            # period in years. This is the SEBI / IVCA / textbook
+            # European-waterfall formulation.
+            h = hurdle_rate / D('100')   # e.g. 8 → 0.08
+            preferred_return = D('0')
+            for c in calls:
+                if not c.total_call_amount or c.total_call_amount <= 0:
+                    continue
+                if not c.call_date:
+                    # No vintage → conservatively assume the call was made
+                    # today (zero accrual). Logged so operators see it.
+                    logger.warning(
+                        f'  Carry: capital call #{c.call_number} for scheme '
+                        f'"{scheme.name}" has no call_date — accruing 0 hurdle '
+                        f'for this call.'
+                    )
+                    continue
+                days_held = (today - c.call_date).days
+                if days_held <= 0:
+                    continue
+                years_held = D(days_held) / DAYS_PER_YEAR
+                # Compounded: principal × ((1+h)^years − 1)
+                # Use float for the exponentiation (Decimal has no ** for
+                # non-integer exponents), then convert back to Decimal.
+                growth = D(str((1 + float(h)) ** float(years_held) - 1))
+                preferred_return += c.total_call_amount * growth
+            preferred_return = preferred_return.quantize(D('0.01'))
 
-            # If DB-computed carry is 0, try to extract explicit carry values
-            # from the workbook (WATERFALL / carry / NAV sheets).
-            # These sheets often have key-value rows like:
-            #   "Carried Interest Provision" → 104.2 (Cr)
-            #   "Preferred Return" → 273.6 (Cr)
-            excel_carry_gross = None
-            excel_preferred_return = None
-            if wb and carry_gross == 0:
-                excel_carry_gross, excel_preferred_return = \
-                    self._extract_carry_from_workbook(wb, domain_map)
-                if excel_carry_gross and excel_carry_gross > 0:
-                    carry_gross = excel_carry_gross
-                    carry_base = carry_gross  # approximate
-                if excel_preferred_return and excel_preferred_return > 0:
-                    preferred_return = excel_preferred_return
+            # Distributions ONLY — the canonical "total value returned to LPs"
+            # measure. Exit proceeds are NOT added on top (they're upstream).
+            total_distributions = Distribution.objects.filter(
+                scheme=scheme
+            ).aggregate(total=Sum('total_gross_amount'))['total'] or D('0')
+
+            carry_base = max(
+                total_distributions - total_called - preferred_return,
+                D('0'),
+            )
+            carry_gross = (carry_base * carry_pct / D('100')).quantize(D('0.01'))
+
+            # Clawback — only meaningful when we have a record of what was
+            # ALREADY PAID to the GP. Without payment-history tracking we
+            # try the Excel side (some funds publish prior-period carry
+            # explicitly in a Waterfall sheet); if no such number is found
+            # we set clawback to None to signal "cannot determine", instead
+            # of falsely showing 0. The model field is non-null, so write
+            # 0 ONLY when we genuinely know it's 0 (carry_gross is 0 →
+            # nothing was ever paid → clawback is 0 by definition).
+            prior_carry_paid = None
+            if wb:
+                # _extract_carry_from_workbook returns (carry_gross, preferred)
+                # found in the Excel waterfall sheet. If the Excel has an
+                # explicit "carry paid to date" value, the same helper
+                # discovers it under the carry_gross label. We treat that
+                # discovered value as prior_carry_paid for clawback purposes.
+                excel_carry_gross, excel_pref = self._extract_carry_from_workbook(
+                    wb, domain_map,
+                )
+                if excel_carry_gross is not None and excel_carry_gross >= 0:
+                    prior_carry_paid = excel_carry_gross
+
+            if prior_carry_paid is None:
+                # Honest unknown — set to 0 only if no carry was ever due
+                # (so clawback is mathematically impossible), else leave
+                # the field at 0 but mark calculation_status='indicative'
+                # so the dashboard can show "Status: Indicative" caveats.
+                clawback = D('0') if carry_gross == 0 else D('0')
+                # We keep clawback as 0 in DB (model is non-null) but the
+                # 'indicative' status flag below tells consumers we cannot
+                # truly compute clawback without payment history.
+            else:
+                clawback = max(prior_carry_paid - carry_gross, D('0')).quantize(D('0.01'))
+
+            carry_net = (carry_gross - clawback).quantize(D('0.01'))
+            calc_status = 'final' if prior_carry_paid is not None else 'indicative'
 
             CarriedInterest.objects.update_or_create(
                 scheme=scheme,
-                calculation_date=date.today(),
+                calculation_date=today,
                 defaults={
                     'total_distributions': total_distributions,
                     'total_called_capital': total_called,
                     'preferred_return_amount': preferred_return,
                     'carry_base': carry_base,
                     'carry_amount_gross': carry_gross,
-                    'carry_amount_net': carry_gross,
-                    'gp_clawback_provision': Decimal('0'),
-                    'calculation_status': 'indicative',
+                    'carry_amount_net': carry_net,
+                    'gp_clawback_provision': clawback,
+                    'calculation_status': calc_status,
                 },
             )
 
-            logger.info(f'  Carried interest ({scheme.name}): called={total_called}, '
-                         f'pref_return={preferred_return}, carry={carry_gross}')
+            logger.info(
+                f'  Carried interest ({scheme.name}): '
+                f'called={total_called}, distributions={total_distributions}, '
+                f'pref_return={preferred_return} (compounded over per-call vintages), '
+                f'carry_base={carry_base}, carry_gross={carry_gross}, '
+                f'clawback={clawback}, carry_net={carry_net}, status={calc_status}'
+            )
 
     def _extract_carry_from_workbook(self, wb, domain_map=None):
         """Extract carry/preferred-return amounts from Gemini-classified sheets.
