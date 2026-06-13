@@ -711,6 +711,25 @@ DOMAIN_FIELDS = {
 # ---------------------------------------------------------------------------
 
 CANONICAL_VALUE_CATEGORIES = {
+    # ── LP register column roles ──────────────────────────────
+    # Phase 2: after Gemini's LP analyst returns, a deterministic Python
+    # sweep classifies LP-register column headers into these roles and
+    # sums the columns directly via openpyxl. The sums override Gemini's
+    # values whenever (a) Gemini returned null OR (b) the sums disagree
+    # by more than 10% — eliminating per-file non-determinism in LP-level
+    # aggregations like Net Carry, Distributions to LPs, and Commitments.
+    'lp_register_columns': {
+        'committed':       'LP Commitment / Total Commitment / Capital Commitment / Subscription Amount / Commit (₹ Cr) — the amount each LP has committed to the fund',
+        'drawdown':        'LP Drawdown / Called Capital / Drawn Capital / Capital Drawn / Drawdown Amount / Funded Capital — amount actually called from each LP to date',
+        'distributions':   'LP Distributions / Distributions Paid / Distribution Received / Distributions to LP / Total Distributions — money returned TO this LP (NOT to be confused with fund-level distributions FROM portfolio exits)',
+        'carry_provision': 'Carry Provision / Carry Accrual / Carry Reserve / Performance Fee Accrual / GP Carry / Carried Interest Provision / Carry Prov. — per-LP accrued carry liability shown on the LP register',
+        'sponsor_amount':  'Sponsor Commitment / GP Commitment / Manager Commitment / Sponsor Amount — only when this column explicitly identifies a sponsor / GP contribution',
+        'investor_name':   'Investor Name / LP Name / Limited Partner / Unitholder / Subscriber — text identifier of the LP',
+        'investor_type':   'Investor Type / Type / Category / Investor Category — classifier (Pension, Sovereign Wealth, Insurance, Family Office, etc.)',
+        'investor_id':     'LP ID / Investor ID / Folio / Unit Holder ID — code identifier for the LP',
+        'pct_share':       '% Fund / Share % / Ownership % / LP Share — proportion of fund corpus held by this LP',
+        'drawn_pct':       'Drawn % / % Drawn / Drawdown % — proportion of commitment actually called',
+    },
     # Per-portfolio-company compliance OBLIGATION TYPE (column header in a tracker grid).
     # Lives here (not in CANONICAL_ENUM_TYPES) because identity columns like
     # "Company Name" / "Sector" / "S.No" MUST be allowed to return None — only
@@ -827,14 +846,19 @@ CANONICAL_VALUE_CATEGORIES = {
     },
     'nav_components': {
         'total_nav': 'Closing NAV / Fund NAV / Total NAV / Net Asset Value — the fund net asset value at period end',
+        'total_investments': 'Total Investments / Investments at Cost / Investment Value / Cost of Investments — gross investments held at period end (cost basis)',
         'unrealized_gains': 'Unrealized Gains / Unrealized Appreciation / Fair Value Adjustment / Mark-to-Market Gains — unrealized portfolio gains',
         'realized_gains': 'Realized Gains / Gains from Exits / Realized Profit — gains from actual exits/sales',
         'mgmt_fee': 'Management Fee / Fund Management Charges / Mgmt Fee — periodic management fee expense',
+        'fund_expenses': 'Fund Expenses / Operating Expenses / Other Expenses / Fund Operating Cost — fund-level operating expenses (NOT management fee)',
         'carry_provision': 'Carried Interest Provision / Carry Provision / Performance Fee Accrual / Carry Amount — GP performance fee accrual',
         'investment_income': 'Investment Income / Net Investment Income / Interest & Dividend Income — income earned on investments',
         'closing_nav_per_unit': 'Closing NAV per Unit / NAV/Unit / NAV Per Unit at period end — per-unit net asset value',
         'opening_nav_per_unit': 'Opening NAV per Unit / Opening NAV/Unit — per-unit NAV at period start',
         'total_units': 'Total Units Outstanding / Units Issued / Units — total fund units in circulation',
+        'period_label': 'Period / Month / Quarter / Reporting Period — text label identifying the time bucket',
+        'period_date': 'Date / As of Date / Period End — calendar date for the period',
+        'draw_for_period': 'Drawdown for Period / Capital Drawn / Period Drawdown — capital drawn during the period (NOT NAV)',
     },
     'fee_components': {
         'management_fee': 'Management Fee — base fee charged by the fund manager (excluding GST/tax)',
@@ -846,25 +870,178 @@ CANONICAL_VALUE_CATEGORIES = {
     },
     'fund_performance_metrics': {
         # ----- Headline fund-level metrics (universal across PE/VC/Hedge) -----
-        # These categories are used by the universal label-value scanner in
-        # _extract_explicit_performance_metrics() to find pre-computed values
-        # ANYWHERE in the workbook (any sheet, any sub-table) without any
-        # keyword matching — purely via Gemini semantic equivalence.
-        'net_irr':                    'Net IRR / LP IRR / Net Internal Rate of Return — annualised return to LPs net of fees and carry',
-        'gross_irr':                  'Gross IRR / Fund-Level IRR / IRR (Gross) — annualised return at the fund level before fees',
-        'moic':                       'MOIC / Money Multiple / Investment Multiple / Total Value Multiple — (distributions + residual value) / invested capital',
-        'tvpi':                       'TVPI / Total Value to Paid-In — (distributions + residual fund NAV) / cumulative LP paid-in capital',
-        'dpi':                        'DPI / Distributions to Paid-In — cumulative distributions / cumulative LP paid-in',
-        'rvpi':                       'RVPI / Residual Value to Paid-In — residual fund NAV / cumulative LP paid-in',
-        'nav':                        'Total Fund NAV / Net Asset Value / Closing NAV — total fund net asset value at as-of date',
-        'nav_per_unit':               'NAV per Unit / Unit NAV / NAV/Unit — per-unit net asset value',
-        'total_called_capital':       'Total Called Capital / Cumulative Drawdown / Paid-In Capital — LP capital actually called to date',
-        'total_committed_capital':    'Total Committed Capital / Fund Size / Total Commitments',
-        'total_distributions':        'Total Distributions / Cumulative Distributions to LPs',
-        'total_realised_proceeds':    'Total Realised Proceeds / Exit Proceeds / Cumulative Realisations',
-        'total_unrealised_fair_value':'Total Unrealised Fair Value / Total Portfolio FV / Residual Portfolio Value',
-        'total_realised_gains':       'Total Realised Gains / Realised Profit on Exits',
-        'total_unrealised_gains':     'Total Unrealised Gains / Mark-to-Market Gains / Fair Value Appreciation',
+        # Each entry is a dict with:
+        #   'description'      — semantic prose used by classify_labels.
+        #   'value_type'       — drives Pass 3.5 column-role filter:
+        #       'per_step_amount': value FOR ONE waterfall step/period; the
+        #           cell must be a per_period_amount column (LP Share /
+        #           GP Share / Total Step / "this step's value"). NEVER a
+        #           cumulative or balance column.
+        #       'aggregate_total': sum across ALL steps/periods OR the
+        #           final cumulative cell. Both per_period and cumulative
+        #           columns are acceptable.
+        #       'aggregate_cumulative': running-total / paid-in style
+        #           number. Cumulative columns preferred; per_period
+        #           acceptable when the per_period cell IS the cumulative
+        #           total at a single fund-level summary row.
+        #       'per_unit_amount': value per unit (NAV/Unit etc.).
+        #       'ratio': IRR / multiple / percentage. Should not come from
+        #           cumulative_total columns.
+        #   'requires_variant' — None or list of allowed variant tags
+        #       (e.g. ['gross', 'net'], ['pre_fee', 'post_fee']). When set,
+        #       Pass 3.5 runs an extra Gemini call to tag each candidate
+        #       cell's variant before disambiguation.
+        #   'variant_default'  — preferred variant when extraction yields
+        #       multiple. Carry-base derivation will request this default
+        #       unless overridden.
+        'net_irr': {
+            'description': 'Net IRR / LP IRR / Net Internal Rate of Return — annualised return to LPs net of fees and carry',
+            'value_type': 'ratio',
+            'requires_variant': None,
+            'variant_default': None,
+        },
+        'gross_irr': {
+            'description': 'Gross IRR / Fund-Level IRR / IRR (Gross) — annualised return at the fund level before fees',
+            'value_type': 'ratio',
+            'requires_variant': None,
+            'variant_default': None,
+        },
+        'moic': {
+            'description': 'MOIC / Money Multiple / Investment Multiple / Total Value Multiple — (distributions + residual value) / invested capital',
+            'value_type': 'ratio',
+            'requires_variant': None,
+            'variant_default': None,
+        },
+        'tvpi': {
+            'description': 'TVPI / Total Value to Paid-In — (distributions + residual fund NAV) / cumulative LP paid-in capital',
+            'value_type': 'ratio',
+            'requires_variant': None,
+            'variant_default': None,
+        },
+        'dpi': {
+            'description': 'DPI / Distributions to Paid-In — cumulative distributions / cumulative LP paid-in',
+            'value_type': 'ratio',
+            'requires_variant': None,
+            'variant_default': None,
+        },
+        'rvpi': {
+            'description': 'RVPI / Residual Value to Paid-In — residual fund NAV / cumulative LP paid-in',
+            'value_type': 'ratio',
+            'requires_variant': None,
+            'variant_default': None,
+        },
+        'nav': {
+            'description': 'Total Fund NAV / Net Asset Value / Closing NAV — total fund net asset value at as-of date',
+            'value_type': 'aggregate_total',
+            'requires_variant': ['gross', 'net'],
+            'variant_default': 'net',
+        },
+        'nav_per_unit': {
+            'description': 'NAV per Unit / Unit NAV / NAV/Unit — per-unit net asset value',
+            'value_type': 'per_unit_amount',
+            'requires_variant': None,
+            'variant_default': None,
+        },
+        'total_called_capital': {
+            'description': 'Total Called Capital / Cumulative Drawdown / Paid-In Capital — LP capital actually called to date. Cumulative running total.',
+            'value_type': 'aggregate_cumulative',
+            'requires_variant': None,
+            'variant_default': None,
+        },
+        'total_committed_capital': {
+            'description': 'Total Committed Capital / Fund Size / Total Commitments. Single fund-level total.',
+            'value_type': 'aggregate_total',
+            'requires_variant': None,
+            'variant_default': None,
+        },
+        'total_distributions': {
+            'description': 'Total Distributions / Cumulative Distributions to LPs. NOTE: OVERLAPS with total_realised_proceeds because exit proceeds are typically distributed to LPs. Use total_realised_proceeds + total_unrealised_fair_value for fund-value calculations; do NOT also add total_distributions.',
+            'value_type': 'aggregate_cumulative',
+            'requires_variant': None,
+            'variant_default': None,
+        },
+        'total_realised_proceeds': {
+            'description': 'Total Realised Proceeds / Exit Proceeds / Cumulative Realisations. The sum of gross proceeds from exits. INCLUDES amounts that were distributed to LPs (the same cash flows would also appear in total_distributions). DISJOINT FROM total_unrealised_fair_value.',
+            'value_type': 'aggregate_cumulative',
+            'requires_variant': ['gross', 'net'],
+            'variant_default': 'gross',
+        },
+        'total_unrealised_fair_value': {
+            'description': 'Total Unrealised Fair Value / Total Portfolio FV / Residual Portfolio Value — value of investments still held. DISJOINT FROM total_realised_proceeds and total_distributions. Two semantic variants exist: GROSS (before DLOM/DLOC discounts — used in waterfall calculations), NET (after DLOM/DLOC — used in IPEV-compliant reporting).',
+            'value_type': 'aggregate_total',
+            'requires_variant': ['gross', 'net'],
+            'variant_default': 'gross',
+        },
+        'total_realised_gains': {
+            'description': 'Total Realised Gains / Realised Profit on Exits = total_realised_proceeds - cost_basis_of_exited_investments. NOT the same as total_realised_proceeds (which is gross proceeds, not gains).',
+            'value_type': 'aggregate_cumulative',
+            'requires_variant': None,
+            'variant_default': None,
+        },
+        'total_unrealised_gains': {
+            'description': 'Total Unrealised Gains / Mark-to-Market Gains / Fair Value Appreciation = total_unrealised_fair_value - cost_basis_of_live_investments.',
+            'value_type': 'aggregate_cumulative',
+            'requires_variant': None,
+            'variant_default': None,
+        },
+        # ----- Distribution-waterfall components (European / American carry) -----
+        # PER-STEP amounts. The disambiguator MUST pick per_period_amount
+        # columns (LP Share / GP Share / Total Step), NEVER cumulative
+        # columns (Cumulative Distributed / Balance Remaining).
+        'return_of_capital_amount': {
+            'description': 'Return of LP Committed Capital — first step of a European waterfall. PER-STEP value (Step 1 LP Share). NOT the cumulative total after step 1.',
+            'value_type': 'per_step_amount',
+            'requires_variant': None,
+            'variant_default': None,
+        },
+        'preferred_return_amount': {
+            'description': 'Preferred Return / Hurdle Amount / LP Pref Return — per-step LP cash entitlement at the preferred-return step (Step 2 LP Share). NOT the cumulative running total at the end of step 2. The CORRECT cell is the per-period amount column, NEVER the "Cumulative Distributed" or "Balance Remaining" column.',
+            'value_type': 'per_step_amount',
+            'requires_variant': None,
+            'variant_default': None,
+        },
+        'gp_catchup_amount': {
+            'description': 'GP Catch-Up Amount — per-step GP cash at the catch-up step (Step 3 GP Share). LP Share at this step is typically ZERO; the canonical value is the GP Share column, NOT the LP Share column.',
+            'value_type': 'per_step_amount',
+            'requires_variant': None,
+            'variant_default': None,
+        },
+        'carry_base': {
+            'description': 'Carry Base / Profit Above Hurdle / Distributable Profit Subject to Carry — the residual pool of cash REMAINING after Step 1 (return of capital) + Step 2 (preferred return) + Step 3 (catch-up). Equals the Step 4 Total Step value. = total_realised_proceeds + total_unrealised_fair_value_GROSS - total_called_capital - preferred_return_amount - gp_catchup_amount. Do NOT also add total_distributions (overlaps with total_realised_proceeds).',
+            'value_type': 'per_step_amount',
+            'requires_variant': None,
+            'variant_default': None,
+        },
+        'carry_amount_gross': {
+            'description': 'GP Carried Interest (Gross) / Total GP Carry = catchup + GP residual split. Aggregate total across all waterfall steps for the GP. Read from a summary row, not a single step row.',
+            'value_type': 'aggregate_total',
+            'requires_variant': None,
+            'variant_default': None,
+        },
+        'carry_amount_net': {
+            'description': 'GP Carried Interest (Net) = carry_amount_gross - gp_clawback_provision. Aggregate total.',
+            'value_type': 'aggregate_total',
+            'requires_variant': None,
+            'variant_default': None,
+        },
+        'gp_clawback_provision': {
+            'description': 'Clawback Provision / Excess Carry Returned to LPs / GP Clawback. Zero when no carry has actually been paid out yet; otherwise = previously_paid_carry - current_gross_entitlement, floored at 0.',
+            'value_type': 'aggregate_total',
+            'requires_variant': None,
+            'variant_default': None,
+        },
+        'lp_total_return': {
+            'description': 'LP Total Return / Total LP Distribution = return_of_capital + preferred_return + LP_share_of_residual_split. Aggregate sum across all waterfall steps for the LP side.',
+            'value_type': 'aggregate_total',
+            'requires_variant': None,
+            'variant_default': None,
+        },
+        'gp_total_distribution': {
+            'description': 'GP Total Distribution / Total GP Share = gp_catchup + GP_share_of_residual_split. Aggregate sum across all waterfall steps for the GP side.',
+            'value_type': 'aggregate_total',
+            'requires_variant': None,
+            'variant_default': None,
+        },
     },
     'burn_runway_metrics': {
         'gross_burn': 'Gross Burn / Total Burn / Monthly Expenses / Cash Outflow / Operating Expenses / Total Opex — total monthly cash outflow',
@@ -1095,6 +1272,113 @@ DERIVABLE_FUND_METRICS = {
             'aggregate fair value of investments minus liabilities.'
         ),
     },
+    # ── Distribution-waterfall components ────────────────────────────────
+    # The four numbers the dashboard's "Carry & Clawback Analysis" panel
+    # displays: carry_base, carry_amount_gross, carry_amount_net,
+    # gp_clawback_provision. Pre-requisite supporting amounts —
+    # return_of_capital_amount, preferred_return_amount, gp_catchup_amount,
+    # lp_total_return, gp_total_distribution — are derived as part of the
+    # same waterfall. Gemini chooses the correct waterfall formulation
+    # (European whole-fund vs American deal-by-deal; compound vs simple
+    # preferred return) based on the scheme's LPA terms passed as inputs
+    # (lpa_carry_type, lpa_hurdle_rate_pct, lpa_carry_pct, etc.).
+    'return_of_capital_amount': {
+        'label': 'Return of LP Committed Capital',
+        'unit': 'currency',
+        'description': (
+            'European waterfall step 1: cumulative cash returned to LPs as principal '
+            'BEFORE any preferred return or carry — limited to LP committed capital '
+            '(or paid-in capital, depending on LPA wording). In a deal-by-deal '
+            '(American) waterfall, this is the per-deal cost-basis return.'
+        ),
+    },
+    'preferred_return_amount': {
+        'label': 'Preferred Return / Hurdle Amount',
+        'unit': 'currency',
+        'description': (
+            'Cumulative preferred return (hurdle amount) cleared to LPs before GP carry '
+            'kicks in. For a COMPOUND hurdle: LP_committed_or_paid_in × ((1 + hurdle)^years - 1). '
+            'For a SIMPLE hurdle: LP_committed_or_paid_in × hurdle × years. The hurdle '
+            'rate (lpa_hurdle_rate_pct), the base (LP committed vs paid-in per LPA), '
+            'and the compounding convention (compound vs simple, per LPA) must be '
+            'taken from the LPA inputs. Years = years_since_inception (or the LPA '
+            'average hold period if explicitly provided).'
+        ),
+    },
+    'gp_catchup_amount': {
+        'label': 'GP Catch-Up Amount',
+        'unit': 'currency',
+        'description': (
+            'Step 3 of a European waterfall with catch-up: amount paid to GP after the '
+            'preferred return so that GP receives its target carry % of the combined '
+            '(preferred return + catch-up) pool. With a 100% catch-up (most common): '
+            'min((carry_pct / (1 - carry_pct)) × (return_of_capital_amount + preferred_return_amount), '
+            'remaining_proceeds_after_pref). If the LPA waterfall has NO catch-up '
+            'tier, return 0.'
+        ),
+    },
+    'carry_base': {
+        'label': 'Carry Base (Profit Above Hurdle)',
+        'unit': 'currency',
+        'description': (
+            'Profit pool on which GP carry is computed. European whole-fund formula: '
+            'max(total_value − total_called_capital − preferred_return_amount − '
+            'gp_catchup_amount, 0), where total_value = total_distributions + '
+            'total_realised_proceeds + total_unrealised_fair_value (i.e. the residual '
+            'NAV). If total_value ≤ LP minimum (called + preferred return), carry '
+            'base is 0 — the fund has not yet returned principal+hurdle to LPs.'
+        ),
+    },
+    'carry_amount_gross': {
+        'label': 'GP Carry (Gross)',
+        'unit': 'currency',
+        'description': (
+            'Total GP carried-interest entitlement BEFORE clawback. European with '
+            'catch-up: gp_catchup_amount + carry_base × lpa_carry_pct. European '
+            'without catch-up: carry_base × lpa_carry_pct. American (deal-by-deal): '
+            'sum of per-deal carry across exited deals. Use lpa_carry_type to pick '
+            'the formulation.'
+        ),
+    },
+    'gp_clawback_provision': {
+        'label': 'GP Clawback Provision',
+        'unit': 'currency',
+        'description': (
+            'Excess GP carry that must be returned to LPs at fund term (or held in '
+            'escrow under the clawback reserve). Computed as: max(carry_actually_paid '
+            '- carry_amount_gross_entitlement, 0). For interim periods (fund still '
+            'active) clawback is the ESCROWED reserve = carry_amount_gross × '
+            'clawback_reserve_pct (from LPA, typically 30%); if the LPA has no '
+            'explicit reserve % AND no carry has been paid yet, return 0.'
+        ),
+    },
+    'carry_amount_net': {
+        'label': 'GP Carry (Net)',
+        'unit': 'currency',
+        'description': (
+            'GP carried interest AFTER clawback provision: carry_amount_gross − '
+            'gp_clawback_provision. This is what the GP actually keeps net of '
+            'clawback escrow / true-up.'
+        ),
+    },
+    'lp_total_return': {
+        'label': 'LP Total Return',
+        'unit': 'currency',
+        'description': (
+            'Total cash returned to LPs across the entire waterfall: '
+            'return_of_capital_amount + preferred_return_amount + LP share of '
+            'residual proceeds (residual × (1 - carry_pct)).'
+        ),
+    },
+    'gp_total_distribution': {
+        'label': 'GP Total Distribution',
+        'unit': 'currency',
+        'description': (
+            'Total cash to GP across the entire waterfall = gp_catchup_amount + '
+            'carry_amount_gross (the GP share of residual is already included in '
+            'carry_amount_gross when computed via the residual-split formula).'
+        ),
+    },
 }
 
 
@@ -1205,3 +1489,50 @@ DERIVATION_CONTEXT_INPUTS = {
         'unit': 'years',
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Pass 3.5 — value_type ↔ column_role compatibility matrix
+# ---------------------------------------------------------------------------
+# Used by _extract_explicit_performance_metrics to filter candidate cells
+# BEFORE disambiguation. Each canonical metric's value_type (declared in
+# CANONICAL_VALUE_CATEGORIES['fund_performance_metrics']) maps to the set
+# of column_role values that can legitimately host that metric.
+#
+# Free-form (non-tabular) candidates have column_role=None — they are
+# accepted for any value_type because we cannot constrain them without
+# column-header context. The disambiguation step still chooses among
+# them.
+
+VALUE_TYPE_TO_ALLOWED_COLUMN_ROLES = {
+    # Per-step amounts MUST come from per_period_amount columns. Cumulative
+    # / running-total columns and ratio/percent columns are excluded.
+    'per_step_amount': {'per_period_amount'},
+    # Aggregate totals can appear as the final cumulative cell OR as a
+    # per_period (single fund-level summary row, e.g. "Total Proceeds:
+    # 2465.69"). Both are acceptable.
+    'aggregate_total': {'per_period_amount', 'cumulative_total'},
+    # Cumulative running totals — prefer cumulative_total columns; allow
+    # per_period_amount fallback for the single summary-row case.
+    'aggregate_cumulative': {'cumulative_total', 'per_period_amount'},
+    # Per-unit (NAV/Unit etc.) is a single value, typically in a summary
+    # row's per_period_amount column.
+    'per_unit_amount': {'per_period_amount'},
+    # Ratios / multiples / percentages.
+    'ratio': {'ratio_percent', 'per_period_amount'},
+}
+
+
+def is_role_compatible(value_type, column_role):
+    """Return True iff a candidate cell with `column_role` can legitimately
+    host a canonical metric whose `value_type` is the given one.
+
+    Free-form (no section / no role) cells are accepted for every value_type
+    so that Pass 3.5 does not regress on workbooks without tabular sections.
+    """
+    if not column_role:
+        return True  # Free-form cell — accept; disambiguation handles it.
+    allowed = VALUE_TYPE_TO_ALLOWED_COLUMN_ROLES.get(value_type)
+    if allowed is None:
+        return True  # Unknown value_type — fail open (accept).
+    return column_role in allowed

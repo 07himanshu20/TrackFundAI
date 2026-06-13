@@ -574,14 +574,28 @@ let _derivedMetrics = {}; // { metric_key: full record from API }
 
 async function loadDerivedMetricsForFund(fundId) {
   _derivedMetrics = {};
+  // Tile registry must follow the fund context — otherwise the panel reads
+  // a value registered while a different fund was selected.
+  _clearTileDisplayRegistry();
   if (!fundId) return;
   try {
     const r = await Auth.apiGet(`/dataimport/derived-metrics/?fund=${fundId}`);
     const list = (r && r.metrics) || [];
     // Dashboard is fund-aggregate; if a fund has multiple schemes, take the
-    // first record per metric_key (multi-scheme aggregation is future work).
+    // first record per key (multi-scheme aggregation is future work).
+    // Index by BOTH the legacy DerivedMetric key (e.g. total_unrealised_fair_value)
+    // and the canonical FundMetric key (e.g. active_fair_value) so the
+    // dashboard can address metrics by either name. Phase 1 SSoT contract:
+    // FundMetric is the source of truth; this dual-index lets us migrate
+    // call-sites to canonical keys without breaking the legacy ones.
     list.forEach(m => {
-      if (!_derivedMetrics[m.metric_key]) _derivedMetrics[m.metric_key] = m;
+      if (m.metric_key && !_derivedMetrics[m.metric_key]) {
+        _derivedMetrics[m.metric_key] = m;
+      }
+      if (m.canonical_key && m.canonical_key !== m.metric_key &&
+          !_derivedMetrics[m.canonical_key]) {
+        _derivedMetrics[m.canonical_key] = m;
+      }
     });
   } catch (e) {
     _derivedMetrics = {};
@@ -605,18 +619,95 @@ function getProvenanceSource(metricKey) {
   return rec ? rec.source : null;
 }
 
-function wireProvenance(elId, metricKey) {
+/* ── Phase 1 SSoT helpers ────────────────────────────────────
+   Read a fund-level metric from FundMetric (single source of truth).
+   Returns the numeric value or null when missing — the caller is
+   responsible for rendering "—" so the tile never shows "0" by mistake.
+   Pass canonical keys (active_fair_value, sponsor_commitment_pct, …)
+   OR legacy keys (total_unrealised_fair_value, …) — the loader indexes
+   both so either works. Universal across funds; no per-file logic. */
+function fmValue(metricKey) {
+  const rec = _derivedMetrics[metricKey];
+  if (!rec || rec.value == null) return null;
+  const v = parseFloat(rec.value);
+  return Number.isFinite(v) ? v : null;
+}
+
+/** Format a FundMetric value as ₹ Crore, null → em-dash. */
+function fmCr(metricKey) {
+  const v = fmValue(metricKey);
+  return v == null ? '—' : fmtCr(v);
+}
+
+/** Format a FundMetric percentage value (stored as decimal 0–1) as N.NN%.
+ *  Null → em-dash. Handles both decimal (0.08) and percent (8.0) storage. */
+function fmPct(metricKey, digits) {
+  const v = fmValue(metricKey);
+  if (v == null) return '—';
+  const pct = Math.abs(v) <= 1.5 ? v * 100 : v;
+  return pct.toFixed(digits == null ? 1 : digits) + '%';
+}
+
+/** Format a FundMetric multiple value as N.NNx. Null → em-dash. */
+function fmX(metricKey, digits) {
+  const v = fmValue(metricKey);
+  if (v == null) return '—';
+  return v.toFixed(digits == null ? 2 : digits) + 'x';
+}
+
+// Registry of "what the tile is actually displaying" — keyed by metricKey,
+// because the same metric can be tiled in several places. Allows duplicates
+// per the requirement: each entry remembers the elId, the displayed value,
+// the formula the JS used (if it computed the number on the fly), and the
+// inputs that went into that compute. The provenance panel reads this
+// registry when it opens so the panel ALWAYS reflects the tile, not a
+// separately-derived value.
+const _tileDisplayRegistry = {};   // {metricKey: [{elId, value, formula, inputs}]}
+
+function _clearTileDisplayRegistry() {
+  // Called on every fund switch / dashboard re-render. Without this, the
+  // registry kept entries from a previously-loaded fund at index 0, and the
+  // provenance panel read stale "Displayed (tile)" values from a fund the
+  // user is no longer viewing.
+  for (const k of Object.keys(_tileDisplayRegistry)) {
+    delete _tileDisplayRegistry[k];
+  }
+}
+
+function _registerTileDisplay(metricKey, elId, displayed) {
+  if (!metricKey) return;
+  // Replace (not append) so the latest render's value wins. Multiple tiles
+  // for the same metric_key (e.g. duplicate KPI in two places on screen)
+  // still each get an entry — the registry is per-metric, multi-entry, but
+  // we drop any earlier entry for the SAME elId so re-rendering the same
+  // tile doesn't accumulate duplicates.
+  if (!_tileDisplayRegistry[metricKey]) _tileDisplayRegistry[metricKey] = [];
+  const list = _tileDisplayRegistry[metricKey];
+  const existingIdx = list.findIndex(e => e.elId === elId);
+  const entry = {
+    elId,
+    value:   displayed && displayed.value,
+    formula: displayed && displayed.formula,
+    inputs:  displayed && displayed.inputs,
+    source:  displayed && displayed.source,
+  };
+  if (existingIdx >= 0) list[existingIdx] = entry;
+  else list.push(entry);
+}
+
+function wireProvenance(elId, metricKey, displayed) {
   const el = document.getElementById(elId);
-  if (!el || !_derivedMetrics[metricKey]) return;
+  if (!el) return;
+  // No DerivedMetric AND no displayed-value passed → nothing to show.
+  if (!_derivedMetrics[metricKey] && !displayed) return;
   const rec = _derivedMetrics[metricKey];
   el.setAttribute('data-prov-key', metricKey);
-  // Surface source AT A GLANCE: badge colour + label differs based on
-  // whether the value came directly from the Excel ('Extracted', green)
-  // or was computed by Gemini Pass 4 ('Derived', purple). Click still
-  // opens the full provenance panel.
   el.setAttribute('data-prov-source',
-    rec.source === 'imported_direct' ? 'extracted' : 'derived'
+    rec && rec.source === 'imported_direct' ? 'extracted' : 'derived'
   );
+  if (displayed) {
+    _registerTileDisplay(metricKey, elId, displayed);
+  }
   el.onclick = () => openProvenancePanel(metricKey);
 }
 
@@ -628,45 +719,164 @@ function openProvenancePanel(metricKey) {
   if (!ov || !bodyEl) return;
 
   const rec = _derivedMetrics[metricKey];
-  if (!rec) {
+  // What the TILE is showing right now (may differ from rec.value when the
+  // frontend overrode the DerivedMetric with an on-the-fly compute).
+  const tile = (_tileDisplayRegistry[metricKey] || [])[0] || null;
+
+  if (!rec && !tile) {
     titleEl.textContent = metricKey.toUpperCase();
     subEl.textContent = 'No provenance available';
-    bodyEl.innerHTML = '<div style="color:var(--text3);">No Pass 4 derivation record exists for this metric. Re-import the fund to trigger derivation.</div>';
+    bodyEl.innerHTML = '<div style="color:var(--text3);">No record or tile registered for this metric.</div>';
     ov.classList.add('open');
     return;
   }
 
-  titleEl.textContent = rec.metric_label || metricKey;
-  subEl.textContent = rec.metric_description || '';
+  titleEl.textContent = (rec && rec.metric_label) || metricKey;
+  subEl.textContent = (rec && rec.metric_description) || '';
 
-  const isImported = rec.source === 'imported_direct';
+  const isImported = rec && rec.source === 'imported_direct';
+  const unit = rec && rec.metric_unit;
   const fmt = (v) => {
     if (v == null) return '—';
-    const u = rec.metric_unit;
-    if (u === 'percent')  return parseFloat(v).toFixed(2) + '%';
-    if (u === 'multiple') return parseFloat(v).toFixed(2) + 'x';
-    if (u === 'currency') return '₹' + parseFloat(v).toLocaleString('en-IN');
+    if (unit === 'percent')  return parseFloat(v).toFixed(2) + '%';
+    if (unit === 'multiple') return parseFloat(v).toFixed(2) + 'x';
+    if (unit === 'currency') return '₹' + parseFloat(v).toLocaleString('en-IN');
     return parseFloat(v).toLocaleString();
   };
 
+  // PANEL ALWAYS SHOWS THE TILE VALUE FIRST. If the DerivedMetric value
+  // differs, render BOTH as candidates so the user sees the disagreement.
+  const tileValue = tile ? tile.value : (rec ? rec.value : null);
+  const derivedValue = rec ? rec.value : null;
+  const tileFormula  = tile && tile.formula;
+  const tileSource   = tile && tile.source;  // 'on_the_fly' | 'derived' | 'imported_direct'
+  const valuesDisagree =
+    tileValue != null && derivedValue != null &&
+    Math.abs(parseFloat(tileValue) - parseFloat(derivedValue)) > 0.005;
+
   let html = '';
   html += `<div class="prov-section">
-    <h4>Source</h4>
+    <h4>Displayed on dashboard</h4>
     <span class="prov-source-pill ${isImported ? 'imported' : 'derived'}">
-      ${isImported ? 'Imported direct from Excel' : 'Gemini-derived (Pass 4)'}
+      ${tileSource === 'on_the_fly'
+          ? 'Computed live from model rows'
+          : (isImported ? 'Imported direct from Excel' : 'Gemini-derived (Pass 4)')}
     </span>
-    <div class="prov-value-big" style="margin-top:10px">${fmt(rec.value)}</div>
-    <div class="prov-value-meta">${rec.metric_unit ? rec.metric_unit + ' · ' : ''}as of ${rec.derived_at ? rec.derived_at.split('T')[0] : ''}</div>
+    <div class="prov-value-big" style="margin-top:10px">${fmt(tileValue)}</div>
+    <div class="prov-value-meta">${unit ? unit + ' · ' : ''}as of ${rec && rec.derived_at ? rec.derived_at.split('T')[0] : new Date().toISOString().split('T')[0]}</div>
   </div>`;
+
+  if (tileFormula) {
+    html += `<div class="prov-section">
+      <h4>Formula used to compute the displayed value</h4>
+      <div class="prov-formula">${esc(tileFormula)}</div>
+    </div>`;
+  }
+
+  const prov = (rec && rec.provenance) || null;
+  if (prov && (prov.source_sheet || (prov.source_cells && prov.source_cells.length) || prov.source || prov.reasoning)) {
+    const pSource = (prov.source || '').toString();
+    const pSheet  = prov.source_sheet || '—';
+    const pCells  = Array.isArray(prov.source_cells) ? prov.source_cells : [];
+    const cellsTxt = pCells.length ? pCells.join(', ') : '—';
+    const pillColor = pSource === 'extracted' || pSource === 'stated'
+        ? '#0e7a5f' : (pSource === 'computed' ? '#2563eb' : '#6b7280');
+    const sourceLabel = pSource === 'extracted' ? 'Extracted from file'
+        : pSource === 'stated'   ? 'Stated in file'
+        : pSource === 'computed' ? 'Calculated by Python'
+        : (pSource || 'Unknown');
+    html += `<div class="prov-section">
+      <h4>Where this came from</h4>
+      <div style="display:inline-block;background:${pillColor};color:#fff;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600;letter-spacing:.3px;text-transform:uppercase;margin-bottom:10px">${esc(sourceLabel)}</div>
+      <table class="prov-inputs-table">
+        <tbody>
+          <tr><td class="k" style="width:35%">Source sheet</td><td class="v">${esc(pSheet)}</td></tr>
+          <tr><td class="k">Source cells</td><td class="v" style="font-family:ui-monospace,Menlo,monospace">${esc(cellsTxt)}</td></tr>
+        </tbody>
+      </table>
+      ${prov.reasoning ? `<div style="margin-top:10px;font-size:12px;color:var(--text2);line-height:1.5">${esc(prov.reasoning)}</div>` : ''}
+    </div>`;
+
+    const inp = prov.inputs_used || {};
+    if (inp && typeof inp === 'object' && Object.keys(inp).length) {
+      let irows = '';
+      Object.entries(inp).forEach(([k, v]) => {
+        let display;
+        if (v && typeof v === 'object') {
+          display = v.value != null ? String(v.value) : JSON.stringify(v);
+        } else {
+          display = String(v);
+        }
+        irows += `<tr><td class="k">${esc(k)}</td><td class="v" style="font-family:ui-monospace,Menlo,monospace">${esc(display)}</td></tr>`;
+      });
+      html += `<div class="prov-section">
+        <h4>Inputs that went into the formula</h4>
+        <table class="prov-inputs-table">
+          <thead><tr><th>Variable</th><th>Value</th></tr></thead>
+          <tbody>${irows}</tbody>
+        </table>
+      </div>`;
+    }
+  }
+
+  // Disagreement banner — explicit candidate-vs-candidate comparison.
+  if (valuesDisagree) {
+    html += `<div class="prov-section" style="background:#fef3c7;border:1px solid #fcd34d;border-radius:6px;padding:10px;">
+      <h4 style="color:#92400e;margin-top:0">Two candidate values exist for this metric</h4>
+      <table class="prov-inputs-table" style="margin-top:6px">
+        <thead><tr><th>Candidate</th><th>Value</th><th>Note</th></tr></thead>
+        <tbody>
+          <tr><td class="k">Displayed (tile)</td><td class="v">${fmt(tileValue)}</td>
+              <td class="s">${tileSource === 'on_the_fly' ? 'Computed from current model rows' : 'From DerivedMetric'}</td></tr>
+          <tr><td class="k">Stored DerivedMetric</td><td class="v">${fmt(derivedValue)}</td>
+              <td class="s">${isImported ? 'Imported from Excel' : 'Pass 4 / Pass 8 derivation'}</td></tr>
+        </tbody>
+      </table>
+      <div style="font-size:12px;color:#78350f;margin-top:8px;">
+        The dashboard shows the tile value. The DerivedMetric below documents the
+        formula Gemini chose; if that disagrees with the displayed number, it usually
+        means the DerivedMetric used a stale / wrong-shape input variable.
+      </div>
+    </div>`;
+  }
 
   if (!isImported && rec.formula_expression) {
     html += `<div class="prov-section">
       <h4>Formula chosen by Gemini</h4>
       <div class="prov-formula">${esc(rec.formula_expression)}</div>
     </div>`;
+  } else if (isImported) {
+    // For values extracted directly from an Excel cell, render the cell
+    // location (sheet + coordinates + label) instead of the misleading
+    // "no formula" gap. The workbook computed this number with its own
+    // formula, which Excel does not expose to our importer — be explicit
+    // about that so the user knows we're not hiding anything.
+    const inputs = rec.inputs_used || {};
+    const cell   = inputs.source_cell || inputs.source_cells ||
+                   (inputs.cells || '');
+    const sheet  = inputs.source_sheet || inputs.sheet_used || '';
+    const label  = inputs.source_label || '';
+    const cellsStr = Array.isArray(cell) ? cell.join(', ') : String(cell || '');
+    let cellLines = [];
+    if (sheet)   cellLines.push(`Sheet: ${sheet}`);
+    if (label)   cellLines.push(`Label: ${label}`);
+    if (cellsStr) cellLines.push(`Cell${cellsStr.includes(',') ? 's' : ''}: ${cellsStr}`);
+    html += `<div class="prov-section">
+      <h4>How this value was obtained</h4>
+      <div class="prov-formula">
+        Pre-computed Excel cell value — the workbook calculated this number
+        with its own internal formula. Excel does not expose that formula to
+        the importer, so what you see is the resulting number as-stored in
+        the workbook.${cellLines.length ? '<br/><br/>' + cellLines.map(esc).join('<br/>') : ''}
+      </div>
+    </div>`;
   }
 
-  if (rec.inputs_used && Object.keys(rec.inputs_used).length) {
+  // The inputs_used table only makes sense for Gemini-derived values where
+  // each entry is a variable → {value, source}. For imported_direct rows,
+  // inputs_used holds cell metadata (source_cell, source_label) which we
+  // already rendered above — skip the table in that case.
+  if (!isImported && rec.inputs_used && Object.keys(rec.inputs_used).length) {
     let rows = '';
     Object.entries(rec.inputs_used).forEach(([k, info]) => {
       const v    = (info && typeof info === 'object') ? info.value       : info;
@@ -697,10 +907,20 @@ function openProvenancePanel(metricKey) {
   }
 
   if (rec.gemini_reasoning) {
-    html += `<div class="prov-section">
-      <h4>Why this formula</h4>
-      <div style="line-height:1.5;">${esc(rec.gemini_reasoning)}</div>
-    </div>`;
+    // The legacy boilerplate ("Direct value imported from Excel — no
+    // derivation needed.") carries no information; hide it. Anything else
+    // is real Gemini reasoning and worth showing. The section heading
+    // changes depending on whether the value was extracted or derived.
+    const reasoning = String(rec.gemini_reasoning).trim();
+    const isBoilerplate = reasoning ===
+      'Direct value imported from Excel — no derivation needed.';
+    if (!isBoilerplate) {
+      const heading = isImported ? 'Why this source was chosen' : 'Why this formula';
+      html += `<div class="prov-section">
+        <h4>${heading}</h4>
+        <div style="line-height:1.5;">${esc(reasoning)}</div>
+      </div>`;
+    }
   }
 
   if (rec.candidate_formulas && rec.candidate_formulas.length) {
@@ -785,9 +1005,20 @@ async function loadOverview() {
     let totalFV = 0;
     invs.forEach(inv => { totalFV += parseFloat(inv.latest_valuation || 0); });
 
-    // Fall back to NAV if no investment data
-    if (!totalFV && navs.length) {
-      // NAV total_nav is in Cr
+    // PHASE 1 SSoT: prefer FundMetric.active_fair_value (the labelled
+    // portfolio-aggregate FV extracted from the workbook's Cover/Summary
+    // section by the anchor pipeline) over the per-row valuation sum.
+    // The per-row sum can be 0 when Valuation.fair_value rows are blank
+    // even though the workbook's headline FV is populated. Fund NAV
+    // (a different quantity) is NOT used here — that distinction is
+    // enforced in Phase 3.
+    const _activeFV = fmValue('active_fair_value');
+    if (_activeFV != null && _activeFV > 0) {
+      totalFV = _activeFV;
+    } else if (!totalFV && navs.length) {
+      // Last-resort fallback: NAV sum (only when neither FundMetric nor
+      // per-row valuations have data). This represents fund NAV not
+      // portfolio FV — Phase 3 will surface that distinction.
       const latestByScheme = {};
       navs.forEach(n => {
         const sid = n.scheme;
@@ -849,12 +1080,28 @@ async function loadOverview() {
     // dashboard to display "0" even when Pass 3.5 had extracted the real
     // value, because the on-the-fly aggregate returned 0 due to missing
     // Investment/CapitalCall rows.
+    // Precedence rule rewritten so Pass-9-authoritative values always win.
+    // Pass 9 sends the raw fund-level sheets to Gemini and stores
+    // formula_expression='(Pass 9 unified) ...'. Pass 9 values are the
+    // most trustworthy signal because they came from a single prompt
+    // against the actual workbook (no catalogue indirection). Pass 4
+    // catalogue derivations come second. Live on-the-fly compute (which
+    // sums potentially-bad per-row data) is the LAST resort.
     const _applyDerived = (currentValue, metricKey) => {
       const rec = _derivedMetrics[metricKey];
       if (!rec || rec.value == null) return currentValue;
-      // imported_direct trumps everything
-      if (rec.source === 'imported_direct') return rec.value;
-      // derived only if current value is 0/null
+      const formula = String(rec.formula_expression || '');
+      const isPass9 = formula.startsWith('(Pass 9 unified)');
+      const isPass8 = formula.startsWith('(Pass 8 direct waterfall)');
+      const isImported = rec.source === 'imported_direct';
+      const isHighConfidence = (rec.confidence || 0) >= 0.6;
+      // Tier 1: Pass 9 / Pass 8 / imported_direct ALWAYS win — these are
+      // the sources we engineered to be authoritative.
+      if (isPass9 || isPass8 || isImported) return rec.value;
+      // Tier 2: derived with high confidence wins over live compute.
+      if (isHighConfidence) return rec.value;
+      // Tier 3: live compute wins ONLY when it is non-zero AND we have
+      // any reason to doubt the DerivedMetric (low confidence).
       if (currentValue == null || currentValue === 0) return rec.value;
       return currentValue;
     };
@@ -867,22 +1114,71 @@ async function loadOverview() {
     if (netIrr != null && Math.abs(netIrr) < 1) netIrr = netIrr * 100;
     // MOIC / TVPI / DPI from Pass 3.5 are pure multiples (no normalisation).
 
-    // Update KPI cards — show ACTIVE portfolio count as primary (matches Excel Portfolio Investments sheet)
+    const totalInvestments = invs.reduce(
+        (s, inv) => s + parseInt(inv.tranche_count || 1, 10), 0);
+
     if ($('kv-cos'))  $('kv-cos').textContent  = active || '—';
-    if ($('ks-cos'))  $('ks-cos').textContent  = inactive > 0 ? `+ ${inactive} Exited` : 'Active portfolio';
-    if ($('kt-cos'))  $('kt-cos').textContent  = totalCos > 0 ? `${active} active in this fund` : '—';
+    if ($('ks-cos')) {
+      const extras = [];
+      if (inactive > 0) extras.push(`+ ${inactive} Exited`);
+      if (totalInvestments > active) extras.push(`${totalInvestments} investments`);
+      $('ks-cos').textContent = extras.length ? extras.join(' · ') : 'Active portfolio';
+    }
+    if ($('kt-cos'))  $('kt-cos').textContent  = totalCos > 0
+        ? `${active} active · ${totalInvestments} investments`
+        : '—';
     if ($('kv-fv'))   $('kv-fv').textContent   = fmtCr(fvCr);
-    if ($('ks-fv'))   $('ks-fv').textContent   = `vs Cost ${fmtCr(costCr)}`;
+    // Phase 3 — disambiguate: when fund_nav is available and differs
+    // materially from portfolio-aggregate FV (active_fair_value), show
+    // both in the subtitle so the CFO sees the LP-basis number alongside
+    // the gross portfolio figure. Universal: "—" when no NAV is known.
+    if ($('ks-fv')) {
+      const navCr = fmValue('fund_nav');
+      const costLine = `vs Cost ${fmtCr(costCr)}`;
+      if (navCr != null && fvCr != null &&
+          Math.abs(navCr - fvCr) / Math.max(Math.abs(fvCr), 1) > 0.05) {
+        $('ks-fv').textContent = `${costLine} · Fund NAV ${fmtCr(navCr)}`;
+      } else {
+        $('ks-fv').textContent = costLine;
+      }
+    }
     if ($('kv-moic')) $('kv-moic').textContent = fmtX(moic);
     if ($('kv-tvpi')) $('kv-tvpi').textContent = fmtX(tvpi);
     if ($('kv-irr'))  $('kv-irr').textContent  = netIrr != null ? netIrr.toFixed(1) + '%' : '—';
 
     // Wire Pass 4 provenance click — opens side panel showing chosen formula,
-    // inputs, alternates Gemini considered. Only fires if a DerivedMetric row
-    // exists for this metric (wireProvenance() no-ops otherwise).
-    wireProvenance('kv-moic', 'moic');
-    wireProvenance('kv-tvpi', 'tvpi');
-    wireProvenance('kv-irr',  'net_irr');
+    // inputs, alternates Gemini considered. We pass the LIVE-COMPUTED value
+    // and the formula the JS used so the panel can show the user the ACTUAL
+    // number they're looking at (instead of the DerivedMetric value which
+    // may be a different shape, e.g. summing NAV across 12 months).
+    const _tileDisplayFor = (metricKey, value, formula, inputs) => {
+      const rec = _derivedMetrics[metricKey];
+      let source = 'on_the_fly';
+      if (rec) {
+        if (rec.source === 'imported_direct' &&
+            Math.abs(parseFloat(rec.value) - parseFloat(value)) < 0.005) {
+          source = 'imported_direct';
+        } else if (Math.abs(parseFloat(rec.value) - parseFloat(value)) < 0.005) {
+          source = 'derived';
+        }
+      }
+      return { value, formula, inputs, source };
+    };
+    wireProvenance('kv-moic', 'moic', _tileDisplayFor(
+      'moic', moic,
+      'totalFV / totalCost',
+      { totalFV: fvCr, totalCost: costCr }
+    ));
+    wireProvenance('kv-tvpi', 'tvpi', _tileDisplayFor(
+      'tvpi', tvpi,
+      '(totalFV + totalDist) / totalCost',
+      { totalFV: fvCr, totalDist: totalDist, totalCost: costCr }
+    ));
+    wireProvenance('kv-irr', 'net_irr', _tileDisplayFor(
+      'net_irr', netIrr,
+      'cost-weighted average of per-investment irr_pct',
+      { irr_count: invs.filter(i => i.irr_pct != null).length }
+    ));
     // Net IRR card subtitle — real hurdle % from funds_scheme, not hardcoded "8%"
     const _irrSub = $('ks-irr');
     if (_irrSub) {
@@ -895,9 +1191,15 @@ async function loadOverview() {
     const depPct = corpus > 0 ? ((costCr / corpus) * 100).toFixed(1) + '% of ' + fmtCr(corpus) + ' corpus' : '% of corpus';
     if ($('ks-dep'))  $('ks-dep').textContent  = depPct;
 
-    // Subtitle
     const sub = $('ov-subtitle');
-    if (sub) sub.textContent = `${active} Active Portfolio Companies` + (inactive > 0 ? ` · ${inactive} Exited` : '') + ` · ${_ctx.fundName} · All figures in ₹ Crore`;
+    if (sub) {
+      const parts = [`${active} Active Portfolio Companies`];
+      if (totalInvestments > active) parts.push(`${totalInvestments} Investments`);
+      if (inactive > 0) parts.push(`${inactive} Exited`);
+      parts.push(_ctx.fundName);
+      parts.push('All figures in ₹ Crore');
+      sub.textContent = parts.join(' · ');
+    }
 
     // Sidebar company count
     const sbCos = $('sb-cos');
@@ -1780,6 +2082,8 @@ function _filterTableRows(tbodyId, searchId, sectorId, stageId, countId, countLa
 
 /* ── Portfolio: Investments Detail ────────────────────────── */
 let _invDetailRows = [];
+let _invDetailDistinctCos = null;
+let _invDetailDistinctInvs = null;
 
 async function loadPortfolioInvestments() {
   const tbody = $('inv-detail-tbody');
@@ -1788,6 +2092,8 @@ async function loadPortfolioInvestments() {
     const fqs = _ctx.fundId ? `?fund=${_ctx.fundId}` : '';
     const data = await Auth.apiGet('/portfolio/investments/' + fqs);
     _invDetailRows = data.investments || [];
+    _invDetailDistinctCos = data.distinct_companies ?? null;
+    _invDetailDistinctInvs = data.distinct_investments ?? _invDetailRows.length;
 
     // Populate sector filter
     const sectorSel = $('inv-sector-filter');
@@ -1833,7 +2139,15 @@ function renderInvDetail() {
   });
 
   const countEl = $('inv-detail-count');
-  if (countEl) countEl.textContent = `(${filtered.length} investments)`;
+  if (countEl) {
+    const distinctCos = (typeof _invDetailDistinctCos === 'number' && _invDetailDistinctCos > 0)
+        ? _invDetailDistinctCos : null;
+    if (distinctCos && distinctCos !== filtered.length) {
+      countEl.textContent = `(${distinctCos} companies · ${filtered.length} investments)`;
+    } else {
+      countEl.textContent = `(${filtered.length} investments)`;
+    }
+  }
 
   const statusColor = { active: '#22c55e', partially_exited: '#f59e0b', fully_exited: '#06b6d4', written_off: '#ef4444' };
   tbody.innerHTML = filtered.map((inv, i) => {
@@ -2181,33 +2495,33 @@ async function _renderWaterfallHeader() {
   }
 
   const scheme = await getSchemeForFund(_ctx.fundId);
-  if (!scheme) {
-    if (titleEl) titleEl.textContent = 'Distribution Waterfall';
-    subEl.textContent = 'Scheme terms unavailable.';
-    return;
-  }
 
-  // Title — append waterfall type if known (European / American)
-  const ctype = (scheme.carry_type_display || scheme.carry_type || '').trim();
+  // Title — append waterfall type when known. The carry type (European/
+  // American) is a structural field still housed on the Scheme model; we
+  // accept it from there because FundMetric does not carry a string field.
+  const ctype = (scheme && (scheme.carry_type_display || scheme.carry_type) || '').trim();
   if (titleEl) {
     titleEl.textContent = ctype
       ? `Distribution Waterfall — ${ctype} Model`
       : 'Distribution Waterfall';
   }
 
-  // Subtitle — concatenate ONLY the fields that have real values
+  // Subtitle — PHASE 1 SSoT: every numeric term reads from FundMetric only.
+  // Legacy Scheme.* fields are explicitly NOT consulted; if FundMetric has
+  // no value for a key, the term is omitted (never "0", never falls back
+  // to the wrong source). Same code path for every fund.
   const parts = [];
-  const hurdle = _fmtSchemePct(scheme.hurdle_rate_pct);
-  if (hurdle) parts.push(`${hurdle} Hurdle`);
-  const carry = _fmtSchemePct(scheme.carry_pct);
-  if (carry) parts.push(`${carry} Carry`);
-  const mgmt = _fmtSchemePct(scheme.management_fee_pct);
-  if (mgmt) {
-    const basis = (scheme.fee_basis_display || scheme.management_fee_basis || '').trim();
+  const hurdle  = fmPct('hurdle_rate');
+  if (hurdle !== '—') parts.push(`${hurdle} Hurdle`);
+  const carry   = fmPct('carry_pct');
+  if (carry !== '—') parts.push(`${carry} Carry`);
+  const mgmt    = fmPct('mgmt_fee_pct');
+  if (mgmt !== '—') {
+    const basis = (scheme && (scheme.fee_basis_display || scheme.management_fee_basis) || '').trim();
     parts.push(basis ? `${mgmt} Mgmt Fee on ${basis}` : `${mgmt} Mgmt Fee`);
   }
-  const sponsor = _fmtSchemePct(scheme.sponsor_commitment_pct);
-  if (sponsor) parts.push(`${sponsor} Sponsor Commitment`);
+  const sponsor = fmPct('sponsor_commitment_pct');
+  if (sponsor !== '—') parts.push(`${sponsor} Sponsor Commitment`);
 
   subEl.textContent = parts.length
     ? parts.join(' · ')
@@ -2266,86 +2580,118 @@ async function renderWaterfall() {
   // the fund's actual terms so the simulator starts at the truth.
   _hydrateWaterfallSimulator();
 
+  // PHASE 1 SSoT: waterfall reads exclusively from FundMetric via
+  // _derivedMetrics. The legacy /accounting/carry/ endpoint (CarriedInterest
+  // model) has been deprecated for display purposes because it (a) can
+  // leak records across funds when the filter is bypassed and (b) holds
+  // a stale snapshot independent of the canonical FundMetric. Null values
+  // render as "—" — we NEVER substitute 0, gross−net, or any heuristic.
   try {
-    const fqs  = _ctx.fundId ? `?fund=${_ctx.fundId}` : '';
-    const carryData = await Auth.apiGet('/accounting/carry/' + fqs);
-    const carries = carryData.results || carryData || [];
+    const rocVal     = fmValue('return_of_capital_amount');
+    const prefVal    = fmValue('preferred_return_amount');
+    const catchupVal = fmValue('gp_catchup_amount');
+    const carryNet   = fmValue('carry_amount_net');
+    const carryGross = fmValue('carry_amount_gross');
+    const carryBase  = fmValue('carry_base');
+    const clawback   = fmValue('gp_clawback_provision');
 
-    if (carries.length) {
-      let totalCalled=0, totalDist=0, prefReturn=0, carryGross=0, carryNet=0, clawback=0;
-      carries.forEach(c => {
-        totalCalled  += parseFloat(c.total_called_capital    || 0);
-        totalDist    += parseFloat(c.total_distributions     || 0);
-        prefReturn   += parseFloat(c.preferred_return_amount || 0);
-        carryGross   += parseFloat(c.carry_amount_gross      || 0);
-        carryNet     += parseFloat(c.carry_amount_net        || 0);
-        clawback     += parseFloat(c.gp_clawback_provision   || 0);
-      });
-      const gpCatchup = Math.max(0, carryGross - carryNet);
-      const items = [
-        { label:'Return of Capital', val:totalCalled, color:'#2563eb' },
-        { label:'Preferred Return',  val:prefReturn,  color:'#10b981' },
-        { label:'GP Catch-up',       val:gpCatchup,   color:'#f59e0b' },
-        { label:'Carried Interest',  val:carryNet,    color:'#8b5cf6' },
-      ];
-      const maxVal = Math.max(...items.map(i=>i.val), 1);
-      el.innerHTML = items.map(it => {
-        const pct = Math.round(it.val / maxVal * 100);
-        return `<div class="v5-wf-bar">
-          <div class="v5-wf-label">${it.label}</div>
-          <div class="v5-wf-track"><div class="v5-wf-fill" style="width:${pct}%;background:${it.color}">${pct}%</div></div>
-          <div class="v5-wf-num">${fmtCr(it.val)}</div>
-        </div>`;
-      }).join('') + `<div style="font-size:10px;color:var(--text3);margin-top:10px">${esc(buildSchemeTermsLine(await getSchemeForFund(_ctx.fundId)))}</div>`;
-
-      // Carry & Clawback Analysis
-      const carryEl = $('acc-carry');
-      if (carryEl) {
-        const statusMap = { indicative:'Indicative', crystallised:'Crystallised', paid:'Paid' };
-        const latestCarry = carries[0] || {};
-        const statusLabel = statusMap[latestCarry.calculation_status] || 'Indicative';
-        carryEl.innerHTML = `
-          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px">
-            <div class="v5-kpi-card gold" style="padding:14px">
-              <div class="v5-kpi-label">Carry Base</div>
-              <div class="v5-kpi-value" style="font-size:1.2rem">${fmtCr(carries.reduce((s,c)=>s+parseFloat(c.carry_base||0),0))}</div>
-              <div class="v5-kpi-sub">Profit above hurdle</div>
-            </div>
-            <div class="v5-kpi-card purple" style="padding:14px">
-              <div class="v5-kpi-label">GP Carry (Gross)</div>
-              <div class="v5-kpi-value" style="font-size:1.2rem">${fmtCr(carryGross)}</div>
-              <div class="v5-kpi-sub">Before clawback</div>
-            </div>
-            <div class="v5-kpi-card cyan" style="padding:14px">
-              <div class="v5-kpi-label">GP Carry (Net)</div>
-              <div class="v5-kpi-value" style="font-size:1.2rem">${fmtCr(carryNet)}</div>
-              <div class="v5-kpi-sub">After clawback provision</div>
-            </div>
-            <div class="v5-kpi-card blue" style="padding:14px">
-              <div class="v5-kpi-label">Clawback Provision</div>
-              <div class="v5-kpi-value" style="font-size:1.2rem">${fmtCr(clawback)}</div>
-              <div class="v5-kpi-sub">Excess carry to LPs</div>
-            </div>
-          </div>
-          <div style="font-size:11px;color:var(--text3)">Status: ${statusLabel} · Calculation date: ${latestCarry.calculation_date || '—'}</div>`;
-      }
-    } else {
-      // No carry records — render static waterfall bars
-      const items = [
-        { label:'Return of Capital', pct:55, color:'#2563eb', val:'—' },
-        { label:'Preferred Return',  pct:22, color:'#10b981', val:'—' },
-        { label:'GP Catch-up',       pct:8,  color:'#f59e0b', val:'—' },
-        { label:'Carried Interest',  pct:15, color:'#8b5cf6', val:'—' },
-      ];
-      el.innerHTML = items.map(it => `<div class="v5-wf-bar">
+    const items = [
+      { label:'Return of Capital', val:rocVal,     color:'#2563eb' },
+      { label:'Preferred Return',  val:prefVal,    color:'#10b981' },
+      { label:'GP Catch-up',       val:catchupVal, color:'#f59e0b' },
+      { label:'Carried Interest',  val:carryNet,   color:'#8b5cf6' },
+    ];
+    // Bar widths use the max of present values; null entries render as
+    // a zero-width bar and "—" so the user sees they are uncomputed.
+    const presentVals = items.map(i => i.val).filter(v => v != null);
+    const maxVal = presentVals.length ? Math.max(...presentVals, 1) : 1;
+    el.innerHTML = items.map(it => {
+      const pct = it.val == null ? 0 : Math.round(it.val / maxVal * 100);
+      const num = it.val == null ? '—' : fmtCr(it.val);
+      return `<div class="v5-wf-bar">
         <div class="v5-wf-label">${it.label}</div>
-        <div class="v5-wf-track"><div class="v5-wf-fill" style="width:${it.pct}%;background:${it.color}">${it.pct}%</div></div>
-        <div class="v5-wf-num">${it.val}</div>
-      </div>`).join('') + `<div style="font-size:10px;color:var(--text3);margin-top:10px">${esc(buildSchemeTermsLine(await getSchemeForFund(_ctx.fundId)))}</div>`;
+        <div class="v5-wf-track"><div class="v5-wf-fill" style="width:${pct}%;background:${it.color}">${pct}%</div></div>
+        <div class="v5-wf-num">${num}</div>
+      </div>`;
+    }).join('') + `<div style="font-size:10px;color:var(--text3);margin-top:10px">${esc(buildSchemeTermsLine(await getSchemeForFund(_ctx.fundId)))}</div>`;
 
-      const carryEl = $('acc-carry');
-      if (carryEl) {
-        carryEl.innerHTML = '<div style="color:var(--text3);font-size:11px;padding:8px">Run waterfall engine to compute carry & clawback.</div>';
+    // ── Carry & Clawback Analysis ────────────────────────────────
+    const carryEl = $('acc-carry');
+    if (carryEl) {
+      // Calculation date / status come from CarriedInterest when present,
+      // but the VALUES rendered on the tiles do not — they come from
+      // FundMetric. CarriedInterest is queried only for the timestamp/
+      // status pill at the bottom of the panel.
+      let statusLabel = 'Indicative';
+      let calcDate = '—';
+      try {
+        const fqs = _ctx.fundId ? `?fund=${_ctx.fundId}` : '';
+        const ciData = await Auth.apiGet('/accounting/carry/' + fqs);
+        const ciList = (ciData && (ciData.results || ciData)) || [];
+        if (ciList.length) {
+          const statusMap = { indicative:'Indicative', crystallised:'Crystallised', paid:'Paid' };
+          statusLabel = statusMap[ciList[0].calculation_status] || 'Indicative';
+          calcDate = ciList[0].calculation_date || '—';
+        }
+      } catch (e) { /* status pill is decorative; ignore */ }
+
+      // Card caption reads from the FundMetric provenance reasoning when
+      // present. The provenance text was generated server-side and
+      // describes the actual computation/extraction behind the value.
+      const captionFor = (key, fallback) => {
+        const rec = _derivedMetrics[key];
+        const r = rec && (rec.gemini_reasoning ||
+                          (rec.provenance && rec.provenance.reasoning));
+        if (!r) return fallback;
+        let text = String(r).replace(/^\s*\[[^\]]*\]\s*/, '');
+        const firstSentence = text.split(/(?<=[.;])\s/)[0] || text;
+        return firstSentence.length > 110
+          ? firstSentence.slice(0, 107) + '…'
+          : firstSentence;
+      };
+
+      // Single tile renderer — same code for every card. Null → "—"; no
+      // fallback math, no synthesized values. Conflict badge surfaces
+      // when the anchor pipeline recorded an extracted_headline that
+      // disagrees with the chosen value by >5%.
+      const renderTile = (id, color, label, metricKey, fallbackCaption) => {
+        const v = fmValue(metricKey);
+        const rec = _derivedMetrics[metricKey];
+        const altList = (rec && Array.isArray(rec.candidate_formulas))
+          ? rec.candidate_formulas : [];
+        const extractedAlt = altList.find(a => a && a.label === 'extracted_headline');
+        const hasConflict = v != null && extractedAlt && extractedAlt.value != null
+          && Math.abs(parseFloat(extractedAlt.value) - v) /
+              Math.max(Math.abs(v), 1) > 0.05;
+        const conflictBadge = hasConflict
+          ? `<div style="font-size:10px;color:#fbbf24;margin-top:4px;border-top:1px dashed rgba(251,191,36,.3);padding-top:4px">
+               &#9888; <strong>Extracted:</strong> ${fmtCr(parseFloat(extractedAlt.value))}
+               <span style="color:var(--text3)"> · Calculated value shown above</span>
+             </div>`
+          : '';
+        const valueText = v == null ? '—' : fmtCr(v);
+        return `<div id="${id}" class="v5-kpi-card ${color} prov-clickable" style="padding:14px;cursor:pointer" title="Click for formula & source">
+          <div class="v5-kpi-label">${label}</div>
+          <div class="v5-kpi-value" style="font-size:1.2rem">${valueText}</div>
+          <div class="v5-kpi-sub">${esc(captionFor(metricKey, fallbackCaption))}</div>
+          ${conflictBadge}
+        </div>`;
+      };
+
+      carryEl.innerHTML = `
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px">
+          ${renderTile('carry-card-base',     'gold',   'Carry Base',         'carry_base',            'Profit above hurdle')}
+          ${renderTile('carry-card-gross',    'purple', 'GP Carry (Gross)',   'carry_amount_gross',    'Before clawback')}
+          ${renderTile('carry-card-net',      'cyan',   'GP Carry (Net)',     'carry_amount_net',      'After clawback provision')}
+          ${renderTile('carry-card-clawback', 'blue',   'Clawback Provision', 'gp_clawback_provision', 'Excess carry to LPs')}
+        </div>
+        <div style="font-size:11px;color:var(--text3)">Status: ${statusLabel} · Calculation date: ${calcDate}</div>`;
+
+      if (typeof wireProvenance === 'function') {
+        wireProvenance('carry-card-base',     'carry_base');
+        wireProvenance('carry-card-gross',    'carry_amount_gross');
+        wireProvenance('carry-card-net',      'carry_amount_net');
+        wireProvenance('carry-card-clawback', 'gp_clawback_provision');
       }
     }
   } catch(e) {

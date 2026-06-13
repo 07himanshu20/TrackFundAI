@@ -233,6 +233,19 @@ class InvestmentTranche(models.Model):
         max_length=100, blank=True,
         help_text='e.g., Series A, Series B, Bridge',
     )
+    natural_key = models.CharField(
+        max_length=64, blank=True, db_index=True,
+        help_text='Stable per-row identifier from the source file (Co.ID, '
+                  'instrument id, or row fingerprint). Lets re-imports update '
+                  'the same tranche instead of creating duplicates.',
+    )
+    instrument_type = models.CharField(max_length=40, blank=True)
+    ownership_pct = models.DecimalField(
+        max_digits=8, decimal_places=4, null=True, blank=True,
+    )
+    fully_diluted_pct = models.DecimalField(
+        max_digits=8, decimal_places=4, null=True, blank=True,
+    )
     notes = models.TextField(blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -301,6 +314,11 @@ class Valuation(models.Model):
     fair_value_of_holding = models.DecimalField(
         max_digits=18, decimal_places=2, null=True, blank=True,
         help_text='FMV of fund\'s stake — drives NAV calculation',
+    )
+    source_tranche_key = models.CharField(
+        max_length=64, blank=True, db_index=True,
+        help_text='natural_key of the InvestmentTranche this valuation row '
+                  'came from. Lets round-level FV survive re-imports.',
     )
     enterprise_value = models.DecimalField(
         max_digits=18, decimal_places=2, null=True, blank=True,

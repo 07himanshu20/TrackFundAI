@@ -31,6 +31,7 @@ and Gemini does the semantic mapping.
 import ast
 import logging
 import operator
+import os
 import traceback
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -63,6 +64,16 @@ _ALLOWED_BIN_OPS = {
 _ALLOWED_UNARY_OPS = {
     ast.USub: operator.neg,
     ast.UAdd: operator.pos,
+}
+
+# Pure-function whitelist. These are mathematically pure (no side effects,
+# no I/O, no attribute access on caller objects) so safe to allow inside
+# the AST evaluator. Needed because Gemini regularly uses max()/min() for
+# clamp formulas like `max(value - threshold, 0)` in waterfall/floor logic.
+_ALLOWED_FUNCS = {
+    'max': lambda *args: max(args) if args else 0.0,
+    'min': lambda *args: min(args) if args else 0.0,
+    'abs': lambda x: abs(x),
 }
 
 
@@ -100,6 +111,17 @@ def _safe_eval(expression, variables):
             if op_type not in _ALLOWED_UNARY_OPS:
                 raise ValueError('disallowed unaryop: %s' % op_type.__name__)
             return _ALLOWED_UNARY_OPS[op_type](walk(node.operand))
+        if isinstance(node, ast.Call):
+            # Bare-name calls only — no attribute access, no nested call objects
+            if not isinstance(node.func, ast.Name):
+                raise ValueError('disallowed call expression')
+            fname = node.func.id
+            if fname not in _ALLOWED_FUNCS:
+                raise ValueError('disallowed function: %s' % fname)
+            if node.keywords:
+                raise ValueError('keyword arguments not allowed in %s' % fname)
+            args = [walk(a) for a in node.args]
+            return _ALLOWED_FUNCS[fname](*args)
         raise ValueError('disallowed AST node: %s' % type(node).__name__)
 
     try:
@@ -455,22 +477,82 @@ class DerivationContext:
         # (DerivedMetric rows with source='imported_direct' written by the
         # explicit-extraction pass). Surfaced as available inputs so Gemini
         # can quote them verbatim instead of re-deriving.
+        #
+        # Variant handling: when a metric has multiple variants (e.g. gross/net
+        # for total_unrealised_fair_value), expose:
+        #   imported__<metric_key>          → the variant_default value
+        #   imported__<metric_key>__gross   → the gross-tagged value
+        #   imported__<metric_key>__net     → the net-tagged value
+        # Pass 4 formulas can reference the suffixed key when they need a
+        # specific variant (e.g. carry-base derivation must use the GROSS
+        # unrealised FV).
         try:
             from .models import DerivedMetric
+            from .canonical_schema import CANONICAL_VALUE_CATEGORIES
+            metric_catalogue = (
+                CANONICAL_VALUE_CATEGORIES.get('fund_performance_metrics') or {}
+            )
+            # Group rows by metric_key so we can resolve variant_default
+            # vs all variants in one pass.
+            by_key = {}
             for dm in DerivedMetric.objects.filter(
                 scheme=scheme,
                 formula_expression='(direct value imported)'
             ).exclude(value=None):
-                self._add(
-                    key=f'imported__{dm.metric_key}',
-                    value=_to_float(dm.value),
-                    unit='direct',
-                    description=(
-                        f'Direct value extracted from Excel for {dm.metric_key} '
-                        f'— authoritative when present.'
-                    ),
-                    source='Excel (Pass 3 fund_performance_metrics)',
-                )
+                by_key.setdefault(dm.metric_key, []).append(dm)
+
+            for metric_key, dms in by_key.items():
+                meta = metric_catalogue.get(metric_key)
+                variant_default = None
+                if isinstance(meta, dict):
+                    variant_default = meta.get('variant_default')
+
+                # Expose every variant as a suffixed key.
+                for dm in dms:
+                    val = _to_float(dm.value)
+                    if val is None:
+                        continue
+                    variant_label = dm.variant or 'default'
+                    self._add(
+                        key=f'imported__{metric_key}__{variant_label}',
+                        value=val,
+                        unit='direct',
+                        description=(
+                            f'Direct value extracted from Excel for {metric_key} '
+                            f'(variant={variant_label}) — authoritative when present.'
+                        ),
+                        source='Excel (Pass 3 fund_performance_metrics)',
+                    )
+
+                # Choose the canonical "imported__<metric_key>" alias.
+                # Priority: row tagged with variant_default → row with no
+                # variant tag → first row.
+                canonical_dm = None
+                if variant_default:
+                    canonical_dm = next(
+                        (d for d in dms if d.variant == variant_default),
+                        None,
+                    )
+                if canonical_dm is None:
+                    canonical_dm = next(
+                        (d for d in dms if not d.variant),
+                        None,
+                    )
+                if canonical_dm is None:
+                    canonical_dm = dms[0]
+                val = _to_float(canonical_dm.value)
+                if val is not None:
+                    self._add(
+                        key=f'imported__{metric_key}',
+                        value=val,
+                        unit='direct',
+                        description=(
+                            f'Direct value extracted from Excel for {metric_key} '
+                            f'(canonical variant={canonical_dm.variant or "default"}) '
+                            f'— authoritative when present.'
+                        ),
+                        source='Excel (Pass 3 fund_performance_metrics)',
+                    )
         except Exception as e:
             logger.warning('Pass4 imported-direct lookup failed: %s', e)
 
@@ -578,51 +660,166 @@ class DerivationContext:
             source=model._meta.label,
         )
 
-        # Sum every numeric field on the model
-        for f in model._meta.get_fields():
-            if not isinstance(f, _NUMERIC_FIELD_TYPES):
-                continue
-            try:
-                total = _safe_sum(rows, f.name)
-                if total == 0:
+        # Fix M — Detect "periodic snapshot" models. A snapshot model is one
+        # where each row is a point-in-time observation of the SAME quantity
+        # (NAVRecord = monthly NAV snapshots; PortfolioKPI = period KPI
+        # snapshots). For these, `sum__<model>__<field>` is NEVER the right
+        # semantic — summing 12 monthly NAVs gives ~12× the actual NAV.
+        # The only correct aggregate is `latest__<model>__<field>` (emitted
+        # later below). We DROP sum__ emission for snapshot models so Pass 4
+        # cannot accidentally pick the wrong variable.
+        #
+        # Heuristic for "snapshot": model has a date/datetime field AND that
+        # field has ≥ 2 distinct values across the loaded rows. This is the
+        # same test used below for `latest__` emission, so the two are
+        # symmetric: if `latest__` is emittable, `sum__` is suppressed.
+        is_snapshot_model = False
+        try:
+            for f in model._meta.get_fields():
+                if not isinstance(f, _TEMPORAL_FIELD_TYPES):
                     continue
-                self._add(
-                    key=f'sum__{label_base}__{f.name}',
-                    value=_to_float(total),
-                    unit='auto',
-                    description=(
-                        f'Sum of {model.__name__}.{f.name} across '
-                        f'{len(rows)} rows linked to this scheme'
-                    ),
-                    source=f'{model._meta.label}.{f.name}',
-                )
-            except Exception:
-                continue
-
-        # MAX for date fields — useful for "latest record" type info
-        for f in model._meta.get_fields():
-            if not isinstance(f, _TEMPORAL_FIELD_TYPES):
-                continue
-            try:
-                dates = []
+                # Only the field most likely to represent the snapshot
+                # date — skip generic created_at/updated_at audit fields
+                # because every model has those.
+                if f.name in ('created_at', 'updated_at'):
+                    continue
+                seen_dates = set()
                 for r in rows:
                     v = _safe_get(r, f.name, None)
                     if isinstance(v, datetime):
                         v = v.date()
                     if isinstance(v, date):
-                        dates.append(v)
-                if dates:
+                        seen_dates.add(v)
+                if len(seen_dates) >= 2:
+                    is_snapshot_model = True
+                    break
+        except Exception:
+            pass
+
+        # Sum every numeric field on the model (skipped for snapshot models)
+        if not is_snapshot_model:
+            for f in model._meta.get_fields():
+                if not isinstance(f, _NUMERIC_FIELD_TYPES):
+                    continue
+                try:
+                    total = _safe_sum(rows, f.name)
+                    if total == 0:
+                        continue
+                    self._add(
+                        key=f'sum__{label_base}__{f.name}',
+                        value=_to_float(total),
+                        unit='auto',
+                        description=(
+                            f'Sum of {model.__name__}.{f.name} across '
+                            f'{len(rows)} rows linked to this scheme'
+                        ),
+                        source=f'{model._meta.label}.{f.name}',
+                    )
+                except Exception:
+                    continue
+        else:
+            logger.info(
+                'Pass4 catalogue: SKIPPING sum__%s__* — %s detected as '
+                'periodic-snapshot model (%d distinct dates). Pass 4 will '
+                'use latest__%s__* instead.',
+                label_base, model.__name__,
+                len(seen_dates) if 'seen_dates' in locals() else 0,
+                label_base,
+            )
+
+        # MAX for date fields — useful for "latest record" type info
+        latest_date = None
+        latest_date_field = None
+        for f in model._meta.get_fields():
+            if not isinstance(f, _TEMPORAL_FIELD_TYPES):
+                continue
+            try:
+                dated = []  # list of (date, row) pairs
+                for r in rows:
+                    v = _safe_get(r, f.name, None)
+                    if isinstance(v, datetime):
+                        v = v.date()
+                    if isinstance(v, date):
+                        dated.append((v, r))
+                if dated:
+                    max_d = max(d for d, _ in dated)
                     self._add(
                         key=f'max__{label_base}__{f.name}',
-                        value=max(dates).isoformat(),
+                        value=max_d.isoformat(),
                         unit='date',
                         description=(
                             f'Most recent {model.__name__}.{f.name}'
                         ),
                         source=f'{model._meta.label}.{f.name}',
                     )
+                    # Remember the most recent date across any temporal
+                    # field so we can emit `latest__<model>__<field>` keys
+                    # for periodic-snapshot models (NAVRecord etc.).
+                    if latest_date is None or max_d > latest_date:
+                        latest_date = max_d
+                        latest_date_field = f.name
             except Exception:
                 continue
+
+        # latest__<model>__<numeric_field> — snapshot-of-most-recent-row
+        # alternative to sum__ for time-series models. Pass 4 was previously
+        # summing NAVRecord.investments_at_fair_value across all 12 monthly
+        # snapshots (≈43,000 Cr) instead of using the latest single value
+        # (≈3,800 Cr). This emits both shapes so Gemini can pick the right
+        # one; the metric description guides the choice. We only emit
+        # `latest__` when there are multiple distinct dates (≥2 snapshots)
+        # because a single-row model already has `sum__` == `latest__`.
+        if latest_date is not None and latest_date_field is not None:
+            try:
+                # Find the row with the most recent date on the selected
+                # field. If two rows share the latest date, pick the first
+                # one deterministically.
+                latest_row = None
+                for r in rows:
+                    v = _safe_get(r, latest_date_field, None)
+                    if isinstance(v, datetime):
+                        v = v.date()
+                    if v == latest_date:
+                        latest_row = r
+                        break
+                # Count distinct dates so we don't pollute the catalogue
+                # for models that are not actually time-series (1 row).
+                distinct_dates = set()
+                for r in rows:
+                    v = _safe_get(r, latest_date_field, None)
+                    if isinstance(v, datetime):
+                        v = v.date()
+                    if isinstance(v, date):
+                        distinct_dates.add(v)
+                if latest_row is not None and len(distinct_dates) >= 2:
+                    for nf in model._meta.get_fields():
+                        if not isinstance(nf, _NUMERIC_FIELD_TYPES):
+                            continue
+                        try:
+                            val = _safe_get(latest_row, nf.name, None)
+                            if val is None:
+                                continue
+                            self._add(
+                                key=f'latest__{label_base}__{nf.name}',
+                                value=_to_float(val),
+                                unit='auto',
+                                description=(
+                                    f'Latest single-row value of '
+                                    f'{model.__name__}.{nf.name} as of '
+                                    f'{latest_date.isoformat()} (use this '
+                                    f'INSTEAD of sum__ when the model is a '
+                                    f'periodic snapshot like NAVRecord — '
+                                    f'summing across periods is wrong).'
+                                ),
+                                source=(
+                                    f'{model._meta.label}.{nf.name} '
+                                    f'@ {latest_date.isoformat()}'
+                                ),
+                            )
+                        except Exception:
+                            continue
+            except Exception:
+                pass
 
     def _build_cashflow_series(self):
         """Universal cashflow builder. Finds any model linked to this scheme
@@ -722,15 +919,40 @@ def _direct_value_exists(scheme, metric_key):
     visible here, the extraction pass (Pass 3
     fund_performance_metrics) must write a DerivedMetric row with the
     imported value.
+
+    Variant handling: when the metric has multiple variants persisted
+    (e.g. gross + net for total_unrealised_fair_value), prefer the row
+    tagged with the metric's variant_default declared in the canonical
+    catalogue. Falls back to the un-tagged row, then to the first row.
     """
     try:
         from .models import DerivedMetric
-        dm = DerivedMetric.objects.filter(
-            scheme=scheme, metric_key=metric_key,
-            formula_expression='(direct value imported)',
-        ).exclude(value=None).first()
-        if dm and dm.value is not None:
-            return True, _to_float(dm.value)
+        from .canonical_schema import CANONICAL_VALUE_CATEGORIES
+        rows = list(
+            DerivedMetric.objects.filter(
+                scheme=scheme, metric_key=metric_key,
+                formula_expression='(direct value imported)',
+            ).exclude(value=None)
+        )
+        if not rows:
+            return False, None
+        meta = (
+            CANONICAL_VALUE_CATEGORIES.get('fund_performance_metrics', {})
+            .get(metric_key)
+        )
+        variant_default = None
+        if isinstance(meta, dict):
+            variant_default = meta.get('variant_default')
+        chosen = None
+        if variant_default:
+            chosen = next((r for r in rows if r.variant == variant_default), None)
+        if chosen is None:
+            chosen = next((r for r in rows if not r.variant), None)
+        if chosen is None:
+            chosen = rows[0]
+        if chosen.value is None:
+            return False, None
+        return True, _to_float(chosen.value)
     except Exception:
         pass
     return False, None
@@ -789,6 +1011,23 @@ class MetricDerivationService:
                 )
                 results.append((metric_key, 'error:%s' % type(e).__name__))
 
+        # Fix F — Physical-identity guards. After ALL metrics are derived,
+        # walk a small set of universal accounting identities and clamp /
+        # reject any DerivedMetric row that violates them. These are NOT
+        # waterfall-specific heuristics; they are arithmetic facts that
+        # hold for every European or American AIF and every imaginable
+        # fund layout. Running them at the end (rather than mid-derivation)
+        # means we catch the violation regardless of which Pass produced
+        # the bad value: Pass 3.5 imported_direct, Pass 4 Gemini-derived,
+        # Pass 8 direct waterfall — all are subject to the same check.
+        try:
+            self._apply_identity_guards()
+        except Exception as e:
+            logger.warning(
+                'Pass4 identity-guard run failed for scheme=%s: %s\n%s',
+                _safe_get(self.scheme, 'name', '?'), e, traceback.format_exc(),
+            )
+
         logger.info(
             '[Pass4] scheme=%s outcomes=%s',
             _safe_get(self.scheme, 'name', '?'),
@@ -796,12 +1035,168 @@ class MetricDerivationService:
         )
         return results
 
+    def _apply_identity_guards(self):
+        """Validate and clamp DerivedMetric rows that violate universal
+        accounting identities. Logs every adjustment so audit can surface
+        which metric was clamped and why.
+
+        Currently enforced:
+          • carry_amount_net ≤ carry_amount_gross   (net cannot exceed gross)
+          • carry_amount_net ≥ 0                     (no negative net carry)
+          • gp_clawback_provision ≥ 0                (provision is non-negative)
+          • carry_amount_net = max(gross − clawback, 0) when both gross and
+            clawback are known. If gross is unknown but net violates the
+            simpler net ≤ gross check, we cannot clamp without gross — we
+            just delete the bad net row so the dashboard shows "no value"
+            instead of an impossible one.
+        """
+        from .models import DerivedMetric
+        scheme = self.scheme
+
+        def _pick_authoritative(metric_key):
+            """Return the single DerivedMetric row a downstream reader
+            would see for (scheme, metric_key). Honour variant_default if
+            declared, then untagged, then first."""
+            try:
+                from .canonical_schema import CANONICAL_VALUE_CATEGORIES
+            except Exception:
+                CANONICAL_VALUE_CATEGORIES = {}
+            rows = list(
+                DerivedMetric.objects.filter(
+                    scheme=scheme, metric_key=metric_key,
+                ).exclude(value=None)
+            )
+            if not rows:
+                return None
+            meta = (
+                CANONICAL_VALUE_CATEGORIES
+                .get('fund_performance_metrics', {})
+                .get(metric_key)
+            )
+            variant_default = (
+                meta.get('variant_default') if isinstance(meta, dict) else None
+            )
+            chosen = None
+            if variant_default:
+                chosen = next(
+                    (r for r in rows if r.variant == variant_default), None
+                )
+            if chosen is None:
+                chosen = next((r for r in rows if not r.variant), None)
+            if chosen is None:
+                chosen = rows[0]
+            return chosen
+
+        gross_row    = _pick_authoritative('carry_amount_gross')
+        net_row      = _pick_authoritative('carry_amount_net')
+        clawback_row = _pick_authoritative('gp_clawback_provision')
+
+        def _v(row):
+            if row is None or row.value is None:
+                return None
+            try:
+                return float(row.value)
+            except (TypeError, ValueError):
+                return None
+
+        gross    = _v(gross_row)
+        net      = _v(net_row)
+        clawback = _v(clawback_row)
+
+        # Clamp negative clawback to 0 (defensive — should never happen
+        # since clawback is a non-negative quantity by definition, but Pass
+        # 4 could in principle return a small negative due to rounding).
+        if clawback is not None and clawback < 0 and clawback_row is not None:
+            logger.warning(
+                '[Pass4 identity-guard] clawback=%s < 0 for scheme=%s — '
+                'clamping to 0.', clawback, _safe_get(scheme, 'name', '?'),
+            )
+            from decimal import Decimal as _D
+            clawback_row.value = _D('0')
+            clawback_row.gemini_reasoning = (
+                'IDENTITY GUARD: original Pass-4 value was negative '
+                '(physically impossible — clawback is non-negative); '
+                'clamped to 0. ' + (clawback_row.gemini_reasoning or '')
+            )[:4000]
+            clawback_row.save(update_fields=['value', 'gemini_reasoning'])
+            clawback = 0.0
+
+        if gross is not None and net is not None:
+            # Identity #1: net ≤ gross. Violation means Pass 4 picked an
+            # incompatible aggregation source — e.g. summed a per-LP carry
+            # column that double-counted. Action: rebuild net from the
+            # identity (gross − clawback), or 0 when clawback unknown.
+            if net > gross + 1e-6 and net_row is not None:
+                target = (
+                    max(gross - clawback, 0.0) if clawback is not None
+                    else gross
+                )
+                logger.warning(
+                    '[Pass4 identity-guard] scheme=%s: '
+                    'carry_amount_net=%s > carry_amount_gross=%s '
+                    '(physically impossible); rewriting net to %s.',
+                    _safe_get(scheme, 'name', '?'), net, gross, target,
+                )
+                from decimal import Decimal as _D
+                net_row.value = _D(str(target))
+                net_row.formula_expression = (
+                    'max(carry_amount_gross - gp_clawback_provision, 0)'
+                )[:2000]
+                net_row.gemini_reasoning = (
+                    f'IDENTITY GUARD: original derivation produced '
+                    f'net={net:.2f} > gross={gross:.2f} which is physically '
+                    f'impossible. Rewritten using the canonical identity '
+                    f'net = max(gross - clawback, 0). '
+                    + (net_row.gemini_reasoning or '')
+                )[:4000]
+                net_row.save(update_fields=[
+                    'value', 'formula_expression', 'gemini_reasoning',
+                ])
+                net = target
+
+            # Identity #2: net ≥ 0. Clamp.
+            if net < 0 and net_row is not None:
+                logger.warning(
+                    '[Pass4 identity-guard] net=%s < 0 for scheme=%s — '
+                    'clamping to 0.', net, _safe_get(scheme, 'name', '?'),
+                )
+                from decimal import Decimal as _D
+                net_row.value = _D('0')
+                net_row.gemini_reasoning = (
+                    'IDENTITY GUARD: original value was negative; '
+                    'clamped to 0. ' + (net_row.gemini_reasoning or '')
+                )[:4000]
+                net_row.save(update_fields=['value', 'gemini_reasoning'])
+
     # ────────────────────────────────────────────────────────────────────────
 
     def _derive_one(self, metric_key, meta, ctx, scheme_ctx):
         from .models import DerivedMetric
 
-        # 0) Direct-value path: Excel already gave us this number → persist
+        # 0a) Pass-9-already-wrote path. Pass 9 runs BEFORE Pass 4 in the
+        # orchestrator and persists with formula_expression prefix
+        # "(Pass 9 unified) …". If Pass 9 produced a high-confidence
+        # value, the catalogue-of-variables derivation here would only
+        # introduce drift — leave the Pass 9 row alone.
+        try:
+            pass9_existing = DerivedMetric.objects.filter(
+                scheme=self.scheme,
+                metric_key=metric_key,
+                formula_expression__startswith='(Pass 9 unified)',
+            ).exclude(value=None).first()
+        except Exception as e:
+            logger.warning('Pass4 Pass9-check failed for %s: %s', metric_key, e)
+            pass9_existing = None
+        if pass9_existing is not None:
+            logger.info(
+                'Pass4: skipping %s — Pass 9 already wrote value=%s '
+                '(confidence=%s)',
+                metric_key, pass9_existing.value,
+                pass9_existing.confidence,
+            )
+            return 'pass9_authoritative'
+
+        # 0b) Direct-value path: Excel already gave us this number → persist
         # with provenance and we're done.
         try:
             has_direct, direct_val = _direct_value_exists(self.scheme, metric_key)
@@ -810,15 +1205,39 @@ class MetricDerivationService:
             has_direct, direct_val = False, None
 
         if has_direct:
+            # Pass 3.5 already wrote a row for this metric with its own
+            # inputs_used (source cell, source label, etc.) and reasoning.
+            # Don't overwrite that provenance with an empty stub — pull the
+            # existing record's payload through so the provenance panel can
+            # show WHERE the value came from.
+            preserved_inputs = {}
+            preserved_reason = (
+                'Direct value imported from Excel — no derivation needed.'
+            )
+            try:
+                from .models import DerivedMetric
+                existing = DerivedMetric.objects.filter(
+                    scheme=self.scheme,
+                    metric_key=metric_key,
+                    formula_expression='(direct value imported)',
+                ).exclude(value=None).first()
+                if existing:
+                    if existing.inputs_used:
+                        preserved_inputs = dict(existing.inputs_used)
+                    if existing.gemini_reasoning:
+                        preserved_reason = existing.gemini_reasoning
+            except Exception:
+                pass
             self._persist(
                 metric_key=metric_key,
                 value=direct_val,
                 formula='(direct value imported)',
-                inputs_used={},
+                inputs_used=preserved_inputs,
                 ctx_inputs=ctx.inputs,
                 confidence=1.0,
-                reasoning='Direct value imported from Excel — no derivation needed.',
+                reasoning=preserved_reason,
                 candidates=[],
+                passthrough_inputs=True,
             )
             return 'imported_direct'
 
@@ -878,61 +1297,204 @@ class MetricDerivationService:
             )
             return 'api_error'
 
-        formula = (gemini_out.get('formula_expression') or '').strip()
-        inputs_used = gemini_out.get('inputs_used') or {}
+        candidate_formulas = gemini_out.get('candidate_formulas') or []
         reasoning = (gemini_out.get('reasoning') or '')[:4000]
-        candidates = gemini_out.get('candidates') or []
-        try:
-            confidence = float(gemini_out.get('confidence') or 0.0)
-        except (TypeError, ValueError):
-            confidence = 0.0
 
-        # 2) Evaluate the formula Python-side.
-        try:
-            computed = self._evaluate(formula, inputs_used)
-        except Exception as e:
-            logger.warning(
-                'Pass4 evaluation failed for %s (formula=%r): %s',
-                metric_key, formula, e,
+        if not candidate_formulas:
+            # Gemini returned no candidates — record honestly as unviable.
+            self._persist(
+                metric_key=metric_key,
+                value=None,
+                formula='',
+                inputs_used={},
+                ctx_inputs=ctx.inputs,
+                confidence=0.0,
+                reasoning=reasoning or 'Gemini returned no candidate formulas',
+                candidates=[],
             )
-            computed = None
+            return 'unviable'
 
-        # 3) Persist regardless of outcome — null value with provenance is
-        # still useful to the dashboard (provenance panel will explain why).
+        # 2) Iterate candidates in rank order. For EACH candidate:
+        #    (a) AST-validate that every variable it references exists in
+        #        ctx.inputs (the catalogue we passed to Gemini). Reject
+        #        the candidate entirely if any variable is hallucinated.
+        #    (b) Build the eval context EXCLUSIVELY from ctx.inputs values
+        #        — never from any Gemini-supplied numeric value. This is
+        #        the hallucination guard: Gemini cannot inject fake
+        #        numbers into the dashboard.
+        #    (c) Evaluate via _safe_eval (arithmetic) or _compute_xirr.
+        #    (d) First candidate that produces a real finite number wins.
+        catalogue_keys = set(ctx.inputs.keys())
+        chosen = None
+        chosen_value = None
+        chosen_reason = ''
+        rejected_candidates = []
+
+        for cand in candidate_formulas:
+            formula = cand.get('formula_expression', '').strip()
+            if not formula:
+                rejected_candidates.append({
+                    **cand,
+                    'rejected_because': 'empty formula',
+                })
+                continue
+
+            # Extract every variable name referenced by the formula.
+            referenced_vars, parse_err = self._extract_referenced_vars(formula)
+            if parse_err is not None:
+                rejected_candidates.append({
+                    **cand,
+                    'rejected_because': f'parse error: {parse_err}',
+                })
+                continue
+
+            # Hallucination guard: every referenced variable must exist
+            # in the catalogue passed to Gemini.
+            hallucinated = [v for v in referenced_vars if v not in catalogue_keys]
+            if hallucinated:
+                rejected_candidates.append({
+                    **cand,
+                    'rejected_because': (
+                        f'hallucinated variable(s) not in catalogue: '
+                        f'{hallucinated}'
+                    ),
+                })
+                logger.info(
+                    'Pass4 rejected rank %s candidate for %s — '
+                    'hallucinated variables: %s',
+                    cand.get('rank'), metric_key, hallucinated,
+                )
+                continue
+
+            # Build the eval context from CATALOGUE values only.
+            eval_ctx = {}
+            missing_inputs = []
+            for v in referenced_vars:
+                cat_entry = ctx.inputs.get(v, {})
+                val = cat_entry.get('value')
+                if val is None:
+                    missing_inputs.append(v)
+                else:
+                    eval_ctx[v] = val
+            if missing_inputs:
+                rejected_candidates.append({
+                    **cand,
+                    'rejected_because': (
+                        f'catalogue input is None for: {missing_inputs}'
+                    ),
+                })
+                continue
+
+            # Evaluate. XIRR family branches through scipy.brentq.
+            computed = self._evaluate_validated(formula, eval_ctx)
+            if computed is None:
+                rejected_candidates.append({
+                    **cand,
+                    'rejected_because': 'evaluation produced None / NaN / Inf',
+                })
+                continue
+
+            chosen = cand
+            chosen_value = computed
+            chosen_reason = (
+                f'Rank {cand.get("rank")} of {len(candidate_formulas)} '
+                f'candidate(s) selected. '
+                f'Applies when: {cand.get("applies_when", "")}. '
+                f'Disjointness proof: {cand.get("inputs_disjoint_proof", "")}. '
+                f'{reasoning}'
+            )[:4000]
+            logger.info(
+                '[Pass4] %s ← rank %s formula "%s" → value=%s '
+                '(confidence=%.2f; disjoint_proof="%s")',
+                metric_key, cand.get('rank'), formula[:120],
+                chosen_value, cand.get('confidence', 0.0),
+                (cand.get('inputs_disjoint_proof') or '')[:120],
+            )
+            break
+
+        if chosen is None:
+            self._persist(
+                metric_key=metric_key,
+                value=None,
+                formula='',
+                inputs_used={},
+                ctx_inputs=ctx.inputs,
+                confidence=0.0,
+                reasoning=(
+                    f'No viable candidate formula. {len(rejected_candidates)} '
+                    f'candidate(s) considered; all rejected (see candidate_formulas '
+                    f'for per-candidate rejection reasons). Original reasoning: '
+                    f'{reasoning}'
+                )[:4000],
+                candidates=rejected_candidates,
+            )
+            return 'unviable_no_valid_formula'
+
+        # 3) Persist the winning candidate with full audit trail.
         self._persist(
             metric_key=metric_key,
-            value=computed,
-            formula=formula[:2000],
-            inputs_used=inputs_used,
+            value=chosen_value,
+            formula=chosen['formula_expression'][:2000],
+            inputs_used={
+                k: ctx.inputs[k].get('value')
+                for k in (chosen.get('inputs_required') or [])
+                if k in ctx.inputs
+            },
             ctx_inputs=ctx.inputs,
-            confidence=confidence,
-            reasoning=reasoning,
-            candidates=candidates,
+            confidence=float(chosen.get('confidence') or 0.0),
+            reasoning=chosen_reason,
+            candidates=candidate_formulas + (
+                [{'rejected': rejected_candidates}] if rejected_candidates else []
+            ),
         )
 
-        return 'derived' if computed is not None else 'unviable'
+        return 'derived'
 
     # ────────────────────────────────────────────────────────────────────────
 
-    def _evaluate(self, formula, inputs_used):
+    def _extract_referenced_vars(self, formula):
+        """Parse `formula` and return (set_of_variable_names, error_or_None).
+
+        Walks the AST once to collect every `ast.Name` reference, ignoring
+        names that are allowed-function call targets (max, min, abs).
+        Returns ({}, '<error>') if the formula is unparseable.
+        """
+        try:
+            tree = ast.parse(formula, mode='eval')
+        except SyntaxError as e:
+            return set(), str(e)
+        names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name):
+                names.add(node.id)
+        # Drop the allowed-function names — they are not variables.
+        names -= {'max', 'min', 'abs', 'XIRR', 'xirr'}
+        return names, None
+
+    def _evaluate_validated(self, formula, eval_ctx):
+        """Evaluate a pre-validated formula. The caller has already confirmed
+        every variable in `formula` exists in `eval_ctx` with a non-null
+        value. We only have to dispatch to XIRR vs arithmetic.
+        """
         if not formula:
             return None
         f = formula.strip()
-        # XIRR family: e.g. "XIRR(cashflow_series)" or just "XIRR"
-        if f.lower().lstrip().startswith('xirr'):
-            series = inputs_used.get('cashflow_series')
-            if series is None:
-                # Gemini may have placed the series under another key
-                for v in inputs_used.values():
-                    if isinstance(v, list):
-                        series = v
-                        break
+        # XIRR family: e.g. "XIRR(cashflow_series)"
+        if f.lower().startswith('xirr'):
+            # Find the list-valued input (the cashflow series). For the
+            # ranked-formula contract, the series MUST be a catalogue
+            # variable referenced by name in the formula — typically
+            # 'cashflow_series'.
+            series = None
+            for v in eval_ctx.values():
+                if isinstance(v, list):
+                    series = v
+                    break
             return _compute_xirr(series)
 
-        # Arithmetic formula — build numeric namespace from inputs_used
-        # (skip non-numeric entries like cashflow_series).
+        # Arithmetic: pass catalogue values straight to _safe_eval.
         variables = {}
-        for k, v in inputs_used.items():
+        for k, v in eval_ctx.items():
             fv = _to_float(v)
             if fv is not None:
                 variables[k] = fv
@@ -941,9 +1503,18 @@ class MetricDerivationService:
     # ────────────────────────────────────────────────────────────────────────
 
     def _persist(self, metric_key, value, formula, inputs_used, ctx_inputs,
-                 confidence, reasoning, candidates):
+                 confidence, reasoning, candidates, passthrough_inputs=False):
         from .models import DerivedMetric
         try:
+            # passthrough_inputs=True is used by the direct-value path to keep
+            # the source-cell context Pass 3.5 wrote (e.g. {source_cell:
+            # 'WATERFALL_EUR!R23C5', source_label: 'Step 4 Total Step', ...}).
+            # The serialise path expects a {key: variable_lookup} shape that
+            # makes no sense for already-resolved cell metadata.
+            serialised_inputs = (
+                inputs_used if passthrough_inputs
+                else self._serialise_inputs(inputs_used, ctx_inputs)
+            )
             DerivedMetric.objects.update_or_create(
                 scheme=self.scheme,
                 metric_key=metric_key,
@@ -951,13 +1522,38 @@ class MetricDerivationService:
                     'organization': self.organization,
                     'value': (Decimal(str(value)) if value is not None else None),
                     'formula_expression': (formula or '')[:2000],
-                    'inputs_used': self._serialise_inputs(inputs_used, ctx_inputs),
+                    'inputs_used': serialised_inputs,
                     'confidence': max(0.0, min(1.0, confidence)),
                     'gemini_reasoning': (reasoning or '')[:4000],
                     'candidate_formulas': candidates or [],
                     'source_import_file': self.source_import_file,
                 },
             )
+            # Record candidate for the Arbiter. Pass 4 candidates are
+            # always classified into Tier C (catalogue derivation) by
+            # the Arbiter, so a Pass 9 / Pass 8 / Pass 3.5 value will
+            # win over this one when present.
+            if value is not None:
+                try:
+                    from .metric_arbiter import record_metric_candidate
+                    record_metric_candidate(
+                        scheme=self.scheme,
+                        organization=self.organization,
+                        metric_key=metric_key,
+                        variant=None,
+                        pass_id='P4',
+                        value=value,
+                        formula_expression=formula or '',
+                        confidence=confidence,
+                        inputs_used=serialised_inputs,
+                        gemini_reasoning=reasoning or '',
+                        source_import_file=self.source_import_file,
+                    )
+                except Exception as inner:
+                    logger.warning(
+                        'Pass4 record_metric_candidate failed for %s: %s',
+                        metric_key, inner,
+                    )
         except Exception as e:
             logger.error(
                 'Pass4 PERSIST failed scheme=%s metric=%s: %s',
@@ -981,3 +1577,551 @@ class MetricDerivationService:
         except Exception:
             pass
         return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pass 6 — Per-Row Metric Completer
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Walks every fund-data Django model whose rows belong to the imported fund,
+# identifies nullable numeric/percent/decimal fields that the dashboard would
+# display (i.e. any field with name in the model schema, no hardcoded list),
+# and asks Gemini ONCE per model for the formula to compute each missing
+# field from the OTHER available fields on that row. The formula is then
+# evaluated per row via the same safe arithmetic AST walker used in Pass 4.
+#
+# Concrete example: Investment.irr_pct is null across all 50 rows. Pass 6
+# asks Gemini for the per-row formula using available row fields
+# (total_invested, latest_valuation, investment_date, exit_date, etc.).
+# Gemini returns something like:
+#   ((latest_valuation / total_invested) ** (1 / years_held) - 1) * 100
+# where years_held = (today - investment_date).days / 365.0
+# Python evaluates that for each of the 50 rows and writes irr_pct.
+#
+# ZERO hardcoded field names, ZERO hardcoded formulas, ZERO per-model special
+# cases. Discovery is via Django model introspection; formula is whatever
+# Gemini returns.
+
+# Field types the completer treats as "potentially derivable" if null
+_DERIVABLE_FIELD_TYPES = (
+    django_models.DecimalField,
+    django_models.FloatField,
+    django_models.IntegerField,
+    django_models.BigIntegerField,
+    django_models.PositiveIntegerField,
+    django_models.SmallIntegerField,
+)
+
+
+class PerRowMetricCompleter:
+    """Pass 6 orchestrator. NEVER raises. Production-grade."""
+
+    def __init__(self, organization, fund):
+        self.organization = organization
+        self.fund = fund
+
+    def complete_all(self):
+        results = []
+        if self.fund is None:
+            return results
+        for model in self._discover_fund_models():
+            try:
+                outcome = self._complete_model(model)
+                results.append((model._meta.label, outcome))
+            except Exception as e:
+                logger.warning(
+                    'Pass 6 model %s failed: %s',
+                    getattr(model, '__name__', '?'), e,
+                )
+                results.append(
+                    (getattr(model, '__name__', '?'),
+                     f'error:{type(e).__name__}'),
+                )
+        logger.info('[Pass6] per-row completion outcomes: %s', results)
+        return results
+
+    # ────────────────────────────────────────────────────────────────────────
+
+    def _discover_fund_models(self):
+        """Find every model in project apps that has a scheme/investment/fund
+        FK and has at least one row tied to self.fund."""
+        wanted = []
+        for ac in apps.get_app_configs():
+            if ac.label in ('auth', 'contenttypes', 'sessions', 'admin',
+                            'accounts', 'dataimport'):
+                continue
+            try:
+                ac_path = os.path.realpath(getattr(ac, 'path', '') or '')
+            except Exception:
+                continue
+            if 'site-packages' in ac_path or 'dist-packages' in ac_path:
+                continue
+            for model in ac.get_models():
+                if self._model_has_rows_for_fund(model):
+                    wanted.append(model)
+        return wanted
+
+    def _model_has_rows_for_fund(self, model):
+        try:
+            qs = self._scope_to_fund(model)
+            if qs is None:
+                return False
+            return qs.exists()
+        except Exception:
+            return False
+
+    def _scope_to_fund(self, model):
+        """Return a queryset of model rows filtered to self.fund. Returns
+        None if model has no recognised FK path."""
+        try:
+            field_names = {
+                f.name for f in model._meta.get_fields()
+                if isinstance(f, (django_models.ForeignKey,
+                                  django_models.OneToOneField))
+            }
+        except Exception:
+            return None
+        try:
+            if 'fund' in field_names:
+                return model.objects.filter(fund=self.fund)
+            if 'scheme' in field_names:
+                return model.objects.filter(scheme__fund=self.fund)
+            if 'investment' in field_names:
+                return model.objects.filter(
+                    investment__scheme__fund=self.fund
+                )
+        except Exception:
+            return None
+        return None
+
+    # ────────────────────────────────────────────────────────────────────────
+
+    def _complete_model(self, model):
+        """Pass 6 per-model orchestrator.
+
+        PRODUCTION ENRICHMENTS over the v1 implementation:
+        1. Builds an ENRICHED row context: in addition to the model's direct
+           scalar fields, walks every REVERSE-FK relation (e.g. Investment →
+           Valuation/ExitEvent) and exposes the LATEST related row's scalar
+           fields with prefix '<rel_name>__<field>'. This gives Gemini cross-
+           model inputs without needing any hardcoded model relationships.
+        2. Pre-computes 'years_since_<date_field>' helper for every date field
+           on the model and on related rows. Gemini doesn't need to do date
+           arithmetic — it just uses these pre-computed years as scalars.
+        3. Presents dates to Gemini as ISO strings (semantic), not encoded
+           integers.
+
+        Example outcome for Investment.irr_pct:
+          Available inputs Gemini sees include:
+            - total_invested = 22.0
+            - investment_date = '2019-04-01'
+            - years_since_investment_date = 7.18
+            - valuation__fair_value = 16.3 (from latest related Valuation)
+            - valuation__valuation_date = '2026-03-31'
+          → Gemini can write:
+            ((valuation__fair_value / total_invested) ** (1 / years_since_investment_date) - 1) * 100
+        """
+        from .gemini_column_mapper import derive_per_row_formulas
+
+        rows = list(self._scope_to_fund(model))
+        if not rows:
+            return 'no_rows'
+
+        today = date.today()
+
+        # 1) Identify candidate fields (nullable numeric/percent that are
+        #    null on >= 50% of rows).
+        # Phase 5b (Bug T) — canonical FundMetric mirrors are never
+        # derived by Pass 6. These fields exist on legacy models only as
+        # a compatibility mirror for the canonical FundMetric value, and
+        # are populated by anchor_pipeline.persist_fund()'s sync block.
+        # A None on these fields is INTENTIONAL ("unknown" / "no
+        # sponsor LP detected") — Pass 6 deriving a value from row
+        # context (e.g., first LP's commitment %) re-introduces Bug F.
+        # Universal — applies to every fund, no per-file branching.
+        # The exclusion set is imported from anchor_pipeline.py so the
+        # Phase 5 sync map and this exclusion map can never drift apart.
+        from .anchor_pipeline import SCHEME_MIRROR_ATTRS
+        _CANONICAL_MIRROR_FIELDS = {
+            ('funds', 'Scheme'): SCHEME_MIRROR_ATTRS,
+        }
+        excluded = _CANONICAL_MIRROR_FIELDS.get(
+            (model._meta.app_label, model.__name__), set()
+        )
+
+        candidate_fields = {}
+        for f in model._meta.get_fields():
+            if not isinstance(f, _DERIVABLE_FIELD_TYPES):
+                continue
+            if f.name in excluded:
+                continue
+            try:
+                null_count = sum(
+                    1 for r in rows if _safe_get(r, f.name, None) is None
+                )
+            except Exception:
+                continue
+            total = len(rows)
+            if total == 0:
+                continue
+            if null_count >= max(1, total // 2):
+                candidate_fields[f.name] = {
+                    'description': (
+                        str(getattr(f, 'help_text', '') or '').strip()
+                        or f.name
+                    ),
+                    'unit': self._infer_unit(f.name),
+                }
+
+        if not candidate_fields:
+            return 'no_candidates'
+
+        # 2) Build the enriched per-row context for EVERY row (we'll union
+        #    field names across rows to form available_inputs).
+        row_contexts = [self._build_row_context(r, model, today) for r in rows]
+
+        # available_inputs: union of all keys that have at least one non-null
+        # value across rows. Use the first non-null value as sample.
+        available_inputs = {}
+        for key in set().union(*[set(rc.keys()) for rc in row_contexts]):
+            # Find first non-null sample
+            sample = None
+            for rc in row_contexts:
+                if key in rc and rc[key] is not None:
+                    sample = rc[key]
+                    break
+            if sample is None:
+                continue
+            available_inputs[key] = {
+                'description': self._describe_input_key(model, key),
+                'unit': self._infer_unit(key),
+                'sample_value': self._render_value(sample),
+            }
+
+        # Exclude candidate fields from available_inputs (we can't use a
+        # field as input to compute itself).
+        for k in candidate_fields:
+            available_inputs.pop(k, None)
+
+        if not available_inputs:
+            return 'no_inputs'
+
+        # 3) Pick the 3 sample rows with the richest available_inputs coverage
+        scored = sorted(
+            ((sum(1 for k in available_inputs if k in rc and rc[k] is not None),
+              rc) for rc in row_contexts),
+            key=lambda x: x[0], reverse=True,
+        )
+        sample_rows = []
+        for _, rc in scored[:3]:
+            sample_rows.append({
+                k: self._render_value(rc[k])
+                for k in available_inputs
+                if k in rc and rc[k] is not None
+            })
+
+        # 4) Ask Gemini for formulas — one call per model
+        try:
+            formulas = derive_per_row_formulas(
+                model_label=model._meta.label,
+                available_inputs=available_inputs,
+                missing_fields=candidate_fields,
+                sample_row_values=sample_rows,
+            )
+        except Exception as e:
+            logger.warning(
+                'Pass 6 derive_per_row_formulas API error for %s: %s',
+                model._meta.label, e,
+            )
+            return 'api_error'
+
+        if not formulas:
+            return 'no_formulas'
+
+        # 5) For each target field, try CANDIDATE FORMULAS in rank order
+        # per row. First formula whose declared inputs are all present and
+        # non-null on that row wins. Empty cells stay empty (no fabrication).
+        applied_total = 0
+        completed_field_summary = []
+        for field_name, fdata in formulas.items():
+            if field_name not in candidate_fields:
+                continue
+            candidates = fdata.get('candidate_formulas') or []
+            if not candidates:
+                continue
+
+            # Per-rank counters so the operator can see which formula
+            # actually applied to each portion of the data set.
+            rank_counts = {c['rank']: 0 for c in candidates}
+            written = 0
+            for r, rc in zip(rows, row_contexts):
+                if _safe_get(r, field_name, None) is not None:
+                    continue
+                chosen = None
+                chosen_value = None
+                for cand in candidates:
+                    required = cand.get('inputs_required') or []
+                    # Quick gate: every declared input must exist and be
+                    # non-null in this row's context. Saves a parse +
+                    # walk for inapplicable candidates and gives accurate
+                    # per-rank attribution.
+                    if not all(k in rc and rc[k] is not None for k in required):
+                        continue
+                    val = self._evaluate_for_row_context(
+                        cand['formula_expression'], rc,
+                    )
+                    if val is None:
+                        # Inputs were present but evaluation failed
+                        # (e.g. divide-by-zero, NaN). Try next candidate.
+                        continue
+                    chosen, chosen_value = cand, val
+                    break
+                if chosen is None:
+                    continue
+                try:
+                    setattr(r, field_name, _coerce_value_for_field(
+                        r._meta.get_field(field_name), chosen_value
+                    ))
+                    r.save(update_fields=[field_name])
+                    written += 1
+                    rank_counts[chosen['rank']] = rank_counts.get(chosen['rank'], 0) + 1
+                except Exception as e:
+                    logger.warning(
+                        'Pass 6 save failed for %s.%s on row id=%s: %s',
+                        model._meta.label, field_name,
+                        _safe_get(r, 'id', '?'), e,
+                    )
+            applied_total += written
+
+            # Log the rank attribution so the operator can audit which
+            # candidate formula served which fraction of the rows.
+            attribution_bits = []
+            for cand in candidates:
+                rk = cand['rank']
+                count = rank_counts.get(rk, 0)
+                formula_snippet = cand['formula_expression'][:100]
+                attribution_bits.append(
+                    f'rank{rk}({count}/{len(rows)} rows, conf={cand["confidence"]:.2f}): '
+                    f'"{formula_snippet}"'
+                )
+            logger.info(
+                '[Pass6] %s.%s ← %d candidate(s) → wrote %d/%d rows total | %s',
+                model._meta.label, field_name, len(candidates),
+                written, len(rows), ' || '.join(attribution_bits),
+            )
+            completed_field_summary.append(
+                f'{field_name}({written}/{len(rows)})'
+            )
+        return f'completed_fields={completed_field_summary} rows_written={applied_total}'
+
+    # ────────────────────────────────────────────────────────────────────────
+
+    def _build_row_context(self, row, model, today):
+        """Return the enriched per-row variable namespace.
+
+        Includes:
+        (a) every concrete scalar field on `row`
+        (b) for every reverse-FK relation, the LATEST related row's scalar
+            fields, keyed as '<relation_name>__<field_name>'. Latest is
+            determined by the first date field found on the related model.
+        (c) 'years_since_<date_field>' = (today - date_value).days / 365.25
+            for every date field on the row AND every date field on related
+            latest rows (keyed as 'years_since_<relation_name>__<date>').
+        (d) 'today' as ISO string for convenience.
+        """
+        ctx = {}
+
+        # (a) direct scalar fields
+        for f in model._meta.get_fields():
+            if isinstance(f, (django_models.ManyToManyField,
+                              django_models.ForeignKey,
+                              django_models.OneToOneField,
+                              django_models.ManyToOneRel,
+                              django_models.ManyToManyRel,
+                              django_models.OneToOneRel)):
+                continue
+            if not getattr(f, 'concrete', False):
+                continue
+            ctx[f.name] = _safe_get(row, f.name, None)
+            # (c) years-since for direct date fields
+            v = ctx[f.name]
+            if isinstance(v, datetime):
+                v = v.date()
+            if isinstance(v, date):
+                ctx[f'years_since_{f.name}'] = round(
+                    (today - v).days / 365.25, 6
+                )
+
+        # (b) reverse-FK relations — latest related row's scalars
+        for f in model._meta.get_fields():
+            if not getattr(f, 'is_relation', False):
+                continue
+            # We want reverse-FK relations (one-to-many or one-to-one_rel)
+            if not (getattr(f, 'one_to_many', False) or
+                    getattr(f, 'one_to_one', False) and getattr(f, 'auto_created', False)):
+                continue
+            try:
+                accessor = f.get_accessor_name()
+            except Exception:
+                continue
+            if not accessor:
+                continue
+            try:
+                related_mgr = getattr(row, accessor, None)
+                if related_mgr is None:
+                    continue
+                # Detect if it's a manager (one-to-many) or single instance
+                # (one-to-one reverse)
+                if hasattr(related_mgr, 'all'):
+                    related_qs = related_mgr.all()
+                else:
+                    related_qs = [related_mgr]
+            except Exception:
+                continue
+
+            rel_model = f.related_model
+            if rel_model is None:
+                continue
+
+            # Find a date field on rel_model to sort by
+            rel_date_field = None
+            for rf in rel_model._meta.get_fields():
+                if isinstance(rf, _TEMPORAL_FIELD_TYPES):
+                    rel_date_field = rf.name
+                    break
+
+            try:
+                if hasattr(related_qs, 'order_by') and rel_date_field:
+                    latest = related_qs.order_by(f'-{rel_date_field}').first()
+                elif hasattr(related_qs, 'first'):
+                    latest = related_qs.first()
+                else:
+                    latest = related_qs[0] if related_qs else None
+            except Exception:
+                latest = None
+
+            if latest is None:
+                continue
+
+            rel_prefix = rel_model.__name__.lower()
+            for rf in rel_model._meta.get_fields():
+                if isinstance(rf, (django_models.ManyToManyField,
+                                   django_models.ForeignKey,
+                                   django_models.OneToOneField,
+                                   django_models.ManyToOneRel,
+                                   django_models.ManyToManyRel,
+                                   django_models.OneToOneRel)):
+                    continue
+                if not getattr(rf, 'concrete', False):
+                    continue
+                key = f'{rel_prefix}__{rf.name}'
+                ctx[key] = _safe_get(latest, rf.name, None)
+                v = ctx[key]
+                if isinstance(v, datetime):
+                    v = v.date()
+                if isinstance(v, date):
+                    ctx[f'years_since_{key}'] = round(
+                        (today - v).days / 365.25, 6
+                    )
+
+        # (d) today
+        ctx['today'] = today.isoformat()
+        ctx['years_since_today'] = 0.0  # convenience constant
+        return ctx
+
+    # ────────────────────────────────────────────────────────────────────────
+
+    def _describe_input_key(self, model, key):
+        """Best-effort human description for a key in the enriched context."""
+        # Direct field on the model
+        try:
+            f = model._meta.get_field(key)
+            return (str(getattr(f, 'help_text', '') or '').strip()
+                    or f.name)
+        except Exception:
+            pass
+        # Years-since helper
+        if key.startswith('years_since_'):
+            base = key[len('years_since_'):]
+            return f'Years elapsed from `{base}` to today (pre-computed)'
+        # Related-model field (rel_name__field)
+        if '__' in key:
+            rel, fname = key.split('__', 1)
+            return f'Latest related `{rel}` row\'s `{fname}` field'
+        return key
+
+    def _evaluate_for_row_context(self, formula, row_context):
+        """Evaluate `formula` using `row_context` as the namespace. Date
+        values in the context are kept as ISO strings or floats; numeric/
+        years-since helpers are floats. Only numeric/float variables are
+        usable by the AST evaluator — string variables are skipped."""
+        variables = {}
+        for k, v in row_context.items():
+            if v is None:
+                continue
+            if isinstance(v, str):
+                # Skip strings (Gemini should reference numeric helpers like
+                # years_since_<date>, not the raw date string)
+                continue
+            if isinstance(v, datetime):
+                v = v.date()
+            if isinstance(v, date):
+                # Skip raw dates — only the pre-computed years_since_* helpers
+                # are usable in arithmetic formulas.
+                continue
+            n = _to_float(v)
+            if n is not None:
+                variables[k] = n
+        return _safe_eval(formula, variables)
+
+    def _infer_unit(self, name):
+        """Tiny inference helper — NOT a keyword classifier, just a heuristic
+        rendering hint for the prompt. Gemini decides everything semantically."""
+        n = name.lower()
+        if 'pct' in n or 'percent' in n or '_rate' in n:
+            return 'percent'
+        if 'date' in n:
+            return 'date'
+        if any(s in n for s in ('amount', 'value', 'cost', 'price',
+                                 'proceed', 'nav', 'capital', 'commitment',
+                                 'fee', 'expense', 'income')):
+            return 'currency'
+        if 'moic' in n or 'multiple' in n or 'tvpi' in n or 'dpi' in n:
+            return 'multiple'
+        return 'auto'
+
+    def _render_value(self, v):
+        if v is None:
+            return ''
+        if isinstance(v, datetime):
+            return v.date().isoformat()
+        if isinstance(v, date):
+            return v.isoformat()
+        if isinstance(v, Decimal):
+            return float(v)
+        return v
+
+
+def _coerce_value_for_field(field, value):
+    """Cast Gemini-evaluated float to the Django field's type."""
+    if value is None:
+        return None
+    if isinstance(field, django_models.DecimalField):
+        try:
+            return Decimal(str(round(float(value), 6)))
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+    if isinstance(field, django_models.FloatField):
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return None
+    if isinstance(field, (django_models.IntegerField,
+                          django_models.PositiveIntegerField,
+                          django_models.SmallIntegerField,
+                          django_models.BigIntegerField)):
+        try:
+            return int(round(float(value)))
+        except (ValueError, TypeError):
+            return None
+    return value

@@ -747,8 +747,9 @@ def derived_metrics_list(request):
             ]
         }
     """
-    from .models import DerivedMetric
+    from .models import DerivedMetric, FundMetric
     from .canonical_schema import DERIVABLE_FUND_METRICS
+    from .anchor_pipeline import LEGACY_DERIVED_MAP
 
     org = request.organization
     if not org:
@@ -763,14 +764,32 @@ def derived_metrics_list(request):
     elif fund_id:
         qs = qs.filter(scheme__fund_id=fund_id)
 
+    legacy_to_canonical = {v: k for k, v in LEGACY_DERIVED_MAP.items()}
+    canonical_to_legacy = dict(LEGACY_DERIVED_MAP)
+
+    fm_qs = FundMetric.objects.filter(organization=org)
+    if scheme_id:
+        fm_qs = fm_qs.filter(scheme_id=scheme_id)
+    elif fund_id:
+        fm_qs = fm_qs.filter(scheme__fund_id=fund_id)
+    fm_index = {}
+    for fm in fm_qs:
+        fm_index[(fm.scheme_id, fm.metric_key)] = fm
+
     metrics = []
+    emitted_canonical = set()
+
     for dm in qs:
         meta = DERIVABLE_FUND_METRICS.get(dm.metric_key, {})
         source = 'imported_direct' if dm.formula_expression == '(direct value imported)' else 'derived'
+        canonical_key = legacy_to_canonical.get(dm.metric_key, dm.metric_key)
+        fm = fm_index.get((dm.scheme_id, canonical_key))
+        provenance = (fm.provenance if fm else {}) or {}
         metrics.append({
             'scheme_id':          str(dm.scheme_id),
             'scheme_name':        dm.scheme.name,
             'metric_key':         dm.metric_key,
+            'canonical_key':      canonical_key,
             'metric_label':       meta.get('label', dm.metric_key),
             'metric_unit':        meta.get('unit', ''),
             'metric_description': meta.get('description', ''),
@@ -782,6 +801,48 @@ def derived_metrics_list(request):
             'candidate_formulas': dm.candidate_formulas or [],
             'derived_at':         dm.derived_at.isoformat() if dm.derived_at else None,
             'source':             source,
+            'provenance': {
+                'source':        provenance.get('source'),
+                'source_sheet':  provenance.get('source_sheet'),
+                'source_cells':  provenance.get('source_cells') or [],
+                'reasoning':     provenance.get('reasoning'),
+                'inputs_used':   provenance.get('inputs_used') or dm.inputs_used or {},
+            },
+        })
+        emitted_canonical.add((dm.scheme_id, canonical_key))
+
+    # Emit FundMetric records that have no matching DerivedMetric.
+    # This surfaces canonical-only keys (e.g. sponsor_commitment_pct,
+    # fund_nav, active_fair_value, mgmt_fee_pct on funds where Pass 4 did
+    # not run) so the dashboard can read them via a single endpoint.
+    for fm in fm_qs:
+        if (fm.scheme_id, fm.metric_key) in emitted_canonical:
+            continue
+        legacy_key = canonical_to_legacy.get(fm.metric_key, fm.metric_key)
+        provenance = fm.provenance or {}
+        metrics.append({
+            'scheme_id':          str(fm.scheme_id),
+            'scheme_name':        fm.scheme.name,
+            'metric_key':         legacy_key,
+            'canonical_key':      fm.metric_key,
+            'metric_label':       fm.metric_key,
+            'metric_unit':        '',
+            'metric_description': '',
+            'value':              float(fm.value) if fm.value is not None else None,
+            'formula_expression': fm.formula_expression or '',
+            'inputs_used':        fm.inputs_used or {},
+            'confidence':         None,
+            'gemini_reasoning':   provenance.get('reasoning') or '',
+            'candidate_formulas': [],
+            'derived_at':         fm.updated_at.isoformat() if fm.updated_at else None,
+            'source':             fm.source or 'extracted',
+            'provenance': {
+                'source':        provenance.get('source') or fm.source,
+                'source_sheet':  provenance.get('source_sheet'),
+                'source_cells':  provenance.get('source_cells') or [],
+                'reasoning':     provenance.get('reasoning'),
+                'inputs_used':   provenance.get('inputs_used') or fm.inputs_used or {},
+            },
         })
 
     return Response({'metrics': metrics})

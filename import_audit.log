@@ -1,0 +1,1450 @@
+
+
+================================================================================================
+IMPORT SESSION START: 2026-06-06 02:31:21
+Backend log source:   /tmp/tfa-backend.log
+================================================================================================
+
+[02:31:21] AUDIT LOGGER STARTED → /Users/himanshusharma/portfolio-dashboard/import_audit.log
+[02:31:29] raw: [05/Jun/2026 16:01:29] "GET /api/dataimport/stuck-imports/ HTTP/1.1" 200 2
+[02:31:29] raw: [05/Jun/2026 16:01:29] "GET /api/dataimport/uploaded-files/ HTTP/1.1" 200 4330
+[02:31:33] raw: [05/Jun/2026 16:01:32] "OPTIONS /api/dataimport/files/8afe64e3-c87b-472b-8d92-a0e0ec8d2229/ HTTP/1.1" 200 0
+[02:31:33] raw: Portfolio cache reload error: No portfolio data found for this organization. Upload fund Excel files via Data Upload to populate the portfolio dashboard.
+[02:31:33] raw: [05/Jun/2026 16:01:32] "DELETE /api/dataimport/files/8afe64e3-c87b-472b-8d92-a0e0ec8d2229/ HTTP/1.1" 200 217
+[02:31:33] raw: [05/Jun/2026 16:01:32] "GET /api/dataimport/stuck-imports/ HTTP/1.1" 200 2
+[02:31:33] raw: [05/Jun/2026 16:01:32] "GET /api/dataimport/uploaded-files/ HTTP/1.1" 200 2
+[02:31:39] raw: [05/Jun/2026 16:01:39] "OPTIONS /api/dataimport/stuck-imports/ HTTP/1.1" 200 0
+[02:31:39] raw: [05/Jun/2026 16:01:39] "OPTIONS /api/dataimport/uploaded-files/ HTTP/1.1" 200 0
+[02:31:39] raw: [05/Jun/2026 16:01:39] "GET /api/dataimport/stuck-imports/ HTTP/1.1" 200 2
+[02:31:39] raw: [05/Jun/2026 16:01:39] "GET /api/dataimport/uploaded-files/ HTTP/1.1" 200 2
+[02:32:08] raw: [05/Jun/2026 16:02:08] "POST /api/dataimport/upload/ HTTP/1.1" 201 64
+[02:32:08] raw: /opt/homebrew/lib/python3.10/site-packages/google/api_core/_python_version_support.py:275: FutureWarning: You are using a Python version (3.10.19) which Google will stop supporting in new releases of google.api_core once it reaches its end of life (2026-10-04). Please upgrade to the latest Python ve
+[02:32:08] raw: warnings.warn(message, FutureWarning)
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:32:22] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:32:32] PASS 1 (sheet classification): 13 of 13 sheets classified into canonical domains.
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:33:22] SESSION ROLLUP (cumulative for this audit-log tail process):
+  - PASS 1 (sheet classification): 1
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:33:24] raw: Section "LP REGISTER — VALIDATION CHECKS (Green = PASS | Red = FAIL)" in "LP_REGISTER" → unknown (conf=0.95)
+[02:33:24] PASS 1.5 (section classification): 30 sub-sections classified across 13 sheets.
+[02:33:24] raw: Gemini Pass 1.5 section_map: {'MASTER_INPUTS': {'A. FUND IDENTITY': 'fund_master', 'C. FEE AND CARRY STRUCTURE': 'waterfall_breakdown', 'E. FUND-LEVEL CASH FLOWS FOR IRR (XIRR Input Table)': 'fund_performance_breakdown'}, 'LP_REGISTER': {'__default__': 'entities', 'LP REGISTER — VALIDATION CHECKS (G
+[02:33:25] PASS 2 (column mapping) round 1/3: dispatching 13 sheets in parallel (6 workers).
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:34:23] SESSION ROLLUP (cumulative for this audit-log tail process):
+  - PASS 1.5 (section classification): 1
+  - PASS 2 (column mapping) round 1/3: 1
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:35:23] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:36:24] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:37:25] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:38:26] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:39:26] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:40:26] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:41:03]   Pass 3 [extract_metadata/Fund identity metadata from AIF fund master sheet]: 71 pairs → 4 fields extracted
+[02:41:05]   Pass 3 [classify_enum/structure_type]: 1 value(s) classified
+[02:41:12]   Pass 3 [extract_metadata/Fund identity metadata from cover/master sheet]: 122 pairs → 4 fields extracted
+[02:41:26]   Pass 3 [extract_metadata/Scheme lifecycle parameters from cover/master sheet]: 122 pairs → 11 fields extracted
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:41:27] SESSION ROLLUP (cumulative for this audit-log tail process):
+  - Pass 3 [classify_enum/structure_type]: 1
+  - Pass 3 [extract_metadata/Fund identity metadata from AIF fund master sheet]: 1
+  - Pass 3 [extract_metadata/Fund identity metadata from cover/master sheet]: 1
+  - Pass 3 [extract_metadata/Scheme lifecycle parameters from cover/master sheet]: 1
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:41:27]   Pass 3 [classify_enum/fee_basis]: 1 value(s) classified
+[02:41:41]   Pass 3 [extract_metadata/Scheme lifecycle parameters from QAR / compliance sheet]: 121 pairs → 11 fields extracted
+[02:41:53]   Pass 3 [classify_labels/entity_type_labels]: 61 labels → 1 classified
+[02:41:53] raw: Investors imported: 0
+[02:42:23] PASS 2.5 (layout) sheet=CAPITAL_CALLS: detected 3 sub-table(s) — header=4 data=5-10 derived=2, header=14 data=15-24 derived=3, header=28 data=29-34
+[02:42:25]   Pass 3 [classify_enum/capital_call_status]: 1 value(s) classified
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:42:27] SESSION ROLLUP (cumulative for this audit-log tail process):
+  - PASS 2.5 (layout) sheet=CAPITAL_CALLS: 1
+  - Pass 3 [classify_enum/capital_call_status]: 1
+  - Pass 3 [classify_enum/fee_basis]: 1
+  - Pass 3 [classify_labels/entity_type_labels]: 1
+  - Pass 3 [extract_metadata/Scheme lifecycle parameters from QAR / compliance sheet]: 1
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:42:45] PASS 2.5 (layout) sheet=PORTFOLIO_MASTER: detected 2 sub-table(s) — header=4 data=5-54, header=58 data=59-73
+[02:42:57]   Pass 3 [classify_enum/quoted_status]: 1 value(s) classified
+[02:42:59]   Pass 3 [classify_enum/investment_status]: 1 value(s) classified
+[02:43:22]   Pass 3 [classify_enum/quoted_status]: 1 value(s) classified
+[02:43:25]   Pass 3 [classify_enum/investment_status]: 1 value(s) classified
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:43:27] SESSION ROLLUP (cumulative for this audit-log tail process):
+  - PASS 2.5 (layout) sheet=PORTFOLIO_MASTER: 1
+  - Pass 3 [classify_enum/investment_status]: 2
+  - Pass 3 [classify_enum/quoted_status]: 2
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:43:46]   Pass 3 [classify_enum/quoted_status]: 1 value(s) classified
+[02:43:49]   Pass 3 [classify_enum/investment_status]: 1 value(s) classified
+[02:43:51]   Pass 3 [classify_enum/valuation_methodology]: 1 value(s) classified
+[02:43:54]   Pass 3 [classify_enum/valuation_methodology]: 1 value(s) classified
+[02:43:57]   Pass 3 [classify_enum/valuation_methodology]: 1 value(s) classified
+[02:44:00]   Pass 3 [classify_enum/valuation_methodology]: 1 value(s) classified
+[02:44:02]   Pass 3 [classify_enum/valuation_methodology]: 1 value(s) classified
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:44:28] SESSION ROLLUP (cumulative for this audit-log tail process):
+  - Pass 3 [classify_enum/investment_status]: 1
+  - Pass 3 [classify_enum/quoted_status]: 1
+  - Pass 3 [classify_enum/valuation_methodology]: 5
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:44:33] PASS 2.5 (layout) sheet=NAV_CALC: detected 4 sub-table(s) — header=5 data=6-15, header=19 data=20-26, header=30 data=31-66 derived=2, header=70 data=71-75
+[02:44:33] raw: NAV imported from sheet: "NAV_CALC" (21 records)
+[02:44:49] PASS 2.5 (layout) sheet=EXITS: detected 2 sub-table(s) — header=3 data=4-7 derived=1, header=11 data=12-17
+[02:44:50]   Pass 3 [classify_enum/exit_type]: 1 value(s) classified
+[02:44:53]   Pass 3 [classify_enum/exit_type]: 1 value(s) classified
+[02:44:55]   Pass 3 [classify_enum/exit_type]: 1 value(s) classified
+[02:44:58]   Pass 3 [classify_enum/exit_type]: 1 value(s) classified
+[02:44:58] raw: Exits imported from sheet "EXITS": 4
+[02:45:05]   Pass 3 [classify_labels/waterfall_components]: 3 labels → 1 classified
+[02:45:11]   Pass 3 [classify_labels/waterfall_components]: 36 labels → 0 classified
+[02:45:11]   (LEGACY carry path — will be overwritten by Pass 7): scheme=Trivesta Growth Opportunities Fund I - Scheme I called=1520.00 dist=0 pref=822.44 base=0 gross=0.00 clawback=0 net=0.00 status=indicative
+[02:45:16]   Pass 3 [classify_labels/row_type]: 50 labels → 50 classified
+[02:45:17] PASS 3.5 STAGE-1 (harvest): 311 unique label-value occurrences captured across 13 sheets (now includes per-column candidates for tabular rows).
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:45:29] SESSION ROLLUP (cumulative for this audit-log tail process):
+  - (LEGACY carry path — will be overwritten by Pass 7): 1
+  - PASS 2.5 (layout) sheet=EXITS: 1
+  - PASS 2.5 (layout) sheet=NAV_CALC: 1
+  - PASS 3.5 STAGE-1 (harvest): 1
+  - Pass 3 [classify_enum/exit_type]: 4
+  - Pass 3 [classify_labels/row_type]: 1
+  - Pass 3 [classify_labels/waterfall_components]: 2
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:46:03]   Pass 3 [classify_labels/fund_performance_metrics]: 311 labels → 31 classified
+[02:46:24]   Pass 3.5 STAGE-3 [disambiguate/return_of_capital_amount]: 7 candidates → chose index 5 (confidence 0.9)
+[02:46:28]   Pass 3.5 STAGE-3 [disambiguate/total_distributions]: 2 candidates → chose index 0 (confidence 0.9)
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:46:29] SESSION ROLLUP (cumulative for this audit-log tail process):
+  - Pass 3 [classify_labels/fund_performance_metrics]: 1
+  - Pass 3.5 STAGE-3 [disambiguate/return_of_capital_amount]: 1
+  - Pass 3.5 STAGE-3 [disambiguate/total_distributions]: 1
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:46:36]   Pass 3.5 STAGE-3 [disambiguate/moic]: 4 candidates → chose index 0 (confidence 0.9)
+[02:46:43]   Pass 3.5 STAGE-3 [disambiguate/total_committed_capital]: 5 candidates → chose index 1 (confidence 0.95)
+[02:46:52]   Pass 3.5 STAGE-3 [disambiguate/total_unrealised_fair_value]: 5 candidates → chose index 4 (confidence 0.95)
+[02:47:15]   Pass 3.5 STAGE-3 [disambiguate/preferred_return_amount]: 5 candidates → chose index 3 (confidence 0.8)
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:47:30] SESSION ROLLUP (cumulative for this audit-log tail process):
+  - Pass 3.5 STAGE-3 [disambiguate/moic]: 1
+  - Pass 3.5 STAGE-3 [disambiguate/preferred_return_amount]: 1
+  - Pass 3.5 STAGE-3 [disambiguate/total_committed_capital]: 1
+  - Pass 3.5 STAGE-3 [disambiguate/total_unrealised_fair_value]: 1
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:47:34]   Pass 3.5 STAGE-3 [disambiguate/gp_catchup_amount]: 5 candidates → chose index 1 (confidence 0.9)
+[02:47:34] PASS 3.5 EXTRACTED: 19 fund-level metrics written as DerivedMetric (formula='(direct value imported)') → ['carry_amount_gross', 'dpi', 'gp_catchup_amount', 'gross_irr', 'lp_total_return', 'moic', 'nav', 'nav_per_unit', 'net_irr', 'preferred_return_amount', 'return_of_capital_amount', 'rvpi', 'total_called_capital', 'total_committed_capital', 'total_distributions', 'total_realised_gains', 'total_realised_proceeds', 'total_unrealised_fair_value', 'tvpi']
+[02:47:44]   Pass 4 [carry_base]: Gemini returned 1 candidate formula(s)
+[02:47:44]   Pass 4 [carry_base] DERIVED via rank-1 formula:
+      formula = 'max((imported__total_distributions + imported__total_realised_proceeds + imported__total_unrealised_fair_value) - import'
+      value   = 0.0
+      conf    = 1.00
+[02:47:56]   Pass 4 [gp_clawback_provision]: Gemini returned 1 candidate formula(s)
+[02:47:56]   Pass 4 [gp_clawback_provision] DERIVED via rank-1 formula:
+      formula = '0'
+      value   = 0.0
+      conf    = 1.00
+[02:48:01]   Pass 4 [carry_amount_net]: Gemini returned 0 candidate formula(s)
+[02:48:04]   Pass 4 [gp_total_distribution]: Gemini returned 1 candidate formula(s)
+[02:48:04]   Pass 4 [gp_total_distribution] DERIVED via rank-1 formula:
+      formula = 'imported__gp_catchup_amount + imported__carry_amount_gross'
+      value   = 899.784298
+      conf    = 1.00
+[02:48:04] PASS 4 (Gemini derivation) COMPLETE: scheme=Trivesta Growth Opportunities Fund I - Scheme I
+    outcomes=[('net_irr', 'imported_direct'), ('moic', 'imported_direct'), ('tvpi', 'imported_direct'), ('dpi', 'imported_direct'), ('rvpi', 'imported_direct'), ('nav', 'imported_direct'), ('return_of_capital_amount', 'imported_direct'), ('preferred_return_amount', 'imported_direct'), ('gp_catchup_amount', 'imported_direct'), ('carry_base', 'derived'), ('carry_amount_gross', 'imported_direct'), ('gp_clawback_provision', 'derived'), ('carry_amount_net', 'unviable'), ('lp_total_return', 'imported_direct'), ('gp_total_distribution', 'derived')]
+[02:48:04] raw: [Pass4] scheme=Trivesta Growth Opportunities Fund I - Scheme I: [('net_irr', 'imported_direct'), ('moic', 'imported_direct'), ('tvpi', 'imported_direct'), ('dpi', 'imported_direct'), ('rvpi', 'imported_direct'), ('nav', 'imported_direct'), ('return_of_capital_amount', 'imported_direct'), ('preferred
+[02:48:04] PASS 7 (CarriedInterest writer): wrote scheme=Trivesta Growth Opportunities Fund I - Scheme I (reads from DerivedMetric — no formulas in code)
+[02:48:29]   Pass 6 [investments.Investment]: Gemini returned formula sets for 2/2 fields (4 candidate formula(s) total)
+[02:48:29]   Pass 6 [investments.Investment.percentage_stake_fully_diluted] DERIVED via 1 ranked candidate(s): 50/50 rows written
+      per-rank attribution: rank1(50/50 rows, conf=0.90): "ownership_pct"
+[02:48:29]   Pass 6 [investments.Investment.irr_pct] DERIVED via 3 ranked candidate(s): 50/50 rows written
+      per-rank attribution: rank1(4/50 rows, conf=1.00): "exitevent__irr_pct" || rank2(46/50 rows, conf=0.90): "((valuation__fair_value_of_holding / total_invested) ** (1 / years_since_investment_date) - 1) * 100" || rank3(0/50 rows, conf=0.85): "(((total_invested + valuation__unrealized_gain_loss) / total_invested) ** (1 / years_since_investmen"
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:48:31] SESSION ROLLUP (cumulative for this audit-log tail process):
+  - PASS 3.5 EXTRACTED: 1
+  - PASS 4 (Gemini derivation) COMPLETE: 1
+  - PASS 7 (CarriedInterest writer): 1
+  - Pass 3.5 STAGE-3 [disambiguate/gp_catchup_amount]: 1
+  - Pass 4 [carry_amount_net]: 1
+  - Pass 4 [carry_base]: 1
+  - Pass 4 [carry_base] DERIVED via rank-1 formula: 1
+  - Pass 4 [gp_clawback_provision]: 1
+  - Pass 4 [gp_clawback_provision] DERIVED via rank-1 formula: 1
+  - Pass 4 [gp_total_distribution]: 1
+  - Pass 4 [gp_total_distribution] DERIVED via rank-1 formula: 1
+  - Pass 6 [investments.Investment.irr_pct] DERIVED via 3 ranked candidate(s): 1
+  - Pass 6 [investments.Investment.percentage_stake_fully_diluted] DERIVED via 1 ranked candidate(s): 1
+  - Pass 6 [investments.Investment]: 1
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:49:00]   Pass 6 [investments.InvestmentTranche]: Gemini returned formula sets for 0/2 fields (0 candidate formula(s) total)
+[02:49:24]   Pass 6 [investments.Valuation]: Gemini returned formula sets for 2/8 fields (3 candidate formula(s) total)
+[02:49:24]   Pass 6 [investments.Valuation.cost_basis] DERIVED via 2 ranked candidate(s): 50/50 rows written
+      per-rank attribution: rank1(50/50 rows, conf=0.90): "fair_value / multiple" || rank2(0/50 rows, conf=0.80): "fair_value - unrealized_gain_loss"
+[02:49:24]   Pass 6 [investments.Valuation.fvtpl_movement] DERIVED via 1 ranked candidate(s): 50/50 rows written
+      per-rank attribution: rank1(50/50 rows, conf=0.90): "unrealized_gain_loss"
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:49:31] SESSION ROLLUP (cumulative for this audit-log tail process):
+  - Pass 6 [investments.InvestmentTranche]: 1
+  - Pass 6 [investments.Valuation.cost_basis] DERIVED via 2 ranked candidate(s): 1
+  - Pass 6 [investments.Valuation.fvtpl_movement] DERIVED via 1 ranked candidate(s): 1
+  - Pass 6 [investments.Valuation]: 1
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:49:31]   Pass 6 [investments.CompanyFinancials]: Gemini returned formula sets for 0/1 fields (0 candidate formula(s) total)
+[02:49:41]   Pass 6 [investments.ExitEvent]: Gemini returned formula sets for 1/2 fields (1 candidate formula(s) total)
+[02:49:41]   Pass 6 [investments.ExitEvent.exit_multiple] DERIVED via 1 ranked candidate(s): 4/4 rows written
+      per-rank attribution: rank1(4/4 rows, conf=1.00): "moic"
+[02:49:53]   Pass 6 [ic_workflow.DealPipeline]: Gemini returned formula sets for 0/2 fields (0 candidate formula(s) total)
+[02:49:53] PASS 6 (per-row completion) COMPLETE:
+    outcomes=[('funds.Scheme', 'no_candidates'), ('investments.Investment', "completed_fields=['percentage_stake_fully_diluted(50/50)', 'irr_pct(50/50)']
+[02:49:53] PASS 6.5 (universal KPI projection): 350 PortfolioKPI rows EXTRACTED from 4 source pairs: [('PORTFOLIO_MASTER', ['revenue', 'ebitda']
+[02:50:16]   Pass 6 [investments.PortfolioKPI]: Gemini returned formula sets for 2/10 fields (3 candidate formula(s) total)
+[02:50:16] PASS 6.6 (KPI % derivation via Gemini formulas): 100 percentage PortfolioKPI rows DERIVED across 2 target metrics: ['cap_rate_pct', 'ebitda_margin_pct']
+[02:50:16] PASS 5 AUDIT: EMPTY critical tables after import: [{'model': 'documents.Document', 'row_count': 0}, {'model': 'investments.BoardMeeting', 'row_count': 0}, {'model': 'lp.Commitment', 'row_count': 0}, {'model': 'lp.Distribution', 'row_count': 0}, {'model': 'accounting.ManagementFeeSchedule', 'row_count': 0}, {'model': 'compliance.SEBIReport', 'row_count': 0}, {'model': 'compliance.ComplianceTestReport', 'row_count': 0}, {'model': 'compliance.EquityThresholdAlert', 'row_count': 0}, {'model': 'compliance.ComplianceCalendar', 'row_count': 0}, {'model': 'compliance.PPMAmendment', 'row_count': 0}, {'model': 'compliance.CircularAction', 'row_count': 0}, {'model': 'compliance.FundComplianceScore', 'row_count': 0}, {'model': 'compliance.FEMACompliance', 'row_count': 0}, {'model': 'reporting.ReportingCalendar', 'row_count': 0}, {'model': 'fundclose.FundCloseEvent', 'row_count': 0}, {'model': 'tds.TDSWithholding', 'row_count': 0}, {'model': 'mis_consolidation.BudgetVsActual', 'row_count': 0}, {'model': 'mis_consolidation.ConsolidatedMIS', 'row_count': 0}]
+[02:50:16] raw: [05/Jun/2026 16:20:15] "GET /api/dataimport/stuck-imports/ HTTP/1.1" 200 2
+[02:50:16] raw: [05/Jun/2026 16:20:15] "GET /api/dataimport/uploaded-files/ HTTP/1.1" 200 4303
+[02:50:16] raw: Post-import stakeholder notification failed: cannot import name 'Notification' from 'accounts.models' (/Users/himanshusharma/portfolio-dashboard/backend/accounts/models.py)
+[02:50:16] raw: [05/Jun/2026 16:20:16] "GET /api/dataimport/jobs/fa603a79-ebbb-419d-8ec7-89190446c176/stream/?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbl90eXBlIjoiYWNjZXNzIiwiZXhwIjoxNzgwNzE1MTM0LCJpYXQiOjE3ODA2ODYzMzQsImp0aSI6ImM5MDg4ZWY2OWE5YTQ2Y2E5YTAzNzhhNTQ3ZDI5OTc2IiwidXNlcl9pZCI6IjM3MjVkOWI1LTY1ODY
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:50:32] SESSION ROLLUP (cumulative for this audit-log tail process):
+  - PASS 5 AUDIT: 1
+  - PASS 6 (per-row completion) COMPLETE: 1
+  - PASS 6.5 (universal KPI projection): 1
+  - PASS 6.6 (KPI % derivation via Gemini formulas): 1
+  - Pass 6 [ic_workflow.DealPipeline]: 1
+  - Pass 6 [investments.CompanyFinancials]: 1
+  - Pass 6 [investments.ExitEvent.exit_multiple] DERIVED via 1 ranked candidate(s): 1
+  - Pass 6 [investments.ExitEvent]: 1
+  - Pass 6 [investments.PortfolioKPI]: 1
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:50:44] raw: [05/Jun/2026 16:20:44] "OPTIONS /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 0
+[02:50:44] raw: [05/Jun/2026 16:20:44] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:44] raw: [05/Jun/2026 16:20:44] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:44] raw: [05/Jun/2026 16:20:44] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:44] raw: [05/Jun/2026 16:20:44] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:44] raw: [05/Jun/2026 16:20:44] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:44] raw: [05/Jun/2026 16:20:44] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:44] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:45] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:46] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:46] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:46] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:46] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:46] raw: [05/Jun/2026 16:20:45] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:46] raw: [05/Jun/2026 16:20:46] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:46] raw: [05/Jun/2026 16:20:46] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:46] raw: [05/Jun/2026 16:20:46] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:46] raw: [05/Jun/2026 16:20:46] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:46] raw: [05/Jun/2026 16:20:46] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:46] raw: [05/Jun/2026 16:20:46] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:46] raw: [05/Jun/2026 16:20:46] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:46] raw: [05/Jun/2026 16:20:46] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:46] raw: [05/Jun/2026 16:20:46] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+[02:50:46] raw: [05/Jun/2026 16:20:46] "GET /api/dataimport/derived-metrics/?fund=5f1dd5b0-0087-4e7f-ac9b-6aef7b4983db HTTP/1.1" 200 23985
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:51:32] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:52:33] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:53:34] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:54:35] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:55:36] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:56:37] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:57:38] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:58:39] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[02:59:40] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[03:00:41] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[03:01:41] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[03:02:41] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[03:03:41] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[03:04:42] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[03:05:42] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[03:06:42] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[03:07:42] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[03:08:42] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[03:09:42] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[03:10:42] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[03:11:43] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[03:12:43] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[03:13:43] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[03:14:43] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[03:15:43] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[03:16:43] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[03:32:48] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[03:49:16] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[04:04:59] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[04:21:47] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[04:37:34] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[04:55:24] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[05:01:54] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[05:17:14] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[05:32:41] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[05:49:28] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[06:01:15] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[06:02:54] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[06:20:11] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[06:36:41] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[06:52:38] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[07:03:54] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[07:19:55] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[07:36:37] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[07:52:02] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[08:04:54] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[08:21:20] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[08:37:31] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[08:53:18] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[09:05:53] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[09:23:06] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[09:40:51] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[09:56:13] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[10:06:54] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[10:23:47] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[10:41:23] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[10:58:11] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[11:07:53] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[11:24:04] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[11:35:47] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[11:52:04] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[12:07:30] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[12:08:54] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[12:15:34] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[12:32:06] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[12:40:12] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[12:50:23] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[13:00:30] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[13:09:53] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[13:16:01] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[13:33:53] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[13:44:43] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[14:02:25] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[14:10:54] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[14:28:17] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[14:30:06] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[14:31:15] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[14:32:21] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[14:33:21] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[14:50:26] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[14:59:41] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[15:04:42] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[15:07:05] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[15:08:56] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[15:11:53] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[15:22:03] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[15:39:32] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[15:55:40] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[16:11:10] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[16:12:54] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[16:23:02] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[16:33:28] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[16:37:20] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[16:44:51] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[16:46:41] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[16:48:32] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[16:51:10] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[16:53:15] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[16:55:22] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[17:05:32] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[17:06:43] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[17:11:54] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[17:13:54] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[17:18:25] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[17:22:37] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[17:26:18] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[17:43:11] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[17:59:16] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[18:14:53] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[18:31:26] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[18:47:52] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[19:05:08] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[19:15:53] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[19:31:48] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[19:48:44] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[20:04:53] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[20:16:53] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[20:32:58] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[20:48:37] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[21:05:34] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[21:17:53] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[21:34:49] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[21:51:01] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[21:52:01] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[21:53:02] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[21:54:03] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[21:55:04] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[21:56:05] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[21:57:06] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[21:58:07] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[21:59:07] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:00:08] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:01:09] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:02:10] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:03:11] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:04:12] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:05:12] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:06:13] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:07:13] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:08:14] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:09:15] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:10:15] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:11:16] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:12:16] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:13:18] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:14:18] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:15:19] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:16:20] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:17:20] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:18:21] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:19:21] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:20:22] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:21:23] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:22:24] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:23:25] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:24:26] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:25:27] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:26:28] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:27:29] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:28:29] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:29:30] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:30:30] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:31:30] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:32:31] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:33:31] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:34:32] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:35:33] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:36:33] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:37:34] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:38:34] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:39:34] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:40:34] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:41:35] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:42:35] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:43:36] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:44:36] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:45:37] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:46:38] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:47:38] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:48:39] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:49:40] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:50:40] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:51:41] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:52:41] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:53:41] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:54:42] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:55:43] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:56:44] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:57:44] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:58:45] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[22:59:45] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:00:46] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:01:46] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:02:47] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:03:48] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:04:48] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:05:49] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:06:49] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:07:50] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:08:50] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:09:51] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:10:52] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:11:52] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:12:53] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:13:53] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:14:54] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:15:54] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:16:55] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:17:55] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:18:56] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:19:57] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:20:58] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:21:58] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:22:58] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:23:58] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:24:59] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:25:59] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:27:00] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:28:01] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:29:01] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:30:02] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:31:03] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:32:04] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:33:04] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:34:05] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:35:05] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:36:06] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:37:06] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:38:06] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:39:06] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:40:07] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:41:07] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:42:08] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:43:08] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:44:09] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:45:09] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:46:09] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:47:10] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:48:11] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:49:12] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:50:13] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:51:13] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:52:14] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[23:53:14] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[00:10:50] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[00:11:51] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[00:12:51] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[00:13:52] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[00:14:52] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[00:15:53] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[00:16:53] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[00:28:28] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[00:45:53] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:01:30] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:18:18] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:22:10] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:26:36] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:27:36] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:28:37] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:29:37] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:30:38] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:31:39] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:32:40] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:33:41] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:34:42] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:35:43] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:36:43] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:37:44] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:38:45] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:39:46] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:40:47] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:41:48] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:42:49] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:43:50] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:44:51] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:45:51] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:46:52] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:47:53] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:48:54] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:49:54] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:50:55] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:51:56] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:52:57] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:53:58] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:54:59] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:55:59] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:57:00] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+[01:58:01] SESSION ROLLUP (cumulative for this audit-log tail process):
+────────────────────────────────────────────────────────────────────────────────────────────────

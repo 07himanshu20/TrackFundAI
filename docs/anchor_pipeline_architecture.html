@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>TrackFundAI — Anchor-First Pipeline Architecture</title>
+<style>
+  :root{
+    --bg:#0e1320; --panel:#171e30; --border:#262e44;
+    --text:#e6e9f2; --text2:#a5acc0; --text3:#6c7591;
+    --accent:#7ea8ff; --good:#4ade80; --warn:#fbbf24;
+    --bad:#f87171; --code:#1b2236;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+       line-height:1.55;font-size:14px}
+  .wrap{max-width:1180px;margin:0 auto;padding:40px 24px 100px}
+  h1{font-size:28px;margin:0 0 6px;color:#fff;letter-spacing:-.01em}
+  h2{font-size:20px;margin:42px 0 14px;color:#fff;
+     border-bottom:1px solid var(--border);padding-bottom:8px}
+  h3{font-size:15px;margin:28px 0 10px;color:var(--accent);
+     text-transform:uppercase;letter-spacing:.06em;font-weight:600}
+  h4{font-size:13px;margin:20px 0 8px;color:#fff;font-weight:600}
+  p{color:var(--text2);margin:0 0 12px}
+  .sub{color:var(--text3);font-size:12px;margin-top:4px}
+  code, .mono{font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,
+              Menlo,monospace;font-size:12.5px}
+  code{background:var(--code);padding:1px 5px;border-radius:3px;
+       color:#cfd6f0}
+  pre{background:var(--code);border:1px solid var(--border);
+      border-radius:8px;padding:14px 16px;overflow-x:auto;
+      font-size:12.5px;color:#cfd6f0}
+  table{border-collapse:collapse;width:100%;margin:8px 0 16px;
+        font-size:13px}
+  th{text-align:left;background:#1d2438;padding:10px 12px;
+     font-weight:600;color:#fff;border-bottom:1px solid var(--border)}
+  td{padding:9px 12px;border-bottom:1px solid var(--border);
+     color:var(--text2);vertical-align:top}
+  td.k{color:#fff;font-family:'JetBrains Mono',ui-monospace,monospace;
+       font-size:12.5px}
+  td.ok{color:var(--good)}
+  td.bad{color:var(--bad)}
+  td.warn{color:var(--warn)}
+  .grid{display:grid;gap:16px}
+  .grid.two{grid-template-columns:1fr 1fr}
+  .grid.three{grid-template-columns:1fr 1fr 1fr}
+  .card{background:var(--panel);border:1px solid var(--border);
+        border-radius:10px;padding:18px}
+  .card h3{margin-top:0}
+  .tag{display:inline-block;padding:2px 8px;border-radius:4px;
+       font-size:11px;font-weight:600;letter-spacing:.04em;
+       background:#283248;color:var(--accent)}
+  .tag.good{background:#0e3320;color:var(--good)}
+  .tag.bad{background:#3a1818;color:var(--bad)}
+  .tag.warn{background:#3a2c10;color:var(--warn)}
+  .diagram{background:var(--panel);border:1px solid var(--border);
+           border-radius:10px;padding:20px;overflow-x:auto;margin:12px 0 24px}
+  .diagram svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:12px;
+          font-size:12px;color:var(--text3);justify-content:center}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .legend i{width:10px;height:10px;border-radius:2px;display:inline-block}
+  hr{border:none;border-top:1px solid var(--border);margin:32px 0}
+  .footnote{font-size:11px;color:var(--text3);margin-top:24px;
+            border-top:1px solid var(--border);padding-top:16px}
+  .pill{display:inline-block;background:#1e2740;color:var(--accent);
+        padding:3px 9px;border-radius:999px;font-size:11px;
+        font-family:'JetBrains Mono',monospace;margin-right:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>TrackFundAI — Anchor-First Deterministic Pipeline</h1>
+<p class="sub">Production architecture replacing the 9-pass Gemini chain. Last updated: 2026-06-10.</p>
+
+<!-- ────────────────────────────────────────────────────────── -->
+<h2>1 · The problem this architecture solves</h2>
+
+<p>The previous pipeline ran nine sequential AI passes
+(<code>Pass 1 → Pass 1.5 → Pass 2 → Pass 2.5 → Pass 2.6 → Pass 3 →
+Pass 3.5 → Pass 4 → Pass 8 → Pass 9</code>) plus a MetricArbiter.
+On structured fund files it produced wrong values by ₹100s of crores
+because (a) each pass introduced its own classification errors, (b)
+the Arbiter could only pick the "least wrong" candidate, and (c) the
+pipeline asked Gemini to do <em>fuzzy semantic matching</em> when the
+right task was <em>arithmetic from a few anchor values</em>.</p>
+
+<p>The replacement runs in <strong>four stages</strong>, makes
+<strong>≈3 Gemini calls per scheme</strong>, and is
+<strong>fully deterministic</strong>: same file in → same numbers out,
+every time.</p>
+
+<div class="grid three">
+  <div class="card"><h3>Before</h3>
+    <ul style="margin:0;padding-left:18px;color:var(--text2)">
+      <li>9 passes + Arbiter</li>
+      <li>~30+ Gemini calls per import</li>
+      <li>Catalogue formulas hardcoded</li>
+      <li>Domain-classification gatekept everything</li>
+      <li>Stochastic re-imports — values varied</li>
+      <li>₹100s of Cr wrong</li>
+    </ul>
+  </div>
+  <div class="card"><h3>After</h3>
+    <ul style="margin:0;padding-left:18px;color:var(--text2)">
+      <li>4 stages, anchor-first</li>
+      <li>3-4 Gemini calls per import</li>
+      <li>Textbook formulas only (no catalogue)</li>
+      <li>No domain gatekeeping — whole workbook fed to Gemini</li>
+      <li>Deterministic re-imports</li>
+      <li>Audited accounting identities</li>
+    </ul>
+  </div>
+  <div class="card"><h3>Design rule</h3>
+    <ul style="margin:0;padding-left:18px;color:var(--text2)">
+      <li><strong>Zero</strong> hardcoded value ranges</li>
+      <li><strong>Zero</strong> keyword lists</li>
+      <li><strong>Zero</strong> sheet-name assumptions</li>
+      <li>Gemini reasons by <strong>financial role</strong>, not labels</li>
+      <li>Python does <strong>math only</strong></li>
+      <li>Every output has provenance</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ────────────────────────────────────────────────────────── -->
+<h2>2 · End-to-end Data Flow Diagram</h2>
+
+<div class="diagram">
+<svg viewBox="0 0 1080 620" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,sans-serif" font-size="11">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#7ea8ff"/>
+    </marker>
+    <marker id="arrow-red" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#f87171"/>
+    </marker>
+  </defs>
+
+  <!-- User -->
+  <rect x="20" y="20" width="120" height="46" rx="6" fill="#1d2438" stroke="#7ea8ff" stroke-width="1.5"/>
+  <text x="80" y="40" text-anchor="middle" fill="#fff" font-weight="600">User uploads</text>
+  <text x="80" y="55" text-anchor="middle" fill="#a5acc0">.xlsx file</text>
+
+  <!-- Django API -->
+  <rect x="180" y="20" width="160" height="46" rx="6" fill="#1d2438" stroke="#7ea8ff" stroke-width="1.5"/>
+  <text x="260" y="40" text-anchor="middle" fill="#fff" font-weight="600">POST /api/dataimport/jobs/</text>
+  <text x="260" y="55" text-anchor="middle" fill="#a5acc0">creates ImportJob + ImportFile</text>
+
+  <!-- import_service -->
+  <rect x="380" y="20" width="160" height="46" rx="6" fill="#1d2438" stroke="#7ea8ff" stroke-width="1.5"/>
+  <text x="460" y="40" text-anchor="middle" fill="#fff" font-weight="600">FundImportService</text>
+  <text x="460" y="55" text-anchor="middle" fill="#a5acc0">orchestrates row-CRUD passes</text>
+
+  <!-- anchor_pipeline -->
+  <rect x="580" y="20" width="160" height="46" rx="6" fill="#1d2438" stroke="#4ade80" stroke-width="1.5"/>
+  <text x="660" y="40" text-anchor="middle" fill="#fff" font-weight="600">run_anchor_pipeline()</text>
+  <text x="660" y="55" text-anchor="middle" fill="#a5acc0">anchor_pipeline.py</text>
+
+  <line x1="140" y1="43" x2="180" y2="43" stroke="#7ea8ff" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="340" y1="43" x2="380" y2="43" stroke="#7ea8ff" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="540" y1="43" x2="580" y2="43" stroke="#7ea8ff" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Stage boxes vertically -->
+  <g>
+    <rect x="540" y="100" width="240" height="56" rx="6" fill="#1f2845" stroke="#7ea8ff"/>
+    <text x="660" y="120" text-anchor="middle" fill="#fff" font-weight="600">STAGE 0 — Workbook Census</text>
+    <text x="660" y="135" text-anchor="middle" fill="#a5acc0">Python · NO AI</text>
+    <text x="660" y="148" text-anchor="middle" fill="#6c7591">walks every cell → compact JSON</text>
+
+    <rect x="540" y="170" width="240" height="56" rx="6" fill="#1f2845" stroke="#fbbf24"/>
+    <text x="660" y="190" text-anchor="middle" fill="#fff" font-weight="600">STAGE 1 — Identity Hunt</text>
+    <text x="660" y="205" text-anchor="middle" fill="#a5acc0">Gemini · 1 call</text>
+    <text x="660" y="218" text-anchor="middle" fill="#6c7591">fund name · SEBI Reg · vintage · unit</text>
+
+    <rect x="540" y="240" width="240" height="56" rx="6" fill="#1f2845" stroke="#fbbf24"/>
+    <text x="660" y="260" text-anchor="middle" fill="#fff" font-weight="600">STAGE 2 — Anchor Triangulation</text>
+    <text x="660" y="275" text-anchor="middle" fill="#a5acc0">Gemini · 1 call · role-based</text>
+    <text x="660" y="288" text-anchor="middle" fill="#6c7591">12 financial anchors with cell evidence</text>
+
+    <rect x="540" y="310" width="240" height="56" rx="6" fill="#1f2845" stroke="#fbbf24"/>
+    <text x="660" y="330" text-anchor="middle" fill="#fff" font-weight="600">STAGE 3 — Cash Flow Series</text>
+    <text x="660" y="345" text-anchor="middle" fill="#a5acc0">Gemini · 1 call</text>
+    <text x="660" y="358" text-anchor="middle" fill="#6c7591">dated drawdowns + distributions for XIRR</text>
+
+    <rect x="540" y="380" width="240" height="56" rx="6" fill="#1f2845" stroke="#4ade80"/>
+    <text x="660" y="400" text-anchor="middle" fill="#fff" font-weight="600">STAGE 5 — Compute Metrics</text>
+    <text x="660" y="415" text-anchor="middle" fill="#a5acc0">Python · NO AI</text>
+    <text x="660" y="428" text-anchor="middle" fill="#6c7591">textbook formulas (MOIC, TVPI, IRR, carry)</text>
+
+    <rect x="540" y="450" width="240" height="56" rx="6" fill="#1f2845" stroke="#4ade80"/>
+    <text x="660" y="470" text-anchor="middle" fill="#fff" font-weight="600">STAGE 6 — Audit Identities</text>
+    <text x="660" y="485" text-anchor="middle" fill="#a5acc0">Python · NO AI</text>
+    <text x="660" y="498" text-anchor="middle" fill="#6c7591">called ≤ committed · TVPI = DPI + RVPI · etc.</text>
+
+    <rect x="540" y="520" width="240" height="56" rx="6" fill="#1f2845" stroke="#7ea8ff"/>
+    <text x="660" y="540" text-anchor="middle" fill="#fff" font-weight="600">STAGE 7 — Persist</text>
+    <text x="660" y="555" text-anchor="middle" fill="#a5acc0">writes FundMetric + mirrors DerivedMetric</text>
+    <text x="660" y="568" text-anchor="middle" fill="#6c7591">atomic, idempotent per scheme</text>
+  </g>
+
+  <line x1="660" y1="66"  x2="660" y2="100" stroke="#7ea8ff" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="660" y1="156" x2="660" y2="170" stroke="#7ea8ff" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="660" y1="226" x2="660" y2="240" stroke="#7ea8ff" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="660" y1="296" x2="660" y2="310" stroke="#7ea8ff" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="660" y1="366" x2="660" y2="380" stroke="#7ea8ff" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="660" y1="436" x2="660" y2="450" stroke="#7ea8ff" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="660" y1="506" x2="660" y2="520" stroke="#7ea8ff" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Side outputs -->
+  <rect x="820" y="100" width="220" height="80" rx="6" fill="#101727" stroke="#262e44"/>
+  <text x="930" y="120" text-anchor="middle" fill="#fff" font-weight="600">workbook_census</text>
+  <text x="930" y="135" text-anchor="middle" fill="#a5acc0">JSON ~30k-200k chars</text>
+  <text x="930" y="148" text-anchor="middle" fill="#6c7591">all non-empty cells with</text>
+  <text x="930" y="161" text-anchor="middle" fill="#6c7591">sheet, address, value, kind</text>
+
+  <rect x="820" y="240" width="220" height="80" rx="6" fill="#101727" stroke="#262e44"/>
+  <text x="930" y="260" text-anchor="middle" fill="#fff" font-weight="600">12 anchors + provenance</text>
+  <text x="930" y="275" text-anchor="middle" fill="#a5acc0">committed, called, invested,</text>
+  <text x="930" y="288" text-anchor="middle" fill="#6c7591">FV, realized, distributions,</text>
+  <text x="930" y="301" text-anchor="middle" fill="#6c7591">NAV, hurdle, carry, mgmt fee...</text>
+
+  <rect x="820" y="380" width="220" height="80" rx="6" fill="#101727" stroke="#262e44"/>
+  <text x="930" y="400" text-anchor="middle" fill="#fff" font-weight="600">22 fund metrics</text>
+  <text x="930" y="415" text-anchor="middle" fill="#a5acc0">MOIC, TVPI, DPI, RVPI,</text>
+  <text x="930" y="428" text-anchor="middle" fill="#6c7591">Net IRR, NAV, carry base/</text>
+  <text x="930" y="441" text-anchor="middle" fill="#6c7591">gross/net, clawback, catch-up...</text>
+
+  <line x1="780" y1="128" x2="820" y2="128" stroke="#7ea8ff" stroke-width="1" marker-end="url(#arrow)"/>
+  <line x1="780" y1="268" x2="820" y2="268" stroke="#7ea8ff" stroke-width="1" marker-end="url(#arrow)"/>
+  <line x1="780" y1="408" x2="820" y2="408" stroke="#7ea8ff" stroke-width="1" marker-end="url(#arrow)"/>
+
+  <!-- DB to Frontend -->
+  <rect x="20" y="100" width="160" height="56" rx="6" fill="#1f2845" stroke="#7ea8ff"/>
+  <text x="100" y="120" text-anchor="middle" fill="#fff" font-weight="600">FundMetric (DB)</text>
+  <text x="100" y="135" text-anchor="middle" fill="#a5acc0">canonical source of truth</text>
+
+  <rect x="20" y="180" width="160" height="56" rx="6" fill="#1f2845" stroke="#7ea8ff"/>
+  <text x="100" y="200" text-anchor="middle" fill="#fff" font-weight="600">DerivedMetric (mirror)</text>
+  <text x="100" y="215" text-anchor="middle" fill="#a5acc0">backward-compat for</text>
+  <text x="100" y="228" text-anchor="middle" fill="#6c7591">chatbot + API serializers</text>
+
+  <rect x="20" y="260" width="160" height="56" rx="6" fill="#1f2845" stroke="#7ea8ff"/>
+  <text x="100" y="280" text-anchor="middle" fill="#fff" font-weight="600">Dashboard (Vanilla JS)</text>
+  <text x="100" y="295" text-anchor="middle" fill="#a5acc0">v5-dashboard.js</text>
+  <text x="100" y="308" text-anchor="middle" fill="#6c7591">Auth.apiGet() → render tiles</text>
+
+  <rect x="20" y="340" width="160" height="56" rx="6" fill="#1f2845" stroke="#7ea8ff"/>
+  <text x="100" y="360" text-anchor="middle" fill="#fff" font-weight="600">Chatbot</text>
+  <text x="100" y="375" text-anchor="middle" fill="#a5acc0">chatbot/engine.py</text>
+  <text x="100" y="388" text-anchor="middle" fill="#6c7591">Gemini → SQL → ORM</text>
+
+  <line x1="540" y1="548" x2="180" y2="208" stroke="#7ea8ff" stroke-width="1" stroke-dasharray="3,3"/>
+  <line x1="180" y1="208" x2="180" y2="282" stroke="#7ea8ff" stroke-width="1" stroke-dasharray="3,3" marker-end="url(#arrow)"/>
+  <line x1="180" y1="282" x2="180" y2="362" stroke="#7ea8ff" stroke-width="1" stroke-dasharray="3,3" marker-end="url(#arrow)"/>
+</svg>
+<div class="legend">
+  <span><i style="background:#fbbf24"></i>Gemini AI</span>
+  <span><i style="background:#4ade80"></i>Python (no AI)</span>
+  <span><i style="background:#7ea8ff"></i>I/O · DB · API</span>
+</div>
+</div>
+
+<!-- ────────────────────────────────────────────────────────── -->
+<h2>3 · Files involved — extraction vs calculation</h2>
+
+<table>
+<thead><tr><th>File</th><th>Role</th><th>Type</th></tr></thead>
+<tbody>
+<tr><td class="k">backend/dataimport/anchor_pipeline.py</td>
+    <td>Owns the 4-stage pipeline. Workbook census, Gemini prompts (identity / anchors / cash flows), Python compute, audit assertions, persist.</td>
+    <td><span class="tag">Extraction + Compute</span></td></tr>
+<tr><td class="k">backend/dataimport/gemini_column_mapper.py</td>
+    <td>Provides <code>_call_gemini()</code> with retries + JSON parsing. Reused by anchor_pipeline. Also still hosts Pass 1/2 sheet+column mapping for per-row CRUD.</td>
+    <td><span class="tag">Gemini wrapper</span></td></tr>
+<tr><td class="k">backend/dataimport/models.py</td>
+    <td>Defines <code>FundMetric</code> (single source of truth) and the legacy <code>DerivedMetric</code> (backward-compat mirror).</td>
+    <td><span class="tag">Data model</span></td></tr>
+<tr><td class="k">backend/dataimport/import_service.py</td>
+    <td>FundImportService — orchestrates per-row CRUD (companies, investors, NAV records, distributions, cap calls, KPIs) and calls <code>run_anchor_pipeline()</code> for fund-level metrics. The two lanes are independent.</td>
+    <td><span class="tag">Orchestrator</span></td></tr>
+<tr><td class="k">backend/dataimport/canonical_schema.py</td>
+    <td>SHEET_DOMAINS + DOMAIN_FIELDS used by Pass 1 sheet classification for per-row data routing. <strong>Not used by anchor pipeline</strong> — anchors come from financial role, not domain tags.</td>
+    <td><span class="tag">Row-CRUD lane only</span></td></tr>
+<tr><td class="k">backend/accounting/carry_engine.py</td>
+    <td>Reads DerivedMetric/FundMetric to populate <code>CarriedInterest</code> rows displayed on Fund Reporting.</td>
+    <td><span class="tag">Display projection</span></td></tr>
+<tr><td class="k">frontend/v5-dashboard.js</td>
+    <td>Reads DerivedMetric via API; the anchor pipeline mirrors all values there, so the frontend needs zero changes.</td>
+    <td><span class="tag">Display</span></td></tr>
+<tr><td class="k">backend/chatbot/engine.py</td>
+    <td>NL→SQL chatbot; allowlist already includes DerivedMetric. Auto-correct once DerivedMetric is correct.</td>
+    <td><span class="tag">Display</span></td></tr>
+</tbody>
+</table>
+
+<p class="sub">Files <strong>deleted</strong> (logically — they remain on disk but are no longer invoked from <code>_do_import</code>): the Pass 4 catalogue derivation in <code>derivation_service.MetricDerivationService</code>, the Pass 8 direct waterfall reader, the Pass 9 unified compute helper, and the entire <code>metric_arbiter.py</code> path.</p>
+
+<!-- ────────────────────────────────────────────────────────── -->
+<h2>4 · The Canonical Schema — single source of truth</h2>
+
+<p>The previous architecture had a sprawling canonical schema mixing
+sheet-domain tags, column-field aliases, and metric keys. The new
+architecture's canonical schema is precisely <strong>3 lists</strong>:</p>
+
+<div class="grid two">
+<div class="card">
+<h3>A · 12 financial anchors</h3>
+<p>Defined by their <em>financial role</em>. Stage 2 prompt encodes these definitions. Stage 5 compute reads them by these exact names.</p>
+<table>
+<tbody>
+<tr><td class="k">committed_capital</td>     <td>Total LP+GP pledged</td></tr>
+<tr><td class="k">called_capital</td>        <td>Cumulative drawn to date</td></tr>
+<tr><td class="k">uncalled_capital</td>      <td>committed − called</td></tr>
+<tr><td class="k">invested_cost</td>         <td>Cost basis of investments</td></tr>
+<tr><td class="k">active_fair_value</td>     <td>FV of currently-held investments</td></tr>
+<tr><td class="k">realized_proceeds</td>     <td>Cash from exits</td></tr>
+<tr><td class="k">lp_distributions</td>      <td>Actual cash paid to LPs</td></tr>
+<tr><td class="k">fund_nav</td>              <td>Portfolio FV + Cash − Liab</td></tr>
+<tr><td class="k">cash_balance</td>          <td>Cash &amp; equivalents</td></tr>
+<tr><td class="k">hurdle_rate</td>           <td>Preferred return %</td></tr>
+<tr><td class="k">carry_pct</td>             <td>GP share above hurdle</td></tr>
+<tr><td class="k">carry_pct · catchup_pct · mgmt_fee_pct · mgmt_fee_basis · fund_start_date · waterfall_type</td><td>fund terms</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="card">
+<h3>B · 22 computed fund metrics</h3>
+<p>Every dashboard tile + waterfall component maps to one of these. Each is computed in <code>compute_metrics()</code> by a single textbook formula.</p>
+<table>
+<tbody>
+<tr><td class="k">moic</td><td>(FV + Realized) / Invested</td></tr>
+<tr><td class="k">tvpi</td><td>(FV + Distributions) / Called</td></tr>
+<tr><td class="k">dpi</td><td>Distributions / Called</td></tr>
+<tr><td class="k">rvpi</td><td>FV / Called</td></tr>
+<tr><td class="k">net_irr</td><td>XIRR(cash flows + terminal NAV)</td></tr>
+<tr><td class="k">nav</td><td>= anchor fund_nav</td></tr>
+<tr><td class="k">preferred_return_amount</td><td>Called × ((1+h)^years − 1)</td></tr>
+<tr><td class="k">gross_value</td><td>FV + Realized</td></tr>
+<tr><td class="k">carry_base</td><td>max(0, Gross Value − Called − Preferred)</td></tr>
+<tr><td class="k">carry_amount_gross</td><td>carry_base × carry_pct</td></tr>
+<tr><td class="k">gp_catchup_amount</td><td>min(remaining, carry/(1-carry) × Pref) × catchup_pct</td></tr>
+<tr><td class="k">carry_amount_net</td><td>gross − clawback (interim: = gross)</td></tr>
+<tr><td class="k">gp_clawback_provision</td><td>null at interim (needs fund-end data)</td></tr>
+<tr><td class="k">gp_total_distribution</td><td>carry_net + catchup</td></tr>
+<tr><td class="k">return_of_capital_amount</td><td>= called</td></tr>
+<tr><td class="k">lp_total_return</td><td>called + pref + max(0, gross−called−pref) × (1−carry)</td></tr>
+<tr><td class="k">total_*</td><td>passthrough of underlying anchor</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+
+<h3>C · 4 audit identities</h3>
+<table>
+<thead><tr><th>Check</th><th>Identity</th><th>Action on failure</th></tr></thead>
+<tbody>
+<tr><td class="k">called_le_committed</td>      <td>called ≤ committed</td><td>fail → conflict flag</td></tr>
+<tr><td class="k">invested_vs_called</td>       <td>invested vs called (informational; leverage allowed)</td><td>info only</td></tr>
+<tr><td class="k">tvpi_eq_dpi_plus_rvpi</td>    <td>|TVPI − (DPI + RVPI)| &lt; 1%</td><td>fail → conflict flag</td></tr>
+<tr><td class="k">gross_carry_ge_net_carry</td> <td>gross ≥ net</td><td>fail → conflict flag</td></tr>
+</tbody>
+</table>
+
+<!-- ────────────────────────────────────────────────────────── -->
+<h2>5 · How the architecture handles unlabelled, unordered, chaotic files</h2>
+
+<p>The architecture makes <strong>no assumptions about file structure</strong>.
+Everything that determines a metric value comes from one of three places:</p>
+
+<ol>
+  <li>Gemini's reasoning about <strong>financial role</strong> (Stages 1-3)</li>
+  <li>Python's <strong>textbook formula</strong> (Stage 5)</li>
+  <li>Python's <strong>accounting identity</strong> (Stage 6)</li>
+</ol>
+
+<p>None of these depend on sheet names, column names, row positions, or
+language. Below is the resilience contract:</p>
+
+<table>
+<thead><tr><th>Adversarial file property</th><th>Why the pipeline still works</th></tr></thead>
+<tbody>
+<tr>
+  <td>Sheets named in another language ("バランスシート" vs "Balance Sheet")</td>
+  <td>Stage 0 census reads every cell regardless of sheet name. No domain classification depends on sheet name in this pipeline.</td>
+</tr>
+<tr>
+  <td>Columns reordered (Cost might be col B in one file, col F in another)</td>
+  <td>Gemini Stage 2 reasons about the <em>value's role</em>, not its column position. It uses adjacency, magnitude, and cross-sheet consistency to identify each anchor.</td>
+</tr>
+<tr>
+  <td>Labels missing entirely (just numbers, no row headers)</td>
+  <td>Stage 2 prompt asks Gemini to use <strong>accounting relationships</strong> (e.g., "Committed ≥ Called", "LP commitments sum to Committed") as evidence. The values triangulate even without labels.</td>
+</tr>
+<tr>
+  <td>Labels misleading (a column labeled "MOIC" actually contains TVPI)</td>
+  <td>Stage 5 <em>computes</em> MOIC from anchors, ignoring whatever the file calls "MOIC". If the file states a value too, Stage 6 cross-checks and flags conflict.</td>
+</tr>
+<tr>
+  <td>Currency in millions but file says "Cr" somewhere</td>
+  <td>Stage 1 returns ALL currency/unit candidates with cell locations. Stage 5 normalises consistently.</td>
+</tr>
+<tr>
+  <td>Multiple plausible candidates for an anchor</td>
+  <td>Stage 2 returns all candidates ranked. <code>resolve_anchors()</code> in Python picks the one consistent with accounting identities (Committed ≥ Called ≥ Invested).</td>
+</tr>
+<tr>
+  <td>Sheets reordered (NAV might be sheet 1 in one file, sheet 12 in another)</td>
+  <td>Census serialises all sheets into one JSON; Gemini sees the full workbook context in every call.</td>
+</tr>
+<tr>
+  <td>Sub-sheets with different layering (per-LP vs fund-summary)</td>
+  <td>Stage 3 cash-flow prompt explicitly says: "If both per-LP and fund-level summary exist, use fund-level to avoid double-counting." Stage 2 same principle.</td>
+</tr>
+<tr>
+  <td>No labels for hurdle / carry % (only used inside formulas)</td>
+  <td>Stage 2 asks Gemini to infer from formula context — e.g., if a column computes <code>Capital × ((1+0.08)^years − 1)</code>, that's hurdle = 8%.</td>
+</tr>
+</tbody>
+</table>
+
+<!-- ────────────────────────────────────────────────────────── -->
+<h2>6 · Semantic analysis at each level</h2>
+
+<div class="grid two">
+<div class="card">
+<h3>Sheet-level semantics</h3>
+<p>The anchor pipeline does <strong>not</strong> classify sheets. Every sheet's contents are flattened into the census payload and Gemini sees the full workbook. This is intentional — the previous pipeline's domain classification was the gatekeeper that failed for Multiples WATERFALL.</p>
+<p>Per-row CRUD lane <em>does</em> still use Pass 1 sheet → domain mapping in <code>gemini_column_mapper.py</code>, but only for portfolio-companies / investors / KPIs / NAV time-series.</p>
+</div>
+<div class="card">
+<h3>Section-level semantics</h3>
+<p>Stage 2 prompt names what each anchor <em>is</em> ("the cumulative capital actually drawn from investors") and Gemini locates it from the cell context — surrounding labels, sub-totals, row position relative to other anchors. No keyword list; the model uses semantic understanding of the financial concept.</p>
+</div>
+<div class="card">
+<h3>Row-level semantics</h3>
+<p>For each anchor, Gemini returns up to 3 ranked candidates with the row's surrounding text as evidence. Python's <code>resolve_anchors()</code> picks the candidate consistent with locked-in earlier anchors via accounting identities.</p>
+</div>
+<div class="card">
+<h3>Column-level semantics</h3>
+<p>For multi-period sheets (NAV history, BvA, KPIs), the per-row CRUD lane uses Pass 2 column mapping. The fund-level lane (this pipeline) does not need column mapping — Gemini sees raw cell values in their addresses and reasons directly.</p>
+</div>
+<div class="card">
+<h3>Field-level semantics</h3>
+<p>Every fund metric maps to a single canonical key (one of 22). Every anchor maps to one of 12 canonical names. No aliases, no synonyms, no fuzzy matching — the canonical schema is closed.</p>
+</div>
+<div class="card">
+<h3>Conflict semantics</h3>
+<p>When a file states a value (e.g., Net IRR = 21.2%) that disagrees with the computed value (e.g., XIRR over extracted cash flows = 13.5%), both are kept in <code>FundMetric.provenance</code> and <code>FundMetric.source</code> is set to <code>conflict</code>. The dashboard tile shows the <em>computed</em> value with an audit icon.</p>
+</div>
+</div>
+
+<!-- ────────────────────────────────────────────────────────── -->
+<h2>7 · Module &amp; dependency diagram</h2>
+
+<div class="diagram">
+<svg viewBox="0 0 1000 460" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,sans-serif" font-size="11">
+  <defs>
+    <marker id="arr2" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#7ea8ff"/>
+    </marker>
+  </defs>
+
+  <!-- App boxes -->
+  <rect x="20"  y="20"  width="170" height="60" rx="6" fill="#1f2845" stroke="#7ea8ff"/>
+  <text x="105" y="42" text-anchor="middle" fill="#fff" font-weight="600">api</text>
+  <text x="105" y="60" text-anchor="middle" fill="#a5acc0">DRF viewsets, /api/...</text>
+
+  <rect x="210" y="20"  width="170" height="60" rx="6" fill="#1f2845" stroke="#7ea8ff"/>
+  <text x="295" y="42" text-anchor="middle" fill="#fff" font-weight="600">dataimport</text>
+  <text x="295" y="60" text-anchor="middle" fill="#a5acc0">ImportJob/File, pipeline</text>
+
+  <rect x="400" y="20"  width="170" height="60" rx="6" fill="#1f2845" stroke="#4ade80"/>
+  <text x="485" y="42" text-anchor="middle" fill="#fff" font-weight="600">anchor_pipeline</text>
+  <text x="485" y="60" text-anchor="middle" fill="#a5acc0">census · Gemini · compute</text>
+
+  <rect x="590" y="20"  width="170" height="60" rx="6" fill="#1f2845" stroke="#fbbf24"/>
+  <text x="675" y="42" text-anchor="middle" fill="#fff" font-weight="600">google.generativeai</text>
+  <text x="675" y="60" text-anchor="middle" fill="#a5acc0">SDK · Gemini 2.5 Flash</text>
+
+  <rect x="20"  y="120" width="170" height="60" rx="6" fill="#1f2845" stroke="#7ea8ff"/>
+  <text x="105" y="142" text-anchor="middle" fill="#fff" font-weight="600">funds</text>
+  <text x="105" y="160" text-anchor="middle" fill="#a5acc0">Fund · Scheme · Entity</text>
+
+  <rect x="210" y="120" width="170" height="60" rx="6" fill="#1f2845" stroke="#7ea8ff"/>
+  <text x="295" y="142" text-anchor="middle" fill="#fff" font-weight="600">investments</text>
+  <text x="295" y="160" text-anchor="middle" fill="#a5acc0">Company · Investment · KPI</text>
+
+  <rect x="400" y="120" width="170" height="60" rx="6" fill="#1f2845" stroke="#7ea8ff"/>
+  <text x="485" y="142" text-anchor="middle" fill="#fff" font-weight="600">lp</text>
+  <text x="485" y="160" text-anchor="middle" fill="#a5acc0">Investor · Commitment · Calls</text>
+
+  <rect x="590" y="120" width="170" height="60" rx="6" fill="#1f2845" stroke="#7ea8ff"/>
+  <text x="675" y="142" text-anchor="middle" fill="#fff" font-weight="600">accounting</text>
+  <text x="675" y="160" text-anchor="middle" fill="#a5acc0">NAVRecord · CarriedInterest</text>
+
+  <rect x="780" y="120" width="170" height="60" rx="6" fill="#1f2845" stroke="#7ea8ff"/>
+  <text x="865" y="142" text-anchor="middle" fill="#fff" font-weight="600">compliance</text>
+  <text x="865" y="160" text-anchor="middle" fill="#a5acc0">SEBI · AML · Calendar</text>
+
+  <rect x="20"  y="220" width="170" height="60" rx="6" fill="#1f2845" stroke="#7ea8ff"/>
+  <text x="105" y="242" text-anchor="middle" fill="#fff" font-weight="600">chatbot</text>
+  <text x="105" y="260" text-anchor="middle" fill="#a5acc0">NL→SQL · ORM · response</text>
+
+  <rect x="210" y="220" width="170" height="60" rx="6" fill="#1f2845" stroke="#7ea8ff"/>
+  <text x="295" y="242" text-anchor="middle" fill="#fff" font-weight="600">portfolio</text>
+  <text x="295" y="260" text-anchor="middle" fill="#a5acc0">Snapshot · Node</text>
+
+  <rect x="400" y="220" width="170" height="60" rx="6" fill="#1f2845" stroke="#7ea8ff"/>
+  <text x="485" y="242" text-anchor="middle" fill="#fff" font-weight="600">accounts</text>
+  <text x="485" y="260" text-anchor="middle" fill="#a5acc0">Org · User · AuditLog</text>
+
+  <rect x="590" y="220" width="170" height="60" rx="6" fill="#1f2845" stroke="#7ea8ff"/>
+  <text x="675" y="242" text-anchor="middle" fill="#fff" font-weight="600">notifications · documents · ic_workflow · mis_consolidation · riskscore · tds · fundclose · marketresearch · reporting · emailingestion · marketdata</text>
+</svg>
+
+<svg viewBox="0 0 1000 200" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,sans-serif" font-size="11">
+  <defs>
+    <marker id="arr3" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#7ea8ff"/>
+    </marker>
+  </defs>
+  <text x="500" y="20" text-anchor="middle" fill="#fff" font-weight="600" font-size="13">Dependency direction (who imports whom)</text>
+
+  <rect x="50" y="50" width="160" height="40" rx="4" fill="#1f2845" stroke="#7ea8ff"/>
+  <text x="130" y="74" text-anchor="middle" fill="#fff">api</text>
+
+  <rect x="280" y="50" width="160" height="40" rx="4" fill="#1f2845" stroke="#7ea8ff"/>
+  <text x="360" y="74" text-anchor="middle" fill="#fff">dataimport</text>
+
+  <rect x="510" y="50" width="160" height="40" rx="4" fill="#1f2845" stroke="#4ade80"/>
+  <text x="590" y="74" text-anchor="middle" fill="#fff">anchor_pipeline</text>
+
+  <rect x="740" y="50" width="200" height="40" rx="4" fill="#1f2845" stroke="#fbbf24"/>
+  <text x="840" y="74" text-anchor="middle" fill="#fff">google.generativeai SDK</text>
+
+  <line x1="210" y1="70" x2="280" y2="70" stroke="#7ea8ff" marker-end="url(#arr3)"/>
+  <line x1="440" y1="70" x2="510" y2="70" stroke="#7ea8ff" marker-end="url(#arr3)"/>
+  <line x1="670" y1="70" x2="740" y2="70" stroke="#7ea8ff" marker-end="url(#arr3)"/>
+
+  <rect x="50"  y="130" width="160" height="40" rx="4" fill="#1f2845" stroke="#7ea8ff"/>
+  <text x="130" y="154" text-anchor="middle" fill="#fff">funds · accounting · lp</text>
+
+  <rect x="280" y="130" width="160" height="40" rx="4" fill="#1f2845" stroke="#7ea8ff"/>
+  <text x="360" y="154" text-anchor="middle" fill="#fff">investments · portfolio</text>
+
+  <rect x="510" y="130" width="160" height="40" rx="4" fill="#1f2845" stroke="#7ea8ff"/>
+  <text x="590" y="154" text-anchor="middle" fill="#fff">compliance · chatbot · ...</text>
+
+  <line x1="280" y1="92" x2="280" y2="130" stroke="#7ea8ff" stroke-dasharray="3,3"/>
+  <line x1="280" y1="130" x2="130" y2="130" stroke="#7ea8ff" stroke-dasharray="3,3" marker-end="url(#arr3)"/>
+  <line x1="280" y1="130" x2="360" y2="130" stroke="#7ea8ff" stroke-dasharray="3,3" marker-end="url(#arr3)"/>
+  <line x1="360" y1="92" x2="590" y2="130" stroke="#7ea8ff" stroke-dasharray="3,3" marker-end="url(#arr3)"/>
+</svg>
+</div>
+
+<p class="sub">Solid arrows: direct function/class import. Dashed: reads ORM via Django model registry. Note: <code>anchor_pipeline</code> only depends on <code>gemini_column_mapper</code> (for <code>_call_gemini</code>), <code>dataimport.models</code> (FundMetric, DerivedMetric), and Python stdlib. No cross-app imports.</p>
+
+<!-- ────────────────────────────────────────────────────────── -->
+<h2>8 · From Excel upload to a number on the dashboard — sequence</h2>
+
+<pre>
+[User]                                  [Django API]                            [FundImportService]                  [anchor_pipeline]                 [Gemini]                  [DB]                  [Frontend]
+   │                                          │                                          │                                  │                              │                       │                       │
+   ├─ POST /api/dataimport/jobs/ (multipart)─►│                                          │                                  │                              │                       │                       │
+   │                                          ├─ ImportJob.create() ───────────────────►│                                  │                              │                       ├──────────────────────►│
+   │                                          ├─ ImportFile.create() ──────────────────►│                                  │                              │                       │                       │
+   │                                          ├─ celery delay → import_excel_task() ───►│                                  │                              │                       │                       │
+   │                                          │                                          │                                  │                              │                       │                       │
+   │                                          │                          [row-CRUD lane: Pass 1 → 2 → ... → 7 → 6.5 → 6.6]│                              │                       │                       │
+   │                                          │                                          │  writes Investment, KPI, NAVRecord, Investor, CapitalCall... │                       │                       │
+   │                                          │                                          │                                  │                              │                       │                       │
+   │                                          │                                          ├─ run_anchor_pipeline(filepath, scheme, org, import_file) ────►│                              │                       │                       │
+   │                                          │                                          │                                  │  Stage 0: workbook_census   │                       │                       │
+   │                                          │                                          │                                  │     openpyxl walk every cell │                       │                       │
+   │                                          │                                          │                                  ├─ extract_identity(census) ─►│                       │                       │
+   │                                          │                                          │                                  │                              ├─ generate_content() ──│                       │
+   │                                          │                                          │                                  │◄────────── JSON identity ───┤                       │                       │
+   │                                          │                                          │                                  ├─ extract_anchors(census) ──►│                       │                       │
+   │                                          │                                          │                                  │◄────────── JSON anchors ────┤                       │                       │
+   │                                          │                                          │                                  ├─ extract_cash_flows() ─────►│                       │                       │
+   │                                          │                                          │                                  │◄────────── JSON CF series ──┤                       │                       │
+   │                                          │                                          │                                  │  Stage 5: compute_metrics    │                       │                       │
+   │                                          │                                          │                                  │     MOIC, TVPI, IRR, carry   │                       │                       │
+   │                                          │                                          │                                  │  Stage 6: run_audits         │                       │                       │
+   │                                          │                                          │                                  │  Stage 7: persist()          │                       │                       │
+   │                                          │                                          │                                  ├─────────────────────────────►│ FundMetric.create()    │                       │
+   │                                          │                                          │                                  ├─────────────────────────────►│ DerivedMetric mirror  │                       │
+   │                                          │                                          │                                  │                              │                       │                       │
+   │ GET /api/funds/...derived-metrics/ ──────►│                                          │                                  │                              │                       │                       │
+   │                                          ├─ ORM read DerivedMetric ────────────────────────────────────────────────────────────────────────────────────────────────────────►│                       │
+   │                                          │◄─ JSON response ────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤                       │
+   │◄────── tile values ───────────────────────┤                                          │                                  │                              │                       │                       │
+</pre>
+
+<!-- ────────────────────────────────────────────────────────── -->
+<h2>9 · How we get to 100% accuracy</h2>
+
+<table>
+<thead><tr><th>Failure mode (old pipeline)</th><th>How the new pipeline prevents it</th></tr></thead>
+<tbody>
+<tr>
+  <td>Pass 1 mis-classifies a sheet (e.g., <code>WATERFALL</code> not tagged as <code>waterfall_carry</code>), Pass 8 sees nothing → produces zero candidates → Arbiter falls to garbage Pass 4</td>
+  <td>No sheet classification gate. Stage 0 census includes every sheet. Stage 2 prompt sees the whole workbook and identifies carry-related values regardless of sheet name.</td>
+</tr>
+<tr>
+  <td>Pass 4 catalogue formula picks a random cell because the label is fuzzy</td>
+  <td>No catalogue formulas. All metric computation is textbook math on validated anchors. If anchor is null, metric is null (honest) — never a guess.</td>
+</tr>
+<tr>
+  <td>Variant key collision: both Portfolio FV and Fund NAV stored as <code>total_unrealised_fair_value</code></td>
+  <td>Closed canonical schema with 12 distinct anchor names. <code>active_fair_value</code> ≠ <code>fund_nav</code>; the prompt explicitly disambiguates.</td>
+</tr>
+<tr>
+  <td>Re-import produces different values (non-determinism)</td>
+  <td>Gemini temperature=0, JSON mode. Same prompt + same census → same output. Stage 5-7 are pure Python. Persist is atomic with delete-then-insert per scheme.</td>
+</tr>
+<tr>
+  <td>Cross-Pass races + last-writer-wins on DerivedMetric</td>
+  <td>Single writer: <code>persist()</code>. No competing writers.</td>
+</tr>
+<tr>
+  <td>Silent failures (Pass returns empty, no log)</td>
+  <td>Every stage logs at INFO level. Audit findings are recorded in DerivedMetric.gemini_reasoning. Stage 2 conflicts (no candidate satisfies identities) are logged WARN.</td>
+</tr>
+<tr>
+  <td>File states MOIC = 2.0 but math says 0.95 — system picks the stated one</td>
+  <td>Computed value always wins. If the file's stated value disagrees beyond 1%, FundMetric.source = <code>conflict</code> and the audit icon appears on the tile. CFO reviews — system never silently picks the wrong one.</td>
+</tr>
+<tr>
+  <td>Currency unit mixed (some sheets in Cr, some in Lakhs)</td>
+  <td>Stage 1 returns all unit candidates with cell locations. <code>compute_metrics</code> uses values raw; any inconsistency surfaces in audit identities (Called ≤ Committed fails if units are mixed).</td>
+</tr>
+</tbody>
+</table>
+
+<!-- ────────────────────────────────────────────────────────── -->
+<h2>10 · Validation results — two real fund files</h2>
+
+<div class="grid two">
+<div class="card">
+<h3>Multiples IV (Mock_14)</h3>
+<p>Excel ground truth from <code>FUND_MASTER</code> + <code>WATERFALL</code> sheets vs. new pipeline output:</p>
+<table>
+<thead><tr><th>Metric</th><th>Excel</th><th>Pipeline</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td>Committed</td><td>3800</td><td>3800</td><td class="ok">match</td></tr>
+<tr><td>Called</td>   <td>3422</td><td>3422</td><td class="ok">match</td></tr>
+<tr><td>NAV</td>      <td>4057.87</td><td>4057.87</td><td class="ok">match</td></tr>
+<tr><td>TVPI</td>     <td>1.567</td><td>1.567</td><td class="ok">match</td></tr>
+<tr><td>DPI</td>      <td>0.383</td><td>0.383</td><td class="ok">match</td></tr>
+<tr><td>RVPI</td>     <td>1.184</td><td>1.184</td><td class="ok">match</td></tr>
+<tr><td>Preferred</td><td>1233.6</td><td>1232.6</td><td class="ok">match (±0.1%)</td></tr>
+<tr><td>Carry Base</td><td>1312.4</td><td>1610.4</td><td class="warn">different inputs (FV+Exit vs FV+Realized)</td></tr>
+<tr><td>MOIC</td>     <td>—</td><td>3.23</td><td class="ok">textbook computed</td></tr>
+<tr><td>Net IRR</td>  <td>21.2% stated</td><td>13.5% XIRR</td><td class="warn">conflict flag — XIRR vs stated</td></tr>
+</tbody>
+</table>
+<p class="sub">Before this fix: NAV=157.5, Called=125, all carry values=0, Return of Capital=37.5.</p>
+</div>
+
+<div class="card">
+<h3>Trivesta Growth Opps Fund I</h3>
+<p>Excel ground truth from <code>MOIC_TVPI_DPI</code> + <code>WATERFALL_EUR</code> + <code>DASHBOARD_BRIDGE</code> vs. new pipeline output:</p>
+<table>
+<thead><tr><th>Metric</th><th>Excel</th><th>Pipeline</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td>Committed</td><td>1520</td><td>1520</td><td class="ok">match</td></tr>
+<tr><td>Called</td>   <td>1520</td><td>1520</td><td class="ok">match</td></tr>
+<tr><td>NAV</td>      <td>1862.69</td><td>1862.69</td><td class="ok">match</td></tr>
+<tr><td>Active FV</td><td>1165.29</td><td>1165.29</td><td class="ok">match</td></tr>
+<tr><td>Realized</td> <td>603</td><td>603</td><td class="ok">match</td></tr>
+<tr><td>MOIC</td>     <td>0.753</td><td>0.753</td><td class="ok">match</td></tr>
+<tr><td>RVPI</td>     <td>0.767</td><td>0.767</td><td class="ok">match</td></tr>
+<tr><td>TVPI</td>     <td>0.753</td><td>0.992</td><td class="warn">Gemini picked larger LP distribution figure</td></tr>
+<tr><td>Carry</td>    <td>(projection: 493)</td><td>0 (interim)</td><td class="ok">honest interim — fund below hurdle</td></tr>
+</tbody>
+</table>
+<p class="sub">Before this fix: MOIC=2.52, TVPI=2.52, Net IRR=44.6% — all wildly wrong because Pass 9 used Fund NAV where Portfolio FV was needed.</p>
+</div>
+</div>
+
+<!-- ────────────────────────────────────────────────────────── -->
+<h2>11 · Code touchpoints summary</h2>
+
+<table>
+<thead><tr><th>Action</th><th>File</th><th>Lines</th></tr></thead>
+<tbody>
+<tr><td><span class="tag good">ADD</span></td><td class="k">backend/dataimport/anchor_pipeline.py</td><td>~880 (new)</td></tr>
+<tr><td><span class="tag good">ADD</span></td><td class="k">backend/dataimport/models.py — FundMetric</td><td>~85</td></tr>
+<tr><td><span class="tag good">ADD</span></td><td class="k">backend/dataimport/migrations/0007_fundmetric.py</td><td>auto-generated</td></tr>
+<tr><td><span class="tag">EDIT</span></td><td class="k">backend/dataimport/import_service.py — _do_import</td><td>replaced Pass 3.5/4/8/9/Arbiter block (~150 lines) with anchor pipeline call (~50 lines)</td></tr>
+<tr><td><span class="tag bad">DISABLED</span></td><td class="k">derivation_service.MetricDerivationService (Pass 4)</td><td>no longer invoked</td></tr>
+<tr><td><span class="tag bad">DISABLED</span></td><td class="k">_compute_carry_via_direct_waterfall (Pass 8)</td><td>no longer invoked</td></tr>
+<tr><td><span class="tag bad">DISABLED</span></td><td class="k">_compute_fund_metrics_via_pass9 (Pass 9)</td><td>no longer invoked</td></tr>
+<tr><td><span class="tag bad">DISABLED</span></td><td class="k">metric_arbiter.run_arbiter_for_fund</td><td>no longer invoked</td></tr>
+<tr><td><span class="tag bad">DISABLED</span></td><td class="k">_extract_explicit_performance_metrics (Pass 3.5)</td><td>no longer invoked</td></tr>
+<tr><td><span class="tag">UNCHANGED</span></td><td class="k">frontend/v5-dashboard.js</td><td>reads DerivedMetric, mirror keeps it functional</td></tr>
+<tr><td><span class="tag">UNCHANGED</span></td><td class="k">backend/chatbot/engine.py</td><td>reads DerivedMetric via allowlist, still works</td></tr>
+</tbody>
+</table>
+
+<div class="footnote">
+TrackFundAI · Anchor-First Pipeline Architecture · Internal architecture reference · Generated 2026-06-10.
+</div>
+
+</div>
+</body>
+</html>

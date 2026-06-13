@@ -1141,7 +1141,13 @@ def portfolio_quoted_unquoted(request):
 def portfolio_investments_list(request):
     """
     GET /api/portfolio/investments/?fund=<id>
-    Returns all investments for the selected fund across all schemes.
+    Returns one row per InvestmentTranche (i.e. one row per investment
+    round / position in the file) so the dashboard reflects the file's
+    'Portfolio Investments' sheet row-for-row.  Multi-round companies
+    show one row per round; single-round companies show one row.
+
+    Also returns aggregate counts: distinct companies and distinct
+    investment positions.
     """
     org = request.organization
     if not org:
@@ -1150,36 +1156,67 @@ def portfolio_investments_list(request):
     fund_ids = get_accessible_fund_ids(request.user)
     fund_id = request.query_params.get('fund')
 
-    qs = Investment.objects.filter(
+    inv_qs = Investment.objects.filter(
         scheme__fund__organization=org,
         scheme__fund__id__in=fund_ids,
     ).select_related('scheme', 'scheme__fund', 'portfolio_company')
 
     if fund_id:
-        qs = qs.filter(scheme__fund__id=fund_id)
+        inv_qs = inv_qs.filter(scheme__fund__id=fund_id)
 
-    investments = []
-    for inv in qs.order_by('company_name'):
-        latest_val = inv.valuations.filter(status='approved').order_by('-valuation_date').first()
-        investments.append({
-            'id': str(inv.id),
-            'company_name': inv.company_name,
-            'scheme_name': inv.scheme.name,
-            'sector': inv.sector or (inv.portfolio_company.sector if inv.portfolio_company else ''),
-            'stage': inv.stage or '',
-            'instrument_type': inv.instrument_type,
-            'instrument_type_display': inv.get_instrument_type_display(),
-            'status': inv.status,
-            'status_display': inv.get_status_display(),
-            'total_invested': float(inv.total_invested) if inv.total_invested else 0,
-            'ownership_pct': float(inv.ownership_pct) if inv.ownership_pct else None,
-            'investment_date': str(inv.investment_date) if inv.investment_date else None,
-            'irr_pct': float(inv.irr_pct) if inv.irr_pct else None,
-            'latest_valuation': float(latest_val.fair_value) if latest_val else None,
-            'currency': inv.currency,
+    inv_ids = list(inv_qs.values_list('id', flat=True))
+
+    tranche_qs = (InvestmentTranche.objects
+                  .filter(investment_id__in=inv_ids)
+                  .select_related('investment',
+                                  'investment__scheme',
+                                  'investment__portfolio_company')
+                  .order_by('investment__company_name',
+                            'date', 'tranche_number'))
+
+    latest_val_by_inv = {}
+    for v in (Valuation.objects.filter(investment_id__in=inv_ids,
+                                       status='approved')
+              .order_by('investment_id', '-valuation_date')):
+        if v.investment_id not in latest_val_by_inv:
+            latest_val_by_inv[v.investment_id] = v
+
+    rows = []
+    for t in tranche_qs:
+        inv = t.investment
+        latest_val = latest_val_by_inv.get(inv.id)
+        rows.append({
+            'id':                       str(t.id),
+            'investment_id':            str(inv.id),
+            'company_name':             inv.company_name,
+            'scheme_name':              inv.scheme.name,
+            'sector':                   inv.sector or (inv.portfolio_company.sector
+                                                        if inv.portfolio_company else ''),
+            'stage':                    t.round_name or inv.stage or '',
+            'tranche_number':           t.tranche_number,
+            'natural_key':              t.natural_key or '',
+            'instrument_type':          (t.instrument_type or inv.instrument_type),
+            'instrument_type_display':  inv.get_instrument_type_display(),
+            'status':                   inv.status,
+            'status_display':           inv.get_status_display(),
+            'total_invested':           float(t.amount) if t.amount is not None else 0,
+            'ownership_pct':            float(t.ownership_pct) if t.ownership_pct is not None
+                                          else (float(inv.ownership_pct) if inv.ownership_pct else None),
+            'investment_date':          str(t.date) if t.date else None,
+            'irr_pct':                  float(inv.irr_pct) if inv.irr_pct else None,
+            'latest_valuation':         float(latest_val.fair_value) if latest_val else None,
+            'currency':                 inv.currency,
         })
 
-    return Response({'investments': investments, 'count': len(investments)})
+    distinct_companies = len({(r['company_name'] or '').strip().lower()
+                               for r in rows if r['company_name']})
+
+    return Response({
+        'investments':         rows,
+        'count':               len(rows),
+        'distinct_companies':  distinct_companies,
+        'distinct_investments': len(rows),
+    })
 
 
 @api_view(['GET'])
@@ -1272,16 +1309,23 @@ def portfolio_kpi_tracking(request):
 
 
 # ── Canonical slug → column mapping for KPI matrix ──────────
+# IMPORTANT: column headers in the matrix that end with "%" (GROSS M%,
+# EBITDA%, RETURNS%, REPEAT%) MUST only accept PERCENTAGE slugs. Raw
+# amount slugs (e.g. plain 'ebitda' for Crore-denominated EBITDA) must
+# NOT be routed into the % columns, otherwise the dashboard renders a
+# raw 6.10 Cr as "6.10%". The percentage versions are produced by the
+# Pass 6 percentage-derivation step (e.g. ebitda-pct = ebitda / revenue * 100)
+# and stored under the *-pct / *-margin slugs.
 _KPI_COL_SLUGS = {
     'gmv':      ['gmv', 'gmv-rs-cr', 'gmvcr'],
     'revenue':  ['rev', 'revenue', 'revenue-rs-cr', 'revenuecr'],
-    'gross_m':  ['gross-m', 'gross-margin'],
-    'ebitda':   ['ebitda', 'ebitda-margin'],
+    'gross_m':  ['gross-margin-pct', 'gross-margin', 'gross-m', 'gross-margin-percent'],
+    'ebitda':   ['ebitda-pct', 'ebitda-margin', 'ebitda-margin-pct', 'ebitda-margin-percent'],
     'orders':   ['orders', 'order-book', 'order-book-rs-cr'],
     'aov':      ['aov'],
-    'returns':  ['returns'],
+    'returns':  ['returns-pct', 'returns', 'returns-percent'],
     'cac':      ['cac'],
-    'repeat':   ['repeat'],
+    'repeat':   ['repeat-pct', 'repeat', 'repeat-percent'],
 }
 # Reverse: slug → canonical column
 _SLUG_TO_COL = {}

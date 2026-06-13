@@ -266,8 +266,18 @@ def classify_labels(labels, category_key, canonical_options, context=''):
     if cache_key in _classification_cache:
         return _classification_cache[cache_key]
 
+    # canonical_options may now use either the legacy string shape
+    # ({key: 'description'}) or the new dict shape
+    # ({key: {'description': '...', 'value_type': '...', 'requires_variant': ...}}).
+    # Extract just the description here — the structural metadata is
+    # consumed by Pass 3.5 disambiguation later, not by classify_labels.
+    def _desc(v):
+        if isinstance(v, dict):
+            return v.get('description', '') or str(v)
+        return str(v)
+
     options_text = '\n'.join(
-        f'  "{k}": {v}' for k, v in canonical_options.items()
+        f'  "{k}": {_desc(v)}' for k, v in canonical_options.items()
     )
     labels_text = '\n'.join(f'  - "{l}"' for l in unique_labels)
     context_line = f'\nDOMAIN CONTEXT: {context}\n' if context else ''
@@ -2040,45 +2050,130 @@ def map_workbook_columns(filepath, progress_cb=None):
     total_confidence = 0.0
     mapped_count = 0
 
+    # PRODUCTION: parallel Pass 2 using ThreadPoolExecutor.
+    # Architecture (per the user-approved design):
+    #   - Layer 1: each Pass2-map call already has _call_gemini's internal
+    #     retry (3 attempts, exponential backoff) for in-call transient errors.
+    #   - Layer 2: at the BATCH level, we run sheets in parallel with bounded
+    #     concurrency. If a sheet fails after all Layer-1 retries, it's
+    #     collected and re-issued in a NEW parallel batch after a jittered
+    #     30s sleep. Up to 3 outer rounds. Sheets that fail all 3 outer
+    #     rounds are reported as Pass 2 failures and the audit catches them.
+    #
+    # Concurrency = 6 in flight. Token consumption is identical to sequential
+    # — same prompts, same responses — only wall-clock changes (faster).
+    # On paid Tier 1 (1000 RPM) our peak load is <2% of quota, so 429s
+    # should be rare; if they occur, Layer 2 handles them gracefully.
+    import concurrent.futures as _futures
+    import random as _random
+    import time as _time
+
+    MAX_WORKERS = 6
+    OUTER_RETRIES = 3
+    OUTER_BACKOFF_BASE = 30  # seconds
+
+    # Build the list of sheets to map
+    pending = []
     for i, sheet_cls in enumerate(classifications):
         sheet_name = sheet_cls.get('sheet_name', '')
         domains = sheet_cls.get('domains', [])
         sections = sheet_cls.get('sections', [])
         cls_confidence = sheet_cls.get('confidence', 0.0)
-
         if not domains or domains == ['unknown']:
             continue
+        pending.append({
+            'sheet_name': sheet_name,
+            'domains': domains,
+            'sections': sections,
+            'cls_confidence': cls_confidence,
+        })
 
-        if progress_cb:
-            pct = 15 + int((i / max(len(classifications), 1)) * 10)
-            progress_cb(pct, f'Mapping columns: {sheet_name}...')
-
+    def _map_one(spec):
+        sname = spec['sheet_name']
         try:
             mapping = map_columns_for_sheet(
-                filepath, sheet_name, domains, sections, progress_cb,
+                filepath, sname, spec['domains'], spec['sections'], progress_cb,
                 xsheet_cache=xsheet_cache, wb=wb_pass2,
-                # Production path: Pass 2 sees the same per-section
-                # snapshots that Pass 1.5 used (headers + sample rows for
-                # every sub-table). This makes column-mapping robust on
-                # multi-sub-table sheets like NAV_CALC whose later
-                # sub-tables fell outside the legacy 20-row scan window.
-                sections_data=sheet_section_data.get(sheet_name),
+                sections_data=sheet_section_data.get(sname),
             )
-            column_mappings[sheet_name] = {
-                'domains': domains,
-                'sections_from_classification': sections,
-                **mapping,
-            }
-            overall_conf = mapping.get('overall_confidence', cls_confidence)
-            total_confidence += overall_conf
-            mapped_count += 1
+            return ('ok', spec, mapping)
         except Exception as e:
-            logger.warning(f'Column mapping failed for sheet "{sheet_name}": {e}')
-            column_mappings[sheet_name] = {
-                'domains': domains,
-                'error': str(e),
-                'overall_confidence': 0.0,
-            }
+            return ('error', spec, e)
+
+    failed_specs = list(pending)
+    for outer_attempt in range(1, OUTER_RETRIES + 1):
+        if not failed_specs:
+            break
+        round_specs = failed_specs
+        failed_specs = []
+        n_total = len(round_specs)
+        logger.info(
+            f'Pass 2 parallel round {outer_attempt}/{OUTER_RETRIES}: '
+            f'dispatching {n_total} sheet(s) with max_workers={MAX_WORKERS}'
+        )
+        if progress_cb:
+            base_pct = 15 + (outer_attempt - 1) * 3
+            progress_cb(base_pct,
+                        f'Pass 2 parallel round {outer_attempt}: mapping '
+                        f'{n_total} sheets...')
+
+        completed_in_round = 0
+        with _futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            futures = {pool.submit(_map_one, s): s for s in round_specs}
+            for fut in _futures.as_completed(futures):
+                status, spec, payload = fut.result()
+                sname = spec['sheet_name']
+                completed_in_round += 1
+                if status == 'ok':
+                    mapping = payload
+                    column_mappings[sname] = {
+                        'domains': spec['domains'],
+                        'sections_from_classification': spec['sections'],
+                        **mapping,
+                    }
+                    overall_conf = mapping.get('overall_confidence',
+                                               spec['cls_confidence'])
+                    total_confidence += overall_conf
+                    mapped_count += 1
+                else:
+                    err = payload
+                    logger.warning(
+                        f'Pass 2 sheet "{sname}" failed in round '
+                        f'{outer_attempt}: {type(err).__name__}: {err}'
+                    )
+                    failed_specs.append(spec)
+
+                if progress_cb and completed_in_round % 3 == 0:
+                    progress_cb(
+                        15 + (outer_attempt - 1) * 3,
+                        f'Pass 2 round {outer_attempt}: '
+                        f'{completed_in_round}/{n_total} sheets mapped'
+                    )
+
+        if failed_specs and outer_attempt < OUTER_RETRIES:
+            jitter = _random.uniform(0, 10)
+            sleep_s = OUTER_BACKOFF_BASE + jitter
+            logger.info(
+                f'Pass 2: {len(failed_specs)} sheet(s) failed in round '
+                f'{outer_attempt}, sleeping {sleep_s:.1f}s before re-issuing '
+                f'them in parallel'
+            )
+            _time.sleep(sleep_s)
+
+    # Sheets that exhausted all outer retries
+    for spec in failed_specs:
+        sname = spec['sheet_name']
+        column_mappings[sname] = {
+            'domains': spec['domains'],
+            'error': (f'Pass 2 failed after {OUTER_RETRIES} outer parallel '
+                      f'rounds (sheet remained un-mappable across all '
+                      f'Layer-1 + Layer-2 retries).'),
+            'overall_confidence': 0.0,
+        }
+        logger.error(
+            f'Pass 2 sheet "{sname}" exhausted {OUTER_RETRIES} outer retry '
+            f'rounds — audit will flag any downstream empty tables.'
+        )
 
     try:
         wb_pass2.close()
@@ -2105,19 +2200,23 @@ def map_workbook_columns(filepath, progress_cb=None):
 
 def derive_metric_via_gemini(metric_key, metric_meta, available_inputs,
                              scheme_context=''):
-    """Ask Gemini to derive a missing fund-level metric.
+    """Ask Gemini for RANKED CANDIDATE FORMULAS to derive a missing fund-level
+    metric. CRITICAL CONTRACT: Gemini's only job is to propose formulas and
+    declare their required input variables. Gemini DOES NOT supply numeric
+    values — Python evaluates each candidate using ONLY the catalogue
+    values in `available_inputs`. This eliminates the hallucination
+    vector where Gemini invents fake variables + fake values and Python
+    trusts them blindly.
 
-    Gemini is told:
-      - Which metric we need (with rich semantic description)
-      - The full menu of available inputs (with current values from DB and
-        which are missing)
-      - That it must enumerate the canonical formulas, pick the formula whose
-        inputs are ALL present and non-zero, and return the computed value
-        with full provenance.
-
-    No formulas are hardcoded — Gemini decides which formula applies given the
-    data we have. If no viable formula exists, Gemini returns null and the
-    metric is recorded as un-derivable with reasoning.
+    The caller (MetricDerivationService._derive_one) will:
+      1. Iterate candidates in rank order (most preferred first).
+      2. For each, AST-validate that every variable referenced exists in
+         the actual `available_inputs` catalogue (reject if hallucinated).
+      3. Build the eval context EXCLUSIVELY from
+         `available_inputs[<key>]['value']` — never from any Gemini-supplied
+         numeric value.
+      4. Use the first candidate that validates AND evaluates to a real
+         number.
 
     Args:
         metric_key: e.g. 'net_irr', 'moic', 'tvpi'
@@ -2129,14 +2228,19 @@ def derive_metric_via_gemini(metric_key, metric_meta, available_inputs,
     Returns:
         dict shaped:
         {
-            'value':              <float|None>,
-            'formula_expression': '<human-readable formula>',
-            'inputs_used':        {input_key: <value>, ...},
-            'confidence':         <float 0-1>,
-            'reasoning':          '<why this formula was chosen>',
-            'candidates':         [{formula, inputs_required, available, reason_rejected}, ...]
+            'candidate_formulas': [
+                {
+                    'rank':              int,    # 1 = highest priority
+                    'formula_expression': str,   # arithmetic OR "XIRR(cashflow_series)"
+                    'inputs_required':   [input_key, ...],  # must be subset of available_inputs
+                    'applies_when':      str,    # human description of when this fits
+                    'confidence':        float 0-1,
+                },
+                ...
+            ],
+            'reasoning':           str,
         }
-        On failure returns {'value': None, ...} with reasoning set.
+        On failure returns {'candidate_formulas': [], 'reasoning': '...'}.
     """
     # Build the "available inputs" section: for each input show description,
     # whether it's available, and the current value (truncated for series).
@@ -2198,82 +2302,106 @@ drag is total_committed_capital × 0.02 × years_since_inception. If a hurdle
 of 8% applies, the preferred return is total_called_capital × (1.08^years - 1).
 Use the lpa_* inputs ANYWHERE they are relevant — do not silently drop them.
 
-YOUR TASK
-=========
+YOUR TASK — PROPOSE RANKED CANDIDATE FORMULAS
+=============================================
 Step 1. Enumerate ALL canonical/textbook formulas to compute this metric. Be
         exhaustive — list every standard PE/VC, accounting, or financial-math
         formula you know for this metric, including LPA-driven variants
         (net-of-fee / net-of-carry / hurdle-adjusted).
-Step 2. For EACH formula, list the inputs it requires and mark whether ALL
-        required inputs are AVAILABLE and non-zero from the inputs above.
-Step 3. Pick the SINGLE most appropriate formula whose inputs are ALL
-        available and non-null. Prefer the formula that is:
-          (a) the textbook industry-standard for this metric
-          (b) closest to the legal/SEBI definition
-          (c) the one requiring the fewest assumptions
-Step 4. Specify the chosen formula and the exact inputs to plug in.
-        Python will do the numerical evaluation — you do NOT need to compute
-        the final number yourself. Your job is to pick the formula and supply
-        the inputs.
 
-        - For IRR-class metrics: set "formula_expression" to exactly the
-          string "XIRR(cashflow_series)". In "inputs_used", include a single
-          key "cashflow_series" mapped to the list of {{date, amount}} objects
-          you want XIRR computed on. Sign convention: contributions NEGATIVE,
-          distributions POSITIVE. If the cashflow_series lacks a terminal
-          residual NAV inflow, append a synthetic entry
-          {{date: as_of_date, amount: +fund_nav_latest}} so XIRR has a
-          terminal value.
+Step 2. Rank them. Rank 1 = the formula that is BOTH the textbook
+        industry-standard for this metric AND uses inputs that are AVAILABLE
+        (non-null, non-zero) in the catalogue above. Lower ranks = fallback
+        formulas that should be tried if rank-1's inputs turn out to be
+        unusable, or alternative canonical formulations.
 
-        - For ratio/multiple metrics (MOIC/TVPI/DPI/RVPI): set
-          "formula_expression" to a plain arithmetic expression using ONLY
-          the available input keys as variable names — e.g.
+Step 3. For each candidate formula:
+        - `formula_expression` must reference ONLY input keys that appear
+          verbatim in the AVAILABLE INPUTS catalogue above. If you reference
+          a variable that is NOT in the catalogue, Python WILL reject the
+          formula and try the next candidate.
+        - `inputs_required` must list every variable used in
+          `formula_expression`, verbatim.
+        - `applies_when` is a 1-sentence description of WHEN this formula
+          is the right choice (e.g. "When a direct cashflow series is
+          available", "When only summary aggregates are reported", etc.).
+        - `confidence` is your confidence in this formula's correctness in
+          [0, 1].
+        - `inputs_disjoint_proof` is a 1-2 sentence proof that the inputs
+          in `inputs_required` are mathematically DISJOINT — i.e. summing
+          / combining them does not double-count any cash flow. READ the
+          catalogue descriptions; if two inputs OVERLAP (e.g.
+          total_distributions and total_realised_proceeds share exit
+          proceeds that were distributed to LPs), state explicitly that
+          you have AVOIDED that overlap in your formula. If you cannot
+          prove disjointness, RANK THIS FORMULA LOWER. Hallucinated
+          disjointness is the single biggest source of dashboard-number
+          errors — be honest.
+
+Step 4. FORMULA SYNTAX:
+        - For IRR-class metrics: set `formula_expression` to exactly the
+          string "XIRR(cashflow_series)". Python will look up
+          cashflow_series in the catalogue and run brentq XIRR on it.
+          (cashflow_series must appear as a catalogue key.) Sign
+          convention: contributions NEGATIVE, distributions POSITIVE,
+          terminal NAV POSITIVE.
+
+        - For ratio/multiple metrics (MOIC/TVPI/DPI/RVPI): plain arithmetic
+          using ONLY catalogue keys as variable names — e.g.
           "(total_distributions_to_lps + total_unrealised_fair_value) / total_called_capital".
-          In "inputs_used", supply the numeric value of EACH input the formula
-          references (exact values from the AVAILABLE inputs above — do not
-          invent or round).
 
-        - For NAV/currency metrics: set "formula_expression" to a plain
-          arithmetic expression of available input keys (e.g.
-          "total_unrealised_fair_value - accrued_management_fees - accrued_carried_interest"
-          or simply "fund_nav_latest"). In "inputs_used", supply the numeric
-          value of each referenced input.
+        - For NAV/currency/waterfall components: plain arithmetic of catalogue
+          keys with the allowed function set below.
 
-        Python will mechanically substitute inputs_used into formula_expression
-        and compute the result. You do NOT predict the final value field —
-        leave "value" as null; Python will populate it after evaluating.
+Step 5. The Python safe evaluator supports: + - * / ** % () plus bare-name
+        functions `max(...)`, `min(...)`, `abs(x)`. It does NOT support
+        attribute access (e.g. `.days`), conditional expressions,
+        comparisons, or any other function calls.
 
-Step 5. If NO formula has all required inputs available, return value = null,
-        formula_expression = "" and explain in reasoning what is missing.
+Step 6. If NO formula can be expressed using ONLY catalogue keys, return
+        an EMPTY `candidate_formulas` list and explain in `reasoning`
+        which input is missing.
 
-CONSTRAINTS
-===========
-- DO NOT invent numeric values. Use ONLY values from the AVAILABLE inputs.
-- DO NOT pick a formula whose required inputs are MISSING.
-- DO NOT pick a formula whose required inputs are zero (would produce
-  meaningless result).
-- For percentages, return as a number (e.g. 18.5 for 18.5%), NEVER as a
-  fraction (0.185).
-- For multiples, return as a number (e.g. 1.85 for 1.85x).
-- For currency, return in the SAME units as the input values (₹ raw — do not
-  divide by Cr or Lakhs).
+CRITICAL CONSTRAINTS — VIOLATIONS WILL BE REJECTED MECHANICALLY
+================================================================
+- DO NOT invent variable names. Every variable in every formula MUST be a
+  key in the AVAILABLE INPUTS catalogue. Python AST-validates every
+  formula and discards any that reference unknown variables.
+- DO NOT supply numeric values. Python reads values from the catalogue
+  directly. Your formula text + `inputs_required` list is the ONLY
+  thing Python uses; any numeric values you mention are for your own
+  reasoning only.
+- DO NOT pick a formula whose required inputs are MISSING from the
+  catalogue (marker `[MISSING]` above).
+- DO NOT pick a formula whose required inputs are zero where division
+  by zero or meaningless multiplication would result. Rank such
+  formulas BELOW formulas with all non-zero inputs.
+- For percentages, the formula MUST produce a number in dashboard scale
+  (e.g. 18.5 for 18.5%), NOT a fraction (0.185).
+- For multiples, the formula MUST produce a number (e.g. 1.85 for 1.85x).
+- For currency, the formula MUST produce a value in the SAME units as the
+  catalogue inputs (₹ raw — do not divide by Cr or Lakhs).
 
 RETURN STRICT JSON ONLY (no markdown fences, no commentary outside JSON):
 {{
-  "value":              null,
-  "formula_expression": "<chosen formula, plain text — leave empty if not derivable>",
-  "inputs_used":        {{"<input_key>": <numeric value or list>, ...}},
-  "confidence":         <float 0.0 - 1.0>,
-  "reasoning":          "<1-3 sentence explanation of why this formula was chosen>",
-  "candidates":         [
+  "candidate_formulas": [
     {{
-      "formula":           "<formula name or expression>",
-      "inputs_required":   ["<input_key>", ...],
-      "all_inputs_available": <bool>,
-      "reason_rejected":   "<empty string if chosen, else why rejected>"
+      "rank":              1,
+      "formula_expression": "<arithmetic / XIRR formula referencing only catalogue keys>",
+      "inputs_required":   ["<catalogue_key>", ...],
+      "applies_when":      "<1-sentence description of when this formula fits>",
+      "inputs_disjoint_proof": "<1-2 sentence proof of why the inputs do not double-count>",
+      "confidence":        <float 0.0 - 1.0>
     }},
-    ...
-  ]
+    {{
+      "rank":              2,
+      "formula_expression": "<...>",
+      "inputs_required":   ["<...>", ...],
+      "applies_when":      "<...>",
+      "confidence":        <float 0.0 - 1.0>
+    }}
+  ],
+  "reasoning": "<1-3 sentence summary of the ranking choice>"
 }}
 """
 
@@ -2282,38 +2410,56 @@ RETURN STRICT JSON ONLY (no markdown fences, no commentary outside JSON):
         # internally). Use the dict directly — do NOT parse again.
         result = _call_gemini(prompt, context_label=f'Pass4-derive-{metric_key}')
 
-        # Normalise
         if not isinstance(result, dict):
             return {
-                'value': None,
-                'formula_expression': '',
-                'inputs_used': {},
-                'confidence': 0.0,
+                'candidate_formulas': [],
                 'reasoning': 'Gemini returned non-dict response',
-                'candidates': [],
             }
 
-        # Coerce value to float when possible
-        val = result.get('value')
-        if val is not None:
-            try:
-                val = float(val)
-            except (TypeError, ValueError):
-                val = None
+        # Accept both the new ranked-candidates shape and the legacy
+        # single-formula shape for backward compatibility. Normalise into
+        # the canonical list-of-candidates form.
+        raw_candidates = result.get('candidate_formulas')
+        if raw_candidates is None and 'formula_expression' in result:
+            raw_candidates = [{
+                'rank': 1,
+                'formula_expression': result.get('formula_expression', ''),
+                'inputs_required': (
+                    list((result.get('inputs_used') or {}).keys())
+                ),
+                'applies_when': result.get('reasoning') or '',
+                'confidence': float(result.get('confidence') or 0.0),
+            }]
+        if not isinstance(raw_candidates, list):
+            raw_candidates = []
+
+        cleaned = []
+        for c in raw_candidates:
+            if not isinstance(c, dict):
+                continue
+            formula = str(c.get('formula_expression') or '').strip()
+            if not formula:
+                continue
+            cleaned.append({
+                'rank': int(c.get('rank') or (len(cleaned) + 1)),
+                'formula_expression': formula[:2000],
+                'inputs_required': c.get('inputs_required') or [],
+                'applies_when': str(c.get('applies_when') or '')[:500],
+                'inputs_disjoint_proof': str(
+                    c.get('inputs_disjoint_proof') or ''
+                )[:800],
+                'confidence': float(c.get('confidence') or 0.0),
+            })
+        cleaned.sort(key=lambda c: c['rank'])
 
         out = {
-            'value': val,
-            'formula_expression': str(result.get('formula_expression') or '').strip(),
-            'inputs_used': result.get('inputs_used') or {},
-            'confidence': float(result.get('confidence') or 0.0),
-            'reasoning': str(result.get('reasoning') or '').strip(),
-            'candidates': result.get('candidates') or [],
+            'candidate_formulas': cleaned,
+            'reasoning': str(result.get('reasoning') or '').strip()[:4000],
         }
 
         logger.info(
             f'[GEMINI Pass4] derive_metric({metric_key}): '
-            f'value={out["value"]} formula="{out["formula_expression"]}" '
-            f'confidence={out["confidence"]}'
+            f'{len(cleaned)} candidate formula(s) returned'
         )
         return out
 
@@ -2327,6 +2473,1566 @@ RETURN STRICT JSON ONLY (no markdown fences, no commentary outside JSON):
         # its own retry/backoff and surface a distinct "api_error" status.
         logger.error(
             f'Gemini derive_metric API call failed for {metric_key}: '
+            f'{type(e).__name__}: {e}'
+        )
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Pass 2.6 — Column Semantic Role Classifier
+# ---------------------------------------------------------------------------
+# For each horizontal tabular section detected by Pass 2.5, classify every
+# numeric column into a SEMANTIC ROLE. This is the missing context Pass 3.5
+# needs to pick the right cell when one row carries multiple metrics in
+# different columns (waterfall step tables, P&L sheets, KPI grids, etc.).
+#
+# ZERO keyword matching. Gemini reads the headers + sample data and reasons
+# about what each column REPRESENTS. The same prompt works for any tabular
+# layout in any Excel file.
+
+# Allowed roles — Gemini must pick one for each numeric column.
+COLUMN_ROLE_OPTIONS = {
+    'per_period_amount': (
+        'The actual value FOR this row\'s period / step / step-row entity. '
+        'Examples: "LP Share" / "GP Share" / "Total Step" in a waterfall step '
+        'table; "Q1 Revenue" in a quarterly P&L; "Jan-25 Burn" in a monthly '
+        'burn-rate sheet.'
+    ),
+    'cumulative_total': (
+        'A running total that accumulates across rows. Examples: "Cumulative '
+        'Distributed" / "Balance Remaining" in a waterfall; "YTD Revenue"; '
+        '"Cumulative IRR".'
+    ),
+    'ratio_percent': (
+        'A share or percentage of a total. Examples: "% of Portfolio"; '
+        '"% Allocation"; "Equity %".'
+    ),
+    'identifier': (
+        'Row identifier — sequence number, step number, SKU. Examples: '
+        '"Step #", "S.No", "Order ID".'
+    ),
+    'metadata_text': (
+        'Free-text annotation, formula text, or notes that happen to render '
+        'numerically. Should NOT be used as a metric value.'
+    ),
+    'derived_indicator': (
+        'A column whose value is mechanically derived from the other columns '
+        'of the SAME row (e.g. row-level multiple, row-level percentage of '
+        'totals). Sometimes useful, sometimes a duplicate of a per_period '
+        'value.'
+    ),
+    'unknown': (
+        'Cannot be confidently classified into any of the above roles given '
+        'the header text and sample values.'
+    ),
+}
+
+
+def classify_column_roles(section_title, column_headers, sample_data_rows):
+    """Classify each column in a horizontal tabular section by its SEMANTIC
+    ROLE so Pass 3.5 can route candidates correctly.
+
+    Args:
+        section_title: e.g. "WATERFALL STEPS — Step-by-Step Formula
+            Computation" — the section's own title from Pass 1.5.
+        column_headers: dict {col_idx (1-based): header_text}. Only numeric
+            columns are strictly required, but text columns help Gemini
+            understand the table's overall structure.
+        sample_data_rows: list of up to 3 dicts, each {col_idx: cell_value},
+            representing the first few data rows. Gives Gemini visibility
+            of magnitudes and monotonicity (e.g. cumulative columns
+            strictly increase down the table).
+
+    Returns:
+        dict {col_idx: role} where role ∈ COLUMN_ROLE_OPTIONS keys.
+        Unmapped/unsure columns become 'unknown'. Empty dict on API failure.
+
+    Raises on hard API errors (caller can retry).
+    """
+    if not column_headers:
+        return {}
+
+    role_block = '\n'.join(
+        f'  - "{key}": {desc}' for key, desc in COLUMN_ROLE_OPTIONS.items()
+    )
+    headers_block = '\n'.join(
+        f'  col {ci}: "{ht}"' for ci, ht in sorted(column_headers.items())
+    )
+    samples_block_lines = []
+    for i, row in enumerate(sample_data_rows[:3]):
+        row_str = ', '.join(
+            f'col{ci}={row.get(ci, "")!r}' for ci in sorted(column_headers.keys())
+        )
+        samples_block_lines.append(f'  Row {i+1}: {row_str}')
+    samples_block = '\n'.join(samples_block_lines) or '  (no sample rows available)'
+
+    prompt = SHARED_MISSION_PREAMBLE + f"""You are a CFO/CA classifying the SEMANTIC ROLE of each column in a
+tabular section of an Alternative Investment Fund (AIF) Excel workbook.
+Downstream code uses the role labels you assign to decide WHICH column
+is the canonical source for each metric the dashboard needs. Picking the
+wrong column produces wrong dashboard numbers, so be careful and precise.
+
+SECTION TITLE: {section_title or '(none)'}
+
+COLUMN HEADERS
+==============
+{headers_block}
+
+SAMPLE DATA ROWS (look at magnitudes + monotonicity)
+====================================================
+{samples_block}
+
+ALLOWED ROLES (pick exactly one per column)
+============================================
+{role_block}
+
+REASONING GUIDANCE
+==================
+1. Look at the header text AND the sample values together. A column named
+   "Cumulative" whose values strictly increase down the table is
+   `cumulative_total`. A column whose values can rise OR fall row-to-row
+   is `per_period_amount`.
+2. In a waterfall STEP table, expect: 1 `identifier` column (Step #),
+   1 `metadata_text` column (Description), 2-3 `per_period_amount`
+   columns (LP Share / GP Share / Total Step), 1-2 `cumulative_total`
+   columns (Cumulative Distributed / Balance Remaining), and possibly a
+   `metadata_text` column (Formula).
+3. In a quarterly P&L, expect 4 `per_period_amount` columns (one per
+   quarter) and possibly a 5th `cumulative_total` column (FY/YTD).
+4. If you cannot confidently classify a column, return `unknown` for that
+   column. Do NOT guess. Downstream code treats `unknown` columns as
+   ineligible for canonical-metric extraction.
+
+RETURN STRICT JSON ONLY (no markdown fences, no commentary outside JSON):
+{{
+  "<col_idx as integer>": "<role>",
+  ...
+}}
+
+Where each role MUST be one of: {", ".join(repr(k) for k in COLUMN_ROLE_OPTIONS.keys())}.
+"""
+
+    try:
+        result = _call_gemini(
+            prompt, context_label=f'Pass2.6-column-roles-{section_title[:40]}'
+        )
+        if not isinstance(result, dict):
+            return {}
+        out = {}
+        for k, v in result.items():
+            try:
+                ci = int(k)
+            except (TypeError, ValueError):
+                continue
+            role = str(v or '').strip()
+            if role not in COLUMN_ROLE_OPTIONS:
+                role = 'unknown'
+            out[ci] = role
+        logger.info(
+            f'[GEMINI Pass2.6] classify_column_roles({section_title[:40]!r}): '
+            f'{len(out)}/{len(column_headers)} columns classified '
+            f'(roles: {dict((c, out[c]) for c in sorted(out))})'
+        )
+        return out
+    except Exception as e:
+        logger.error(
+            f'Gemini classify_column_roles failed for section '
+            f'{section_title[:40]!r}: {type(e).__name__}: {e}'
+        )
+        raise
+
+
+def classify_metric_variant(metric_key, metric_label, metric_description,
+                            variant_options, candidates):
+    """For canonical metrics that come in semantic variants (gross/net,
+    pre-fee/post-fee, ...), tag each candidate cell with which variant it
+    represents. Called BEFORE select_authoritative_source so the
+    disambiguator can also filter by variant.
+
+    Args:
+        metric_key: canonical key, e.g. 'total_unrealised_fair_value'
+        metric_label / metric_description: from the catalogue
+        variant_options: list of allowed variant tags, e.g. ['gross', 'net']
+        candidates: list of dicts with 'label', 'value', 'source_cell',
+            'column_header' (per L2). The function adds 'variant' to each.
+
+    Returns:
+        List of candidate dicts (same order, same keys) with an added
+        'variant' field per candidate. Variant is one of variant_options or
+        the string 'unknown' when Gemini cannot tell.
+
+    Raises on hard API errors.
+    """
+    if not candidates or not variant_options:
+        return candidates
+
+    lines = []
+    for i, c in enumerate(candidates):
+        col_h = c.get('column_header') or ''
+        col_part = f'  column_header="{col_h}"' if col_h else ''
+        lines.append(
+            f'  [{i}] source={c.get("source_cell", "?")}  '
+            f'label="{c.get("label", "")}"{col_part}  '
+            f'value={c.get("value")}'
+        )
+    candidates_block = '\n'.join(lines)
+    variants_block = ', '.join(repr(v) for v in variant_options) + ", 'unknown'"
+
+    prompt = SHARED_MISSION_PREAMBLE + f"""You are classifying which VARIANT each candidate cell represents for
+the canonical metric below. Variants exist because the same metric can
+be reported with DIFFERENT semantic definitions in different parts of
+the workbook (e.g. gross-of-fees vs net-of-fees; pre-DLOM vs
+post-DLOM; pre-carry vs post-carry).
+
+CANONICAL METRIC
+================
+key:         {metric_key}
+label:       {metric_label}
+description: {metric_description}
+
+ALLOWED VARIANT TAGS (pick one per candidate)
+=============================================
+{variants_block}
+
+CANDIDATE CELLS
+===============
+{candidates_block}
+
+REASONING GUIDANCE
+==================
+- Read the row label, column header, sheet name, and the canonical
+  metric description together. Decide which variant each candidate's
+  cell represents.
+- If a candidate's source row clearly mentions a discount (DLOM, DLOC,
+  haircut), it is the NET variant.
+- If a candidate's source row is a fund-level summary in a waterfall
+  / cashflow sheet, it is usually GROSS.
+- If you cannot confidently tag the variant, return 'unknown' — the
+  candidate will be deprioritised.
+
+RETURN STRICT JSON ONLY (no markdown fences, no commentary outside JSON):
+{{
+  "<candidate_index_as_integer>": "<variant_tag>",
+  ...
+}}
+"""
+
+    try:
+        result = _call_gemini(
+            prompt, context_label=f'Pass3.5-variant-{metric_key}'
+        )
+        if not isinstance(result, dict):
+            return candidates
+        for k, v in result.items():
+            try:
+                idx = int(k)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= idx < len(candidates):
+                variant = str(v or '').strip()
+                if variant not in variant_options:
+                    variant = 'unknown'
+                candidates[idx]['variant'] = variant
+        # Ensure every candidate has a variant field
+        for c in candidates:
+            c.setdefault('variant', 'unknown')
+        logger.info(
+            f'[GEMINI Pass3.5] classify_metric_variant({metric_key}): '
+            f'tagged {len([c for c in candidates if c.get("variant") != "unknown"])}'
+            f'/{len(candidates)} candidates'
+        )
+        return candidates
+    except Exception as e:
+        logger.error(
+            f'Gemini classify_metric_variant failed for {metric_key}: '
+            f'{type(e).__name__}: {e}'
+        )
+        raise
+
+
+def validate_waterfall_identity(values, tolerance_pct=2.0):
+    """After Pass 4 derives all waterfall components, ask Gemini whether
+    the values are mutually consistent under the standard waterfall
+    identity. This is a sanity check, not a heuristic — it uses the
+    mathematical identity
+        return_of_capital + preferred_return + gp_catchup + carry_base
+        ≈ total_proceeds
+    (the LHS is the sum of every step in a European waterfall; the RHS
+    is the total cash pool. They MUST be equal up to rounding when the
+    extraction + derivation pipeline is correct.)
+
+    Args:
+        values: dict {canonical_key: numeric_value}. Must contain
+            'return_of_capital_amount', 'preferred_return_amount',
+            'gp_catchup_amount', 'carry_base', and either
+            'total_realised_proceeds' + 'total_unrealised_fair_value'
+            OR a precomputed 'total_proceeds_available'. Missing inputs
+            cause this function to return {'status': 'skipped_missing_inputs'}.
+        tolerance_pct: pass if |LHS - RHS| / RHS * 100 ≤ tolerance_pct.
+
+    Returns:
+        dict {
+            'status': 'pass' | 'fail' | 'skipped_missing_inputs',
+            'lhs_sum': float,
+            'rhs_total': float,
+            'diff_pct': float,
+            'reasoning': str,
+        }
+    """
+    required = ['return_of_capital_amount', 'preferred_return_amount',
+                'gp_catchup_amount', 'carry_base']
+    if any(values.get(k) is None for k in required):
+        return {
+            'status': 'skipped_missing_inputs',
+            'lhs_sum': None, 'rhs_total': None, 'diff_pct': None,
+            'reasoning': (
+                f'Cannot validate — missing inputs: '
+                f'{[k for k in required if values.get(k) is None]}'
+            ),
+        }
+
+    lhs = (
+        float(values['return_of_capital_amount'])
+        + float(values['preferred_return_amount'])
+        + float(values['gp_catchup_amount'])
+        + float(values['carry_base'])
+    )
+    rhs = None
+    if values.get('total_proceeds_available') is not None:
+        rhs = float(values['total_proceeds_available'])
+    elif (values.get('total_realised_proceeds') is not None
+          and values.get('total_unrealised_fair_value') is not None):
+        rhs = (
+            float(values['total_realised_proceeds'])
+            + float(values['total_unrealised_fair_value'])
+        )
+    if rhs is None or rhs == 0:
+        return {
+            'status': 'skipped_missing_inputs',
+            'lhs_sum': lhs, 'rhs_total': rhs, 'diff_pct': None,
+            'reasoning': 'Cannot compute RHS (total proceeds) from inputs.',
+        }
+
+    diff_pct = abs(lhs - rhs) / abs(rhs) * 100.0
+    status = 'pass' if diff_pct <= tolerance_pct else 'fail'
+    reasoning = (
+        f'Waterfall identity: return_of_capital + preferred_return + '
+        f'gp_catchup + carry_base = {lhs:.4f}. '
+        f'Total proceeds = {rhs:.4f}. '
+        f'Diff = {abs(lhs - rhs):.4f} ({diff_pct:.2f}% of total proceeds). '
+        f'Tolerance = {tolerance_pct:.2f}%. Status = {status}.'
+    )
+    logger.info(f'[Pass4 identity] {reasoning}')
+    return {
+        'status': status, 'lhs_sum': lhs, 'rhs_total': rhs,
+        'diff_pct': diff_pct, 'reasoning': reasoning,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Pass 8 — Direct Waterfall Computation
+# ---------------------------------------------------------------------------
+# Replaces the layered Pass 3.5 + Pass 4 derivation pipeline for the four
+# carry/clawback dashboard fields with ONE Gemini call that sees the
+# complete waterfall sheet content and the fund's LPA terms. This matches
+# the proven approach where Gemini, given direct access to the workbook,
+# returns accurate values in one shot — without the intermediate
+# extraction errors that broke the layered pipeline.
+#
+# ZERO formulas in code. Gemini reads the sheet, decides the formula, and
+# reports the four values WITH source-cell citations and confidence.
+# Python performs only basic sanity checks (net = gross - clawback, etc.)
+# and stores the result with full provenance.
+
+# The exact metric keys this pass writes — narrow scope to avoid
+# disrupting other extraction logic.
+WATERFALL_PASS8_METRIC_KEYS = (
+    'carry_base',
+    'carry_amount_gross',
+    'gp_clawback_provision',
+    'carry_amount_net',
+)
+
+# Supplementary metrics Pass 8 may ALSO report when the sheet exposes
+# them; these are not strictly required, but capturing them improves
+# the audit trail and lets the frontend waterfall bars render correctly.
+WATERFALL_PASS8_SUPPLEMENTARY_KEYS = (
+    'return_of_capital_amount',
+    'preferred_return_amount',
+    'gp_catchup_amount',
+    'lp_total_return',
+    'gp_total_distribution',
+    'total_proceeds_available',
+)
+
+
+def _dump_sheet_as_text(ws, max_rows=200, max_cols=20):
+    """Render a worksheet as a labelled cell grid for Gemini.
+
+    Each non-empty cell becomes one line: "R<row> C<col>: <value>".
+    This format is compact, deterministic, and lets Gemini quote source
+    cells by their (row, col) coordinates in its response.
+    """
+    lines = []
+    real_max_row = min(ws.max_row or 0, max_rows)
+    real_max_col = min(ws.max_column or 0, max_cols)
+    for r in range(1, real_max_row + 1):
+        row_cells = []
+        for c in range(1, real_max_col + 1):
+            v = ws.cell(r, c).value
+            if v is None:
+                continue
+            s = str(v).replace('\n', ' ').strip()
+            if not s:
+                continue
+            row_cells.append(f'C{c}="{s[:200]}"')
+        if row_cells:
+            lines.append(f'  R{r}: ' + ' | '.join(row_cells))
+    return '\n'.join(lines)
+
+
+def compute_waterfall_metrics_directly(waterfall_sheets, lpa_terms,
+                                       capital_flows, as_of_date):
+    """Pass 8 — ONE Gemini call computes the four carry/clawback fields by
+    reading the complete waterfall sheet(s) directly.
+
+    Args:
+        waterfall_sheets: dict {sheet_name: openpyxl Worksheet} — every
+            sheet Pass 1 classified into the `waterfall_carry` domain.
+        lpa_terms: dict of fund's LPA terms (hurdle_rate_pct, carry_pct,
+            carry_type, management_fee_pct, management_fee_basis,
+            tenure_years, sponsor_commitment_pct). Values may be None
+            when not extracted yet.
+        capital_flows: dict of cumulative capital-flow inputs visible
+            to Gemini for cross-check (total_called_capital,
+            total_committed_capital, total_distributions,
+            total_realised_proceeds, total_unrealised_fair_value).
+        as_of_date: date — the calculation date Gemini should treat as
+            "today".
+
+    Returns:
+        dict {
+            'metrics': {
+                'carry_base': {
+                    'value': float,
+                    'source_cells': ['SHEET!R23', ...],
+                    'formula_used': '<plain-text formula>',
+                    'confidence': float 0-1,
+                    'reasoning': '<1-3 sentences>',
+                },
+                'carry_amount_gross': {...},
+                'gp_clawback_provision': {...},
+                'carry_amount_net': {...},
+                # Supplementary keys (optional, may be missing):
+                'return_of_capital_amount': {...},
+                'preferred_return_amount': {...},
+                'gp_catchup_amount': {...},
+                ...
+            },
+            'overall_reasoning': '<3-5 sentence summary>',
+            'sheet_used': '<primary sheet name>',
+        }
+
+        Raises on hard API errors. Returns {'metrics': {}} when no
+        waterfall sheet is available.
+    """
+    if not waterfall_sheets:
+        logger.info('Pass 8: no waterfall_carry sheets found in workbook — skipping')
+        return {'metrics': {}, 'overall_reasoning': 'No waterfall sheet present.',
+                'sheet_used': None}
+
+    # Build the sheet-content block. If multiple waterfall sheets exist,
+    # dump each one with its name as a header.
+    sheet_blocks = []
+    for sname, ws in waterfall_sheets.items():
+        block = _dump_sheet_as_text(ws)
+        sheet_blocks.append(f'═══ SHEET: {sname} ═══\n{block}')
+    sheets_text = '\n\n'.join(sheet_blocks)
+
+    # LPA terms block
+    lpa_lines = []
+    for k in ('hurdle_rate_pct', 'carry_pct', 'carry_type',
+              'management_fee_pct', 'management_fee_basis',
+              'tenure_years', 'sponsor_commitment_pct'):
+        v = lpa_terms.get(k) if isinstance(lpa_terms, dict) else None
+        lpa_lines.append(f'  {k}: {v}')
+    lpa_block = '\n'.join(lpa_lines)
+
+    # Capital flow context (cross-check inputs)
+    flow_lines = []
+    for k in ('total_called_capital', 'total_committed_capital',
+              'total_distributions', 'total_realised_proceeds',
+              'total_unrealised_fair_value'):
+        v = capital_flows.get(k) if isinstance(capital_flows, dict) else None
+        flow_lines.append(f'  {k}: {v}')
+    flows_block = '\n'.join(flow_lines)
+
+    prompt = SHARED_MISSION_PREAMBLE + f"""You are a CFO/CA with 20+ years of experience computing carried
+interest waterfalls for Indian AIFs (Alternative Investment Funds).
+You have COMPLETE ACCESS to the workbook's waterfall sheet(s) below.
+Read the sheet content, identify the relevant cells, and compute the
+four carry & clawback dashboard fields with 100% ACCURACY.
+
+DO NOT GUESS. DO NOT INVENT VALUES. Every output number MUST be
+traceable to specific cells in the sheet content below, OR derived
+arithmetically from those cell values using formulas you cite
+explicitly.
+
+WATERFALL SHEET CONTENT (every non-empty cell, format "R<row> C<col>=<value>")
+==============================================================================
+{sheets_text}
+
+FUND'S LPA TERMS (from the Scheme model)
+========================================
+{lpa_block}
+
+CAPITAL FLOW CONTEXT (cross-check inputs from DerivedMetric — use only
+if the waterfall sheet itself doesn't already report the same number)
+=====================================================================
+{flows_block}
+
+AS-OF DATE: {as_of_date}
+
+REQUIRED OUTPUTS
+================
+For EACH of the four fields below, return:
+  - value             — a number, in the SAME currency unit the sheet uses
+                        (typically INR Cr; do NOT convert).
+  - source_cells      — a list of cell references like ["WATERFALL_EUR!R23"]
+                        or ["WATERFALL_EUR!R23C5"] you read to compute it.
+                        If you derived the number arithmetically, list the
+                        cells whose values feed the arithmetic.
+  - formula_used      — plain text formula, e.g.
+                        "Step 4 Total Step (R23 C5) = LP residual + GP residual = 345.96 + 86.49".
+  - confidence        — float 0..1 (your confidence the value is correct).
+  - reasoning         — 1-3 sentence justification.
+
+THE FOUR REQUIRED FIELDS
+========================
+1. carry_base
+   The eligible profit pool subject to the GP's carry-percentage split.
+   In a European waterfall with a 4-step structure:
+     carry_base = Step 4 Total Step (the residual pool after Steps 1-3).
+   If the sheet has no explicit Step 4, derive as:
+     carry_base = total_proceeds_available - return_of_capital
+                  - preferred_return - gp_catchup.
+
+2. carry_amount_gross
+   Total GP carry across all waterfall steps BEFORE any clawback
+   adjustment. In a European 4-step waterfall this equals:
+     gp_catchup (Step 3 GP Share) + GP share of Step 4 residual.
+   Cite the GP-share cells from each step.
+
+3. gp_clawback_provision
+   Excess/escrowed carry returned to LPs. KEY RULE: a clawback can only
+   exist if carry has ACTUALLY BEEN PAID to the GP and later proven
+   excessive. For a European (whole-fund) waterfall with the fund still
+   active and realised proceeds below the LP-capital-return threshold,
+   the clawback is ZERO. Only return a non-zero value if the sheet
+   explicitly shows distributed carry that exceeds the GP entitlement
+   at this as-of date.
+
+4. carry_amount_net
+   = carry_amount_gross - gp_clawback_provision.
+
+ALSO REPORT (supplementary; include only when the sheet exposes them):
+  return_of_capital_amount   — Step 1 LP Share
+  preferred_return_amount    — Step 2 LP Share (per-step amount, NOT
+                               cumulative running total)
+  gp_catchup_amount          — Step 3 GP Share
+  lp_total_return            — Sum of LP shares across all steps
+  gp_total_distribution      — Sum of GP shares across all steps
+                               (= carry_amount_gross when there is no
+                               separate LP/GP catch-up bookkeeping)
+  total_proceeds_available   — The single fund-level total proceeds cell
+                               from the sheet's Inputs section
+
+VALIDATION RULES TO SELF-CHECK BEFORE RESPONDING
+=================================================
+- The Step 1 LP Share value MUST equal the total LP committed capital
+  (Return of Capital is the FIRST step in a European waterfall).
+- Cumulative columns ("Cumulative Distributed", "Balance Remaining",
+  etc.) are RUNNING TOTALS, not per-step amounts. NEVER read a per-step
+  metric from a cumulative column.
+- carry_amount_net MUST equal carry_amount_gross - gp_clawback_provision.
+- The sum (return_of_capital + preferred_return + gp_catchup + carry_base)
+  MUST equal total_proceeds_available to within rounding (≤ 2%).
+- If a self-check fails, re-read the sheet content and correct your
+  picks before responding.
+
+RETURN STRICT JSON ONLY (no markdown fences, no prose outside JSON):
+{{
+  "metrics": {{
+    "carry_base":              {{"value": <number>, "source_cells": [...], "formula_used": "...", "confidence": <float>, "reasoning": "..."}},
+    "carry_amount_gross":      {{"value": <number>, "source_cells": [...], "formula_used": "...", "confidence": <float>, "reasoning": "..."}},
+    "gp_clawback_provision":   {{"value": <number>, "source_cells": [...], "formula_used": "...", "confidence": <float>, "reasoning": "..."}},
+    "carry_amount_net":        {{"value": <number>, "source_cells": [...], "formula_used": "...", "confidence": <float>, "reasoning": "..."}},
+    "return_of_capital_amount": {{...}} | null,
+    "preferred_return_amount":  {{...}} | null,
+    "gp_catchup_amount":        {{...}} | null,
+    "lp_total_return":          {{...}} | null,
+    "gp_total_distribution":    {{...}} | null,
+    "total_proceeds_available": {{...}} | null
+  }},
+  "overall_reasoning": "<3-5 sentence summary of waterfall mechanics applied>",
+  "sheet_used": "<primary sheet name>"
+}}
+"""
+
+    primary_sheet = next(iter(waterfall_sheets.keys()))
+    try:
+        result = _call_gemini(
+            prompt, context_label=f'Pass8-waterfall-{primary_sheet}'
+        )
+        if not isinstance(result, dict):
+            logger.warning('Pass 8 returned non-dict response')
+            return {'metrics': {}, 'overall_reasoning': 'Non-dict response',
+                    'sheet_used': primary_sheet}
+
+        raw_metrics = result.get('metrics') or {}
+        cleaned = {}
+        for key in (WATERFALL_PASS8_METRIC_KEYS
+                    + WATERFALL_PASS8_SUPPLEMENTARY_KEYS):
+            entry = raw_metrics.get(key)
+            if not isinstance(entry, dict):
+                continue
+            val = entry.get('value')
+            try:
+                val = float(val) if val is not None else None
+            except (TypeError, ValueError):
+                val = None
+            if val is None:
+                continue
+            cleaned[key] = {
+                'value': val,
+                'source_cells': entry.get('source_cells') or [],
+                'formula_used': str(entry.get('formula_used') or '')[:1000],
+                'confidence': float(entry.get('confidence') or 0.0),
+                'reasoning': str(entry.get('reasoning') or '')[:2000],
+            }
+
+        # Sanity-check identity: carry_amount_net ≈ gross - clawback.
+        # If Gemini violated it, log loudly and prefer the identity-derived
+        # value over Gemini's own carry_amount_net.
+        g = cleaned.get('carry_amount_gross', {}).get('value')
+        c = cleaned.get('gp_clawback_provision', {}).get('value')
+        n = cleaned.get('carry_amount_net', {}).get('value')
+        if g is not None and c is not None:
+            implied_net = g - c
+            if n is None or abs(n - implied_net) > max(1.0, abs(implied_net) * 0.01):
+                logger.warning(
+                    f'Pass 8 carry_amount_net inconsistent '
+                    f'(Gemini said {n}, identity g-c={implied_net}). '
+                    f'Replacing with identity-derived value.'
+                )
+                cleaned['carry_amount_net'] = {
+                    'value': implied_net,
+                    'source_cells': (
+                        cleaned.get('carry_amount_gross', {}).get('source_cells', [])
+                        + cleaned.get('gp_clawback_provision', {}).get('source_cells', [])
+                    ),
+                    'formula_used': 'carry_amount_gross - gp_clawback_provision (identity backfill)',
+                    'confidence': min(
+                        cleaned.get('carry_amount_gross', {}).get('confidence', 0.0),
+                        cleaned.get('gp_clawback_provision', {}).get('confidence', 0.0),
+                    ),
+                    'reasoning': (
+                        'Python re-derived net = gross - clawback after detecting '
+                        'an inconsistency in Gemini-reported net.'
+                    ),
+                }
+
+        out = {
+            'metrics': cleaned,
+            'overall_reasoning': str(result.get('overall_reasoning') or '')[:4000],
+            'sheet_used': str(result.get('sheet_used') or primary_sheet),
+        }
+        logger.info(
+            f'[GEMINI Pass8] compute_waterfall_metrics_directly: '
+            f'returned {len(cleaned)} metric(s) for sheet {out["sheet_used"]}'
+        )
+        for k, v in cleaned.items():
+            logger.info(
+                f'  [Pass8] {k} = {v["value"]} '
+                f'(conf={v["confidence"]:.2f}, '
+                f'src={v["source_cells"]}, '
+                f'formula="{v["formula_used"][:80]}")'
+            )
+        return out
+
+    except Exception as e:
+        logger.error(
+            f'Pass 8 compute_waterfall_metrics_directly failed: '
+            f'{type(e).__name__}: {e}'
+        )
+        raise
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Pass 9 — UNIFIED FUND METRICS COMPUTE
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# ONE Gemini call sees the raw content of every fund-level sheet, plus the
+# LPA terms, plus the canonical definition of every dashboard metric, and
+# returns ALL fund-level metric values with formulas + source cells +
+# confidence + reasoning. This is the generalisation of Pass 8 (which
+# only handled the 4 waterfall fields).
+#
+# Architectural premise (per the user's own demonstration):
+#   "If a single 1-line prompt to Gemini against the raw workbook produces
+#    100% accurate values, multi-layer extraction pipelines add no value —
+#    they only introduce indirection that loses information."
+#
+# Pass 9 replaces the catalogue-of-variables → formula-derivation chain
+# (Pass 4) for fund-level metrics. Pass 4 stays as a fallback only for
+# metrics Pass 9 declines to return. Pass 8 is subsumed by Pass 9 (it
+# remains callable for fast waterfall-only runs but is no longer wired
+# into the import flow).
+#
+# What this fixes that the previous pipeline got wrong:
+#   - Mock_14: Pass 4 used sum__navrecord__total_nav (summed 12 monthly
+#       snapshots) → carry_base of ₹44,013 Cr. Pass 9 sees the NAV sheet
+#       directly and reads the latest single row.
+#   - Trivesta: Pass 4's catalogue exposed sum__investment__total_invested
+#       and Investment.fair_value with rotten per-row values → MOIC 0.63x.
+#       Pass 9 reads the MOIC_TVPI_DPI sheet's totals row directly.
+#   - Trivesta Net IRR: Pass 4 declined; frontend fell back to cost-
+#       weighted average of per-investment IRRs → −14.2% (wrong sign).
+#       Pass 9 reads MASTER_INPUTS R91 "Net IRR = 0.1612" directly.
+
+# Fund-level metric keys Pass 9 is responsible for (superset of Pass 8's
+# waterfall keys plus all multiples / IRR / NAV / aggregate-flow keys).
+PASS9_METRIC_KEYS = (
+    # Multiples & ratios
+    'moic', 'tvpi', 'dpi', 'rvpi', 'net_irr', 'gross_irr',
+    # Aggregates / totals
+    'nav', 'total_unrealised_fair_value', 'total_realised_proceeds',
+    'total_distributions', 'total_called_capital',
+    'total_committed_capital',
+    # Waterfall (formerly Pass 8)
+    'return_of_capital_amount', 'preferred_return_amount',
+    'gp_catchup_amount', 'carry_base', 'carry_amount_gross',
+    'gp_clawback_provision', 'carry_amount_net',
+    'lp_total_return', 'gp_total_distribution',
+    'total_proceeds_available',
+)
+
+# Pass 1 sheet-domains whose content Pass 9 needs to see. We deliberately
+# EXCLUDE portfolio_companies (50-130 rows, irrelevant for fund-level
+# aggregates), KPI trackers (per-company KPIs), investor_register (LP-
+# level, not fund-level), and compliance/governance domains.
+PASS9_RELEVANT_DOMAINS = (
+    'waterfall_carry', 'nav_records', 'capital_calls', 'distributions',
+    'exits', 'fund_pl', 'fund_balance_sheet', 'fund_cashflow',
+    'scheme_lifecycle', 'commitment_summary', 'bva',
+    # Some workbooks (TrackFundAI training file) place fund-level
+    # summaries on sheets named "MOIC_TVPI_DPI", "MASTER_INPUTS",
+    # "DASHBOARD_BRIDGE" — these may classify as unknown or scheme_terms.
+    # We also include 'scheme_terms' and 'fund_overview' for those.
+    'scheme_terms', 'fund_overview',
+)
+
+
+def _canonical_metric_definitions_block():
+    """Return a structured plain-text block describing every Pass-9 metric
+    with its canonical formula, unit, and read-from-sheet hints. Single
+    source of truth for the prompt — keep it concise; Gemini sees it once
+    per call, not per metric.
+    """
+    return """
+moic              — Multiple on Invested Capital (gross). Formula:
+                    (cumulative_distributions_to_LPs + residual_NAV)
+                    / cumulative_paid_in_capital. Many workbooks
+                    report it as a single cell labelled "Gross MOIC"
+                    or "Blended Portfolio MOIC". Unit: multiple (x).
+
+tvpi              — Total Value to Paid-In. Formula:
+                    (cumulative_distributions_to_LPs + residual_fund_NAV)
+                    / cumulative_LP_paid_in_capital. Unit: multiple (x).
+                    NOTE: cost basis is NOT the denominator — paid-in
+                    (called) capital is. Many sheets confuse these.
+
+dpi               — Distributions to Paid-In = LP_distributions /
+                    paid_in_capital. Unit: multiple (x).
+
+rvpi              — Residual Value to Paid-In = residual_NAV /
+                    paid_in_capital. Unit: multiple (x).
+                    Self-check: tvpi ≈ dpi + rvpi.
+
+net_irr           — Net IRR to LPs, annualised. Computed as XIRR over
+                    LP cash flows (capital calls negative, distributions
+                    positive, terminal NAV as positive synthetic
+                    inflow at as-of date). Workbooks often pre-compute
+                    this on a cash-flow table or in a fund-summary
+                    section labelled "Net IRR". Unit: percent.
+
+gross_irr         — Same but on gross cash flows (before mgmt fees).
+                    Unit: percent.
+
+nav               — Latest single-row total fund NAV (assets − liabilities).
+                    NEVER sum NAV across monthly snapshots — pick the
+                    most recent row. Unit: currency (INR Cr typically).
+
+total_unrealised_fair_value — Sum of FV across active (un-exited)
+                    portfolio investments at the AS-OF date. Read
+                    from a totals row, not by summing per-row cells
+                    if the sheet provides a totals row.
+
+total_realised_proceeds — Cumulative exit proceeds across all exited
+                    investments. Read from the exits sheet totals row.
+
+total_distributions — Cumulative cash distributions paid to LPs across
+                    the fund's life. Read from the LP register or
+                    distributions sheet totals row.
+
+total_called_capital — Cumulative LP capital drawn from commitments.
+                    Read from the capital calls totals row or the
+                    fund-master "Total Called" cell.
+
+total_committed_capital — Sum of LP commitments at final close.
+                    Read from the fund-master commitments cell.
+
+return_of_capital_amount — Waterfall Step 1 LP Share (European).
+                    In a European waterfall, this equals total LP
+                    committed capital (or the called portion if the
+                    sheet uses called as the basis).
+
+preferred_return_amount — Waterfall Step 2 LP Share. The
+                    PER-STEP amount, NOT a cumulative running total.
+
+gp_catchup_amount — Waterfall Step 3 GP Share (in 100%-catchup
+                    structures). Cite the per-step GP-share cell.
+
+carry_base        — Profit pool subject to the final carry split
+                    (Step 4 Total Step in a 4-step European waterfall).
+
+carry_amount_gross — Total GP carry across all waterfall steps BEFORE
+                    clawback. = gp_catchup + GP_share_of_Step_4.
+
+gp_clawback_provision — Clawback escrow. ZERO when the fund has not
+                    yet over-paid carry. For interim periods with no
+                    realised carry distribution, return 0.
+
+carry_amount_net  — = carry_amount_gross − gp_clawback_provision.
+
+lp_total_return   — Sum of LP shares across all 4 waterfall steps.
+
+gp_total_distribution — Sum of GP shares across all 4 waterfall steps.
+
+total_proceeds_available — Total fund proceeds available for the
+                    waterfall (sum of Distributions + Realised Proceeds
+                    + Residual NAV in a European whole-fund model).
+"""
+
+
+def compute_fund_metrics_unified(filepath, sheet_classifications, lpa_terms,
+                                 as_of_date):
+    """Pass 9 — ONE Gemini call computes every fund-level dashboard metric.
+
+    Args:
+        filepath: path to the workbook on disk.
+        sheet_classifications: Pass 1 output, dict of
+            {sheet_name: {'primary_domain': str, ...}}.
+        lpa_terms: dict with hurdle_rate_pct, carry_pct, carry_type,
+            management_fee_pct, management_fee_basis, tenure_years,
+            sponsor_commitment_pct, vintage_year. None values are OK.
+        as_of_date: date — treated as "today" by Gemini.
+
+    Returns:
+        dict {
+            'metrics': {
+                'moic': {'value': float, 'source_cells': [...],
+                         'formula_used': str, 'confidence': float,
+                         'reasoning': str},
+                'tvpi': {...},
+                ...one entry per metric Gemini could compute...
+            },
+            'sheets_used': [str, ...],
+            'overall_reasoning': str,
+        }
+
+        Returns {'metrics': {}, 'sheets_used': []} when no relevant
+        sheets are present. Raises on hard API failure (caller decides
+        whether to fall back to Pass 4).
+    """
+    import openpyxl
+
+    # Pick relevant sheets via Pass 1 domain classification, with a
+    # graceful fallback to "all non-portfolio_companies sheets" when
+    # classifications are missing or empty (handles workbooks where
+    # Pass 1 was skipped or returned blanks).
+    relevant_sheets = []
+    if sheet_classifications:
+        for sn, cls in sheet_classifications.items():
+            domain = (
+                cls.get('primary_domain') if isinstance(cls, dict) else None
+            )
+            if domain in PASS9_RELEVANT_DOMAINS:
+                relevant_sheets.append(sn)
+
+    try:
+        wb = openpyxl.load_workbook(filepath, data_only=True, read_only=False)
+    except Exception as e:
+        raise ValueError(f'Pass 9 could not open workbook {filepath}: {e}')
+
+    # Fallback: when classification gave us nothing, include any sheet
+    # whose name hints at fund-level content. Last-resort heuristic so a
+    # missing Pass 1 result doesn't disable Pass 9 entirely.
+    if not relevant_sheets:
+        FUND_LEVEL_NAME_HINTS = (
+            'waterfall', 'nav', 'master', 'fund', 'capital_call',
+            'distribution', 'exit', 'p&l', 'pnl', 'bva', 'budget',
+            'moic', 'tvpi', 'dpi', 'irr', 'summary', 'dashboard',
+            'lifecycle', 'commitment',
+        )
+        for sn in wb.sheetnames:
+            sn_low = sn.lower().replace(' ', '_')
+            if any(h in sn_low for h in FUND_LEVEL_NAME_HINTS):
+                relevant_sheets.append(sn)
+
+    if not relevant_sheets:
+        wb.close()
+        logger.info('Pass 9: no fund-level sheets found — skipping')
+        return {'metrics': {}, 'sheets_used': [],
+                'overall_reasoning': 'No fund-level sheets present.'}
+
+    # Token budget — soft cap per sheet so a 500-row workbook doesn't
+    # blow the context. Most fund summary sheets are < 100 rows; the
+    # cash-flow / waterfall sheets that matter most are < 50.
+    PER_SHEET_ROW_CAP = 180
+    PER_SHEET_COL_CAP = 14
+
+    sheet_blocks = []
+    for sn in relevant_sheets:
+        try:
+            ws = wb[sn]
+        except KeyError:
+            continue
+        block = _dump_sheet_as_text(
+            ws, max_rows=PER_SHEET_ROW_CAP, max_cols=PER_SHEET_COL_CAP,
+        )
+        if block.strip():
+            sheet_blocks.append(f'═══ SHEET: {sn} ═══\n{block}')
+    sheets_text = '\n\n'.join(sheet_blocks)
+    try:
+        wb.close()
+    except Exception:
+        pass
+
+    # LPA terms — give Gemini the fund's actual scheme parameters so it
+    # can reproduce the hurdle / carry / management fee arithmetic.
+    lpa_lines = []
+    for k in ('hurdle_rate_pct', 'carry_pct', 'carry_type',
+              'management_fee_pct', 'management_fee_basis',
+              'tenure_years', 'sponsor_commitment_pct', 'vintage_year'):
+        v = lpa_terms.get(k) if isinstance(lpa_terms, dict) else None
+        lpa_lines.append(f'  {k}: {v}')
+    lpa_block = '\n'.join(lpa_lines)
+
+    metric_defs = _canonical_metric_definitions_block()
+
+    prompt = SHARED_MISSION_PREAMBLE + f"""You are a CFO / Chartered Accountant with 20+ years computing
+performance metrics for Indian AIFs. The workbook for ONE fund is below.
+Read EVERY sheet, identify the cells the workbook uses to report each
+metric, and compute the dashboard values with 100% ACCURACY.
+
+ABSOLUTE RULES
+==============
+1. EVERY value you return MUST be traceable to specific cells you cite
+   ("SHEET!R<row>C<col>") OR derived arithmetically from cited cells.
+   Never invent a number.
+2. When the workbook ALREADY reports a metric (e.g. a cell labelled
+   "Gross MOIC = 0.7534"), READ that cell. Do NOT recompute from raw
+   underlying data — recomputation introduces drift.
+3. For periodic-snapshot fields (NAV, Total Fund Value), use the LATEST
+   single row, NEVER the sum across months.
+4. For cumulative-flow fields (called capital, distributions, exit
+   proceeds), use the cumulative total — the TOTALS row if the sheet
+   has one.
+5. For waterfall steps, read PER-STEP cells (Step 1 LP Share, Step 2 LP
+   Share, etc.), not cumulative running totals.
+6. If the workbook contains contradictory values for the same metric
+   (e.g. one sheet says MOIC=0.75 and another says MOIC=2.0 "target"),
+   PREFER the value labelled as actual / current / realised over any
+   value labelled "target" / "benchmark" / "estimated" / "budgeted".
+7. If a metric CANNOT be computed with high confidence from the sheets
+   below, return that metric with value=null and a reason. NEVER guess.
+8. carry_amount_net MUST equal carry_amount_gross − gp_clawback_provision.
+9. tvpi ≈ dpi + rvpi (to within rounding). Flag if it doesn't.
+
+WORKBOOK SHEETS (every non-empty cell, format R<row> C<col>="<value>")
+=====================================================================
+{sheets_text}
+
+FUND LPA TERMS (from the Scheme model)
+======================================
+{lpa_block}
+
+AS-OF DATE: {as_of_date}
+
+CANONICAL METRIC DEFINITIONS
+============================
+{metric_defs}
+
+REQUIRED OUTPUT
+===============
+Return STRICT JSON only (no markdown fences). For each metric you can
+compute, include an entry. For metrics you CANNOT compute, EITHER omit
+them OR return them with value=null + reason. Schema:
+
+{{
+  "metrics": {{
+    "<metric_key>": {{
+      "value": <number> | null,
+      "source_cells": ["SHEET!R<row>C<col>", ...],
+      "formula_used": "<plain-text formula>",
+      "confidence": <float 0..1>,
+      "reasoning": "<1-3 sentences>"
+    }},
+    ...
+  }},
+  "sheets_used": ["<sheet name>", ...],
+  "overall_reasoning": "<3-5 sentences summarising how the workbook reports its fund metrics>"
+}}
+
+METRICS TO COMPUTE (return entries keyed by these exact strings):
+  moic, tvpi, dpi, rvpi, net_irr, gross_irr,
+  nav, total_unrealised_fair_value, total_realised_proceeds,
+  total_distributions, total_called_capital, total_committed_capital,
+  return_of_capital_amount, preferred_return_amount, gp_catchup_amount,
+  carry_base, carry_amount_gross, gp_clawback_provision, carry_amount_net,
+  lp_total_return, gp_total_distribution, total_proceeds_available.
+"""
+
+    primary_label = (
+        relevant_sheets[0] if len(relevant_sheets) == 1
+        else f'{relevant_sheets[0]}+{len(relevant_sheets)-1}more'
+    )
+    try:
+        result = _call_gemini(
+            prompt, context_label=f'Pass9-unified-{primary_label}'
+        )
+    except Exception as e:
+        logger.error(
+            f'Pass 9 compute_fund_metrics_unified failed: '
+            f'{type(e).__name__}: {e}'
+        )
+        raise
+
+    if not isinstance(result, dict):
+        logger.warning('Pass 9 returned non-dict response')
+        return {'metrics': {}, 'sheets_used': relevant_sheets,
+                'overall_reasoning': 'Non-dict response.'}
+
+    raw_metrics = result.get('metrics') or {}
+    cleaned = {}
+    for key in PASS9_METRIC_KEYS:
+        entry = raw_metrics.get(key)
+        if not isinstance(entry, dict):
+            continue
+        val = entry.get('value')
+        if val is None:
+            continue
+        try:
+            val = float(val)
+        except (TypeError, ValueError):
+            continue
+        cleaned[key] = {
+            'value': val,
+            'source_cells': entry.get('source_cells') or [],
+            'formula_used': str(entry.get('formula_used') or '')[:1000],
+            'confidence': float(entry.get('confidence') or 0.0),
+            'reasoning': str(entry.get('reasoning') or '')[:2000],
+        }
+
+    # Python-side identity guards. These are not heuristics — they are
+    # arithmetic facts that hold for every fund regardless of workbook
+    # format. We do NOT silently rewrite Gemini's value; we backfill ONLY
+    # when Gemini reported BOTH sides of the identity and they disagree.
+
+    # Identity 1: carry_amount_net == carry_amount_gross − gp_clawback_provision
+    g = cleaned.get('carry_amount_gross', {}).get('value')
+    c = cleaned.get('gp_clawback_provision', {}).get('value')
+    n = cleaned.get('carry_amount_net', {}).get('value')
+    if g is not None and c is not None:
+        implied_net = g - c
+        if n is None or abs(n - implied_net) > max(1.0, abs(implied_net) * 0.01):
+            logger.warning(
+                f'Pass 9 carry_amount_net inconsistent '
+                f'(Gemini said {n}, identity g-c={implied_net}). '
+                f'Replacing with identity-derived value.'
+            )
+            cleaned['carry_amount_net'] = {
+                'value': implied_net,
+                'source_cells': (
+                    cleaned.get('carry_amount_gross', {}).get('source_cells', [])
+                    + cleaned.get('gp_clawback_provision', {}).get('source_cells', [])
+                ),
+                'formula_used': (
+                    'carry_amount_gross − gp_clawback_provision '
+                    '(Python identity backfill)'
+                ),
+                'confidence': min(
+                    cleaned.get('carry_amount_gross', {}).get('confidence', 0.0),
+                    cleaned.get('gp_clawback_provision', {}).get('confidence', 0.0),
+                ),
+                'reasoning': (
+                    'Python re-derived net = gross − clawback after detecting '
+                    'an inconsistency in Gemini-reported net.'
+                ),
+            }
+
+    # Identity 2: net carry ≥ 0
+    nn = cleaned.get('carry_amount_net', {}).get('value')
+    if nn is not None and nn < 0:
+        cleaned['carry_amount_net']['value'] = 0.0
+        cleaned['carry_amount_net']['formula_used'] = (
+            'max(carry_amount_net, 0) — physical clamp; net carry cannot be negative.'
+        )
+
+    # Identity 3: gp_clawback_provision ≥ 0
+    cc = cleaned.get('gp_clawback_provision', {}).get('value')
+    if cc is not None and cc < 0:
+        cleaned['gp_clawback_provision']['value'] = 0.0
+
+    out = {
+        'metrics': cleaned,
+        'sheets_used': result.get('sheets_used') or relevant_sheets,
+        'overall_reasoning': str(result.get('overall_reasoning') or '')[:4000],
+    }
+    logger.info(
+        f'[GEMINI Pass9] compute_fund_metrics_unified: returned '
+        f'{len(cleaned)} of {len(PASS9_METRIC_KEYS)} metrics across '
+        f'{len(out["sheets_used"])} sheet(s).'
+    )
+    for k, v in cleaned.items():
+        logger.info(
+            f'  [Pass9] {k} = {v["value"]} '
+            f'(conf={v["confidence"]:.2f}, '
+            f'src={v["source_cells"][:3]}, '
+            f'formula="{v["formula_used"][:80]}")'
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Pass 3.5 helper: source disambiguation when one canonical metric has many
+# label-value candidates across the workbook
+# ---------------------------------------------------------------------------
+
+def select_authoritative_source(metric_key, metric_label, metric_description,
+                                candidates):
+    """Ask Gemini to pick the single most authoritative source for a metric.
+
+    When Pass 3.5 finds multiple cells across the workbook that semantically
+    match the same canonical metric (e.g. several rows labelled "MOIC" in
+    different sheets with different values — one being a placeholder zero in
+    a dashboard-bridge row, another being the real computed value in a
+    summary table), this function asks Gemini to reason over the full set
+    of candidates and pick the most authoritative one — or return null if
+    none of them are plausible.
+
+    No code-level heuristics filter the candidates (e.g. no "drop zeros"
+    rule). Gemini decides based on sheet context, label phrasing, and the
+    surrounding semantic story.
+
+    Args:
+        metric_key: canonical key, e.g. 'moic'
+        metric_label: canonical label, e.g. 'MOIC'
+        metric_description: canonical description from the catalogue
+        candidates: list of dicts, each with keys:
+            'label'         — the text in the label cell as it appears in Excel
+            'value'         — the numeric value found beside the label
+            'source_cell'   — 'SHEET_NAME!rowN' or 'SHEET_NAME!rowNcolM'
+            'column_header' — (optional) text in the column header cell of
+                              the same column in the same tabular section.
+                              Empty string for free-form (non-tabular) rows.
+
+    Returns:
+        dict {
+            'chosen_index':   int | None,   # 0-based index into candidates, or null
+            'reasoning':      str,
+            'confidence':     float,
+        }
+        On API failure, raises (caller can retry / fall back).
+    """
+    if not candidates:
+        return {'chosen_index': None, 'reasoning': 'no candidates', 'confidence': 0.0}
+    if len(candidates) == 1:
+        return {'chosen_index': 0, 'reasoning': 'single candidate', 'confidence': 1.0}
+
+    lines = []
+    for i, c in enumerate(candidates):
+        col_h = c.get('column_header') or ''
+        col_part = f'  column_header="{col_h}"' if col_h else ''
+        lines.append(
+            f'  [{i}] source={c.get("source_cell", "?")}  '
+            f'label="{c.get("label", "")}"{col_part}  '
+            f'value={c.get("value")}'
+        )
+    candidates_block = '\n'.join(lines)
+
+    prompt = SHARED_MISSION_PREAMBLE + f"""You are a CFO/CA with 20+ years of experience reading Indian AIF
+(Alternative Investment Fund) Excel workbooks. The workbook below contains
+MULTIPLE cells that all match the canonical fund-performance metric named
+below. Your job is to pick the ONE cell whose value is the most
+AUTHORITATIVE source for that metric — or return null if NONE of them are
+plausible.
+
+CANONICAL METRIC
+================
+key:         {metric_key}
+label:       {metric_label}
+description: {metric_description}
+
+CANDIDATE CELLS (every cell across the workbook whose label semantically
+matched this metric — for cells inside tabular sections, the column
+header is also shown so you can pick the semantically correct column,
+e.g. "GP Share" vs "LP Share" vs "Total" for a waterfall step row)
+====================================================================
+{candidates_block}
+
+REASONING GUIDANCE
+==================
+- COLUMN_HEADER IS CRITICAL FOR TABULAR ROWS. When a row label like
+  "GP Catch-Up" appears in a waterfall step table with columns
+  ["LP Share","GP Share","Total Step","Cumulative","Balance Remaining"],
+  the correct cell for canonical metric `gp_catchup_amount` is the
+  "GP Share" column — NOT the LP Share (which would be 0 for a GP-only
+  step). Read the column header alongside the label to pick the cell
+  whose (label × column) semantics match the canonical metric.
+- A dashboard-bridge / cross-reference row that simply quotes the value
+  from another sheet is LESS authoritative than the originating
+  computation row.
+- A row inside a section explicitly titled "fund-level performance
+  multiples" or equivalent is MORE authoritative than a row buried in a
+  per-company table or a placeholder/template row.
+- A value of zero, blank, or a value that contradicts the surrounding
+  context is suspicious — but DO NOT mechanically reject zero values:
+  use the label, column header, sheet name, and row position to judge
+  whether the zero is a real reported value (e.g. LP Share of a
+  GP-only catch-up step IS legitimately 0) or a placeholder.
+- If two candidates are equally authoritative and agree on the value,
+  pick the one whose sheet is the primary computation source (e.g.
+  MOIC_TVPI_DPI for MOIC/TVPI/DPI; NAV_CALC for NAV; MASTER_INPUTS for
+  fee terms; etc.).
+- If you genuinely cannot tell which is authoritative AND the candidates
+  disagree on value, return chosen_index = null so the system can
+  derive the metric from first principles instead of trusting an
+  ambiguous extracted value.
+
+RETURN STRICT JSON ONLY (no markdown fences, no commentary outside JSON):
+{{
+  "chosen_index": <integer 0-based index into the candidate list, or null>,
+  "reasoning":    "<1-3 sentence explanation of your choice>",
+  "confidence":   <float 0.0 - 1.0>
+}}
+"""
+
+    try:
+        result = _call_gemini(
+            prompt, context_label=f'Pass3.5-select-source-{metric_key}'
+        )
+        if not isinstance(result, dict):
+            return {
+                'chosen_index': None,
+                'reasoning': 'Gemini returned non-dict response',
+                'confidence': 0.0,
+            }
+        idx = result.get('chosen_index')
+        if idx is not None:
+            try:
+                idx = int(idx)
+                if idx < 0 or idx >= len(candidates):
+                    idx = None
+            except (TypeError, ValueError):
+                idx = None
+        out = {
+            'chosen_index': idx,
+            'reasoning': str(result.get('reasoning') or '').strip(),
+            'confidence': float(result.get('confidence') or 0.0),
+        }
+        logger.info(
+            f'[GEMINI Pass3.5] select_authoritative_source({metric_key}): '
+            f'{len(candidates)} candidates -> chosen_index={out["chosen_index"]} '
+            f'confidence={out["confidence"]}'
+        )
+        return out
+    except Exception as e:
+        logger.error(
+            f'Gemini select_authoritative_source API call failed for '
+            f'{metric_key}: {type(e).__name__}: {e}'
+        )
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Pass 6: Per-row metric formula derivation
+# ---------------------------------------------------------------------------
+
+def derive_per_row_formulas(model_label, available_inputs, missing_fields,
+                            sample_row_values):
+    """Ask Gemini for RANKED candidate formulas to compute each missing per-row
+    metric. Each row class (e.g. exited deals vs active deals) may have a
+    different best formula; the evaluator tries candidates in rank order
+    and the FIRST formula whose inputs are all present + non-null on a
+    given row wins.
+
+    This handles heterogeneous portfolios correctly: a precise
+    row-class-specific formula (e.g. `exitevent__irr_pct` for exited
+    deals) ranks above a more general fallback (e.g. CAGR
+    `((valuation__fair_value_of_holding / total_invested) ** (1 /
+    years_since_investment_date) - 1) * 100` for active deals).
+
+    Args:
+        model_label: e.g. 'investments.Investment'
+        available_inputs: dict of {field_name: {description, unit, sample_value}}
+            describing every field on a row that has a non-null value somewhere
+            in the dataset. Gemini uses these as variable names in its formulas.
+        missing_fields: list of {field_name: description} that need formulas.
+        sample_row_values: list of 3 fully-populated sample rows (each a dict
+            of field_name -> value) so Gemini can see the magnitude/relationship
+            between fields.
+
+    Returns:
+        {field_name: {
+            'candidate_formulas': [
+                {
+                  'rank': int,                # 1 = highest priority
+                  'formula_expression': str,  # arithmetic over available_inputs
+                  'inputs_required': [field_name, ...],
+                  'applies_when': str,        # row-class description (human)
+                  'confidence': float,
+                },
+                ...
+            ],
+            'reasoning': str,
+        }}
+        Empty dict if Gemini decides no formula is computable.
+
+    Raises on API errors (caller handles outer retry).
+    """
+    if not missing_fields:
+        return {}
+
+    inputs_block = '\n'.join(
+        f'  - {k}: {meta.get("description", "")} '
+        f'(sample={meta.get("sample_value", "?")}, '
+        f'unit={meta.get("unit", "auto")})'
+        for k, meta in available_inputs.items()
+    )
+
+    missing_block = '\n'.join(
+        f'  - {k}: {meta.get("description", k)} '
+        f'(unit={meta.get("unit", "auto")})'
+        for k, meta in missing_fields.items()
+    )
+
+    samples_block = '\n'.join(
+        f'  Row {i+1}: {row}' for i, row in enumerate(sample_row_values[:3])
+    )
+
+    prompt = SHARED_MISSION_PREAMBLE + f"""You are a CFO/CA with 20+ years of experience in Alternative Investment
+Fund accounting and Private Equity / Venture Capital metrics. The dashboard
+shows ONE ROW PER ENTITY for this model — e.g. one row per portfolio company
+investment. For SOME rows, certain fields are NULL because the Excel did not
+have those columns. Your job is to provide a RANKED LIST of formulas that
+derive each missing field from other AVAILABLE fields on the SAME row.
+
+MODEL: {model_label}
+
+AVAILABLE PER-ROW INPUTS (fields that are populated on at least some rows;
+these are the variable names you should reference in your formulas):
+{inputs_block}
+
+MISSING PER-ROW FIELDS (provide formula candidates for each):
+{missing_block}
+
+SAMPLE ROWS (so you can see realistic magnitudes and relationships):
+{samples_block}
+
+==================================================================
+CRITICAL — HETEROGENEOUS ROW CLASSES
+==================================================================
+Different rows of the same model often belong to DIFFERENT real-world
+classes that expose DIFFERENT inputs:
+
+  - Exited investments expose `exitevent__*` fields (e.g.
+    `exitevent__irr_pct`, `exitevent__proceeds`) but active ones do NOT.
+  - Active investments expose latest `valuation__*` fields but
+    fully-exited ones may not have a current valuation.
+  - Written-off rows have `write_off_date` set but `valuation__*` may be
+    zero or null.
+
+A SINGLE formula CANNOT serve all rows in a heterogeneous portfolio.
+You MUST return a RANKED list of candidate formulas per target field,
+ordered from MOST PRECISE / row-class-specific (rank 1) down to MOST
+GENERAL fallback (rank N). The Python evaluator will try them in order
+on each row and pick the FIRST candidate whose declared inputs are all
+PRESENT and NON-NULL for that row.
+
+Concrete example for `irr_pct` on `investments.Investment`:
+
+  Rank 1 — Exited deals: use the directly-reported exit IRR
+      formula:      "exitevent__irr_pct"
+      inputs:       ["exitevent__irr_pct"]
+      applies_when: "Investment has a related ExitEvent (exited deals)"
+
+  Rank 2 — Active deals: use CAGR on FV vs cost
+      formula:      "((valuation__fair_value_of_holding / total_invested) ** (1 / years_since_investment_date) - 1) * 100"
+      inputs:       ["valuation__fair_value_of_holding", "total_invested", "years_since_investment_date"]
+      applies_when: "Active investment with a current valuation and holding period > 0"
+
+This same pattern applies to every field: enumerate row classes, give
+each its most precise formula, RANK them. Never rely on a single
+row-class-specific formula — at least include a general fallback when
+one is mathematically possible from the available inputs.
+
+==================================================================
+RULES (READ CAREFULLY)
+==================================================================
+1. Match SEMANTICALLY. The field names above are the actual Django column
+   names; do NOT match by keyword. Use the description + sample values to
+   reason about WHAT each input represents and which formula is appropriate.
+
+2. Formulas must reference ONLY field names from the AVAILABLE list.
+   Do NOT invent variables. For each candidate, list `inputs_required`
+   verbatim — every variable referenced in `formula_expression` MUST
+   appear in `inputs_required`.
+
+3. Rank candidates from 1 (highest priority) onward. Higher-priority
+   formulas should be those that are:
+     (a) directly reported in the data (e.g. a pre-computed field) over
+         a derivation that has more rounding;
+     (b) row-class-specific and use inputs that are PRESENT on the
+         intended row class; followed by
+     (c) a UNIVERSAL fallback that uses inputs likely present on most
+         rows.
+
+4. INPUT NAMING CONVENTIONS YOU MUST UNDERSTAND:
+   - Direct field on the row: `field_name` (e.g. `total_invested`).
+   - Field on a related row: `<relation_name>__<field_name>` (e.g.
+     `valuation__fair_value` means the latest related Valuation's
+     fair_value). Use these freely as scalar inputs.
+   - Pre-computed years helper: `years_since_<date_field>` is the number of
+     years between that date and today, ALREADY COMPUTED as a float.
+     Use these directly — do NOT try to subtract dates yourself (the safe
+     evaluator does not support date arithmetic; raw date fields are
+     non-numeric to it).
+   - Examples of helpers you may see and use:
+       years_since_investment_date  → years held since investment_date
+       years_since_valuation__valuation_date  → years since the latest valuation
+
+5. For IRR-class metrics (annualised return %): the universal CAGR
+   formula is:
+     `((value_end / value_start) ** (1 / years) - 1) * 100`
+   Identify value_end and value_start semantically from the inputs (e.g.
+   value_end = `valuation__fair_value_of_holding` for active rows or
+   `exitevent__proceeds` for exited rows; value_start = `total_invested`).
+   Use the appropriate `years_since_<date>` helper for the time period.
+
+6. For multiple/ratio metrics: use the standard form `numerator / denominator`.
+
+7. For percentage metrics: ensure the result is in the same scale as the
+   field expects (e.g. 18.5 for 18.5%, NOT 0.185).
+
+8. If NO formula is derivable from the available inputs, OMIT that field
+   from the output. Do NOT invent values.
+
+9. The Python safe AST evaluator supports: + - * / ** % () and the
+   bare-name functions `max(...)`, `min(...)`, `abs(x)` (any arity
+   ≥ 1 for max/min). It does NOT support attribute access (e.g.
+   `.days`), conditional expressions, comparisons, or any other
+   function calls. Build formulas using ONLY arithmetic on the
+   numeric inputs provided, plus the three allowed functions.
+
+10. CONFIDENCE: assign each candidate a confidence in [0, 1] reflecting
+    how trustworthy that formula is for its target row class.
+
+RETURN STRICT JSON ONLY (no markdown fences, no commentary outside JSON):
+{{
+  "<field_name>": {{
+    "candidate_formulas": [
+      {{
+        "rank": 1,
+        "formula_expression": "<arithmetic formula referencing only available field names>",
+        "inputs_required": ["<field_name>", ...],
+        "applies_when": "<which row class this targets>",
+        "confidence": <float 0.0-1.0>
+      }},
+      {{
+        "rank": 2,
+        "formula_expression": "<...>",
+        "inputs_required": ["<...>"],
+        "applies_when": "<...>",
+        "confidence": <float 0.0-1.0>
+      }}
+    ],
+    "reasoning": "<1-3 sentence summary of why these candidates in this order>"
+  }},
+  ...
+}}
+"""
+
+    try:
+        result = _call_gemini(prompt, context_label=f'Pass6-rowformulas-{model_label}')
+        if not isinstance(result, dict):
+            logger.warning(
+                f'Pass 6 Gemini returned non-dict for {model_label}'
+            )
+            return {}
+        out = {}
+        for k, v in result.items():
+            if not isinstance(v, dict):
+                continue
+
+            # Normalise into the candidate_formulas shape, accepting both
+            # the new ranked format and the legacy single-formula format
+            # for backward compatibility.
+            raw_candidates = v.get('candidate_formulas')
+            if raw_candidates is None and 'formula_expression' in v:
+                # Legacy single-formula shape — wrap as length-1 list
+                raw_candidates = [{
+                    'rank': 1,
+                    'formula_expression': v.get('formula_expression', ''),
+                    'inputs_required': v.get('inputs_required') or [],
+                    'applies_when': v.get('applies_when') or v.get('reasoning') or '',
+                    'confidence': float(v.get('confidence') or 0.0),
+                }]
+            if not isinstance(raw_candidates, list) or not raw_candidates:
+                continue
+
+            cleaned = []
+            for c in raw_candidates:
+                if not isinstance(c, dict):
+                    continue
+                formula = (c.get('formula_expression') or '').strip()
+                if not formula:
+                    continue
+                cleaned.append({
+                    'rank': int(c.get('rank') or (len(cleaned) + 1)),
+                    'formula_expression': formula[:2000],
+                    'inputs_required': c.get('inputs_required') or [],
+                    'applies_when': (c.get('applies_when') or '')[:500],
+                    'confidence': float(c.get('confidence') or 0.0),
+                })
+            if not cleaned:
+                continue
+            cleaned.sort(key=lambda c: c['rank'])
+            out[k] = {
+                'candidate_formulas': cleaned,
+                'reasoning': (v.get('reasoning') or '')[:2000],
+            }
+
+        logger.info(
+            f'[GEMINI Pass6] derive_per_row_formulas({model_label}): '
+            f'{len(out)}/{len(missing_fields)} fields received formula sets '
+            f'(total candidates: {sum(len(o["candidate_formulas"]) for o in out.values())})'
+        )
+        return out
+    except Exception as e:
+        logger.error(
+            f'Pass 6 Gemini call failed for {model_label}: '
             f'{type(e).__name__}: {e}'
         )
         raise

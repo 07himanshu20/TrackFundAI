@@ -1,0 +1,936 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>TrackFundAI — Architecture &amp; Data Flow</title>
+<style>
+  :root {
+    --ink:   #0f172a;
+    --ink2:  #334155;
+    --ink3:  #64748b;
+    --bg:    #ffffff;
+    --soft:  #f1f5f9;
+    --line:  #cbd5e1;
+    --line2: #e2e8f0;
+    --blue:  #1d4ed8;
+    --green: #15803d;
+    --amber: #b45309;
+    --rose:  #be123c;
+    --indigo:#3730a3;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    color: var(--ink);
+    background: var(--bg);
+    margin: 0;
+    padding: 40px 56px;
+    line-height: 1.55;
+    font-size: 14.5px;
+    max-width: 1180px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  h1 {
+    font-size: 28px;
+    margin: 0 0 4px 0;
+    color: var(--ink);
+    letter-spacing: -0.4px;
+  }
+  h1 .sub {
+    display: block;
+    font-size: 14px;
+    color: var(--ink3);
+    font-weight: 400;
+    margin-top: 4px;
+  }
+  h2 {
+    font-size: 21px;
+    margin: 38px 0 12px 0;
+    color: var(--blue);
+    padding-bottom: 6px;
+    border-bottom: 2px solid var(--line);
+  }
+  h3 {
+    font-size: 17px;
+    margin: 24px 0 8px 0;
+    color: var(--indigo);
+  }
+  h4 {
+    font-size: 14px;
+    margin: 18px 0 6px 0;
+    color: var(--ink2);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  p { margin: 8px 0 12px 0; color: var(--ink2); }
+  ul, ol { margin: 6px 0 14px 22px; color: var(--ink2); }
+  li { margin: 3px 0; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0 22px 0;
+    font-size: 13px;
+  }
+  th, td {
+    border: 1px solid var(--line);
+    padding: 8px 10px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    background: var(--soft);
+    font-weight: 700;
+    color: var(--ink);
+  }
+  td.pass {
+    font-weight: 700;
+    color: var(--indigo);
+    white-space: nowrap;
+    width: 75px;
+  }
+  td.name {
+    font-weight: 600;
+    color: var(--ink);
+    width: 200px;
+  }
+  td.stage {
+    font-weight: 700;
+    color: var(--green);
+    white-space: nowrap;
+    width: 85px;
+  }
+  pre, .diagram {
+    background: #0b1220;
+    color: #e2e8f0;
+    font-family: "SF Mono", Menlo, Monaco, "Courier New", monospace;
+    font-size: 12.5px;
+    line-height: 1.45;
+    padding: 16px 18px;
+    border-radius: 8px;
+    overflow-x: auto;
+    white-space: pre;
+    margin: 14px 0;
+  }
+  .callout {
+    background: #fffbeb;
+    border: 1px solid #fcd34d;
+    border-left: 4px solid #b45309;
+    padding: 12px 14px;
+    border-radius: 6px;
+    margin: 12px 0;
+    font-size: 13.5px;
+  }
+  .callout.green {
+    background: #f0fdf4;
+    border-color: #86efac;
+    border-left-color: #15803d;
+  }
+  .callout.blue {
+    background: #eff6ff;
+    border-color: #93c5fd;
+    border-left-color: #1d4ed8;
+  }
+  .pill {
+    display: inline-block;
+    background: var(--soft);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 1px 8px;
+    font-size: 11.5px;
+    color: var(--ink2);
+    margin: 0 2px;
+  }
+  .toc {
+    background: var(--soft);
+    border: 1px solid var(--line2);
+    padding: 14px 22px;
+    border-radius: 8px;
+    margin: 18px 0 30px 0;
+  }
+  .toc ol { margin: 6px 0 0 20px; }
+  .toc a { color: var(--blue); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  code {
+    background: var(--soft);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: "SF Mono", Menlo, Monaco, monospace;
+    font-size: 12.5px;
+    color: var(--rose);
+  }
+  .footer {
+    margin-top: 50px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line);
+    font-size: 12px;
+    color: var(--ink3);
+    text-align: center;
+  }
+  @media print {
+    body { padding: 20px 28px; font-size: 12px; }
+    pre, .diagram { font-size: 10.5px; }
+    h2 { page-break-after: avoid; }
+    table { page-break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+
+<h1>
+  TrackFundAI &mdash; Architecture &amp; Data Flow
+  <span class="sub">How an Excel file uploaded by a user becomes 100&#37;-accurate dashboard numbers</span>
+</h1>
+
+<div class="toc">
+  <h4 style="margin-top:0">Contents</h4>
+  <ol>
+    <li><a href="#what">What this document is</a></li>
+    <li><a href="#table1">Table 1 &mdash; All Passes (what each Pass does)</a></li>
+    <li><a href="#table2">Table 2 &mdash; Stages (per-sheet scan)</a></li>
+    <li><a href="#dfd">Data-Flow Diagram (end-to-end)</a></li>
+    <li><a href="#flow">Flowchart &mdash; from upload to a number on the dashboard</a></li>
+    <li><a href="#apps">How the Django apps are wired (which app calls which)</a></li>
+    <li><a href="#semantic">Semantic analysis &mdash; sheets, sections, rows, columns, fields</a></li>
+    <li><a href="#variations">Handling different Excel formats (names, ordering, abstraction)</a></li>
+    <li><a href="#canonical">The canonical schema &mdash; the single source of truth</a></li>
+    <li><a href="#accuracy">How we get to 100&#37; accuracy</a></li>
+    <li><a href="#glossary">Glossary</a></li>
+  </ol>
+</div>
+
+<!-- =========================================================== -->
+<h2 id="what">1. What this document is</h2>
+<p>
+  TrackFundAI is a multi-tenant SaaS for Indian Alternative Investment Funds (AIFs). The General Partner
+  uploads a fund Excel file &mdash; any layout, any naming convention &mdash; and the system turns it into
+  a structured dashboard (Portfolio, Fund Performance, Fund Reporting, LP Management, Compliance).
+</p>
+<p>
+  The hard problem: every fund's Excel looks different. Different sheet names, different column headers,
+  different ordering, different abstractions, different units, sometimes different languages. We never
+  hardcode &ldquo;if sheet name is X do Y&rdquo;. Instead, every decision about &ldquo;what is this row/column/cell?&rdquo;
+  is made by Google Gemini against a fixed canonical schema, and every number you see is computed by Python
+  using only catalogue-validated inputs (never trusting Gemini's claimed numeric values).
+</p>
+<p>
+  The pipeline is organised as a sequence of numbered <strong>Passes</strong>. Each Pass has one job. Each Pass is
+  Gemini-driven where semantic judgement is needed, and Python-only where arithmetic is needed.
+</p>
+
+<!-- =========================================================== -->
+<h2 id="table1">2. Table 1 &mdash; All Passes (what each Pass does)</h2>
+<p>
+  A &ldquo;Pass&rdquo; is a discrete stage in the import pipeline that runs once per file (or once per
+  sheet/scheme inside a file). Decimal Passes (1.5, 2.5, 2.6, 3.5, 6.5, 6.6) are refinements that were
+  inserted between the original integer Passes as the system matured.
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Pass</th>
+      <th>Name</th>
+      <th>Role &mdash; what it does, why it exists</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="pass">Pass 1</td>
+      <td class="name">Sheet Domain Classification</td>
+      <td>
+        One Gemini call sees a preview of every sheet in the workbook and classifies each one into one of
+        ~19 fixed domains (e.g. <code>portfolio_companies</code>, <code>capital_calls</code>, <code>distributions</code>,
+        <code>nav_records</code>, <code>waterfall_carry</code>, <code>kpi_tracker</code>, <code>scheme_lifecycle</code>,
+        <code>unknown</code>). Result is a <em>sheet&nbsp;&rarr;&nbsp;domain</em> map that decides which importer
+        will read that sheet. Cover/Summary/Index sheets land in <code>unknown</code> and are never used as
+        data sources.
+      </td>
+    </tr>
+    <tr>
+      <td class="pass">Pass 1.5</td>
+      <td class="name">Section Sub-Domain Classification</td>
+      <td>
+        Many sheets contain <em>multiple</em> stacked sections (e.g. a single Compliance sheet may hold both a
+        per-company tracker and a fund-level filings table). Pass 1.5 sends every banner/section-title row
+        to Gemini in one batched call and assigns each section to a sub-domain. This is how a single Excel
+        sheet can populate two different Django models cleanly.
+      </td>
+    </tr>
+    <tr>
+      <td class="pass">Pass 2</td>
+      <td class="name">Column-Header to Canonical-Field Mapping</td>
+      <td>
+        For each classified sheet, Gemini maps the raw Excel column headers
+        (&ldquo;Cmp Nm&rdquo;, &ldquo;Sec&rdquo;, &ldquo;Cmt INR Cr&rdquo;&hellip;) to canonical field names
+        (<code>company_name</code>, <code>sector</code>, <code>commitment_amount</code>&hellip;) declared in
+        <code>canonical_schema.py</code>. Runs in parallel across sheets via <code>ThreadPoolExecutor</code> with a
+        2-layer retry. Output: per-sheet <em>raw_header&nbsp;&rarr;&nbsp;canonical_field</em> alias map.
+      </td>
+    </tr>
+    <tr>
+      <td class="pass">Pass 2.5</td>
+      <td class="name">Per-Sheet Layout Detection</td>
+      <td>
+        One Gemini call per sheet returns the sheet's internal anatomy: which rows are noise
+        (banner / disclaimer / footnote), which row is the real header, where data starts and ends, where
+        sub-tables live, and which columns are formula-derived in Excel. Replaces brittle Python heuristics
+        that broke on sheets whose first rows are not headers.
+      </td>
+    </tr>
+    <tr>
+      <td class="pass">Pass 2.6</td>
+      <td class="name">Column Semantic Role Classifier</td>
+      <td>
+        For each horizontal section Pass 2.5 found, classifies every column into a semantic role:
+        <code>per_period_amount</code>, <code>cumulative_total</code>, <code>ratio_percent</code>,
+        <code>identifier</code>, <code>metadata_text</code>, <code>derived_indicator</code>, <code>unknown</code>.
+        Pass 3.5 uses these roles to refuse to extract a per-period value from a cumulative column (which
+        was the root cause of an early Preferred-Return bug).
+      </td>
+    </tr>
+    <tr>
+      <td class="pass">Pass 3</td>
+      <td class="name">Value Classification (Label &rarr; Canonical Category)</td>
+      <td>
+        Batch Gemini classifier that maps free-text labels into canonical categories
+        (<code>kpi_types</code>, <code>pl_line_items</code>, <code>investor_types</code>, <code>nav_components</code>,
+        <code>waterfall_components</code>, etc.). Replaces ~1100 hardcoded English keywords that
+        previously broke on non-Indian English files.
+      </td>
+    </tr>
+    <tr>
+      <td class="pass">Pass 3.5</td>
+      <td class="name">Universal Explicit-Value Extractor</td>
+      <td>
+        Scans every sheet for cells whose labels match canonical fund-performance metrics
+        (<code>nav</code>, <code>moic</code>, <code>tvpi</code>, <code>net_irr</code>,
+        <code>total_called_capital</code>, etc.). When multiple cells claim to be the same metric, Gemini
+        disambiguates (e.g. picks gross vs net based on the variant tag). Writes
+        <code>DerivedMetric</code> rows with <code>formula_expression='(direct value imported)'</code> so
+        Pass 4 sees them as authoritative and won't re-derive.
+      </td>
+    </tr>
+    <tr>
+      <td class="pass">Pass 4</td>
+      <td class="name">Fund-Metric Derivation (Gemini Ranked Formulas)</td>
+      <td>
+        For each derivable metric not already extracted, asks Gemini for a <em>ranked list of candidate
+        formulas</em>. Python AST-validates that every variable in each formula exists in the actual
+        catalogue (so Gemini can't hallucinate variable names). Walks candidates top-down, evaluates the
+        first viable one using <em>only</em> catalogue values, persists with full provenance.
+        Gemini never supplies numbers &mdash; only formulas.
+      </td>
+    </tr>
+    <tr>
+      <td class="pass">Pass 5</td>
+      <td class="name">Extraction Completeness Audit</td>
+      <td>
+        Diagnostic-only. Compares the number of rows actually imported per sheet against the count Pass 1
+        said the sheet contained. Surfaces silent failures (e.g. Pass 2 returning low-confidence mappings
+        for an entire sheet). Does not modify data.
+      </td>
+    </tr>
+    <tr>
+      <td class="pass">Pass 6</td>
+      <td class="name">Per-Row Metric Completer</td>
+      <td>
+        Walks every fund-data Django model (<code>Investment</code>, <code>PortfolioCompany</code>, &hellip;), finds
+        columns that are null on most rows (e.g. <code>Investment.irr_pct</code>), and asks Gemini ONCE per
+        model for a per-row formula using the other available row fields. Evaluates the formula per row in
+        Python. Result: per-company IRR / ownership&nbsp;% / holding period get filled when derivable. Zero
+        hardcoded field lists.
+      </td>
+    </tr>
+    <tr>
+      <td class="pass">Pass 6.5</td>
+      <td class="name">Universal KPI Projection</td>
+      <td>
+        Walks the Pass 2 column-mapping for every sheet; whenever a column is mapped to a canonical KPI
+        field (<code>revenue</code>, <code>ebitda</code>, <code>headcount</code>, <code>mrr</code>, &hellip;), projects
+        those period values into <code>PortfolioKPI</code> rows. This is how the KPI matrix on the Fund
+        Performance page gets populated from any sheet that has KPI columns.
+      </td>
+    </tr>
+    <tr>
+      <td class="pass">Pass 6.6</td>
+      <td class="name">KPI Percentage Derivation</td>
+      <td>
+        After 6.5 fills raw amounts, derives missing percentage KPIs (EBITDA&nbsp;%, gross margin&nbsp;%,
+        growth&nbsp;%) using the same ranked-candidate-formula architecture as Pass 4. Solves the case
+        where Excel has &ldquo;EBITDA&rdquo; but not &ldquo;EBITDA&nbsp;%&rdquo;.
+      </td>
+    </tr>
+    <tr>
+      <td class="pass">Pass 7</td>
+      <td class="name">CarriedInterest Writer</td>
+      <td>
+        Pure writer. Reads carry / waterfall <code>DerivedMetric</code> rows produced by Passes 3.5, 4, 8 and
+        persists the <code>CarriedInterest</code> model that the Fund Reporting page reads. Also runs a
+        mathematical identity check (Return of Capital + Preferred Return + GP Catch-up + Carry Base
+        &asymp; Total Proceeds) and logs the variance so audit can surface bad component picks.
+      </td>
+    </tr>
+    <tr>
+      <td class="pass">Pass 8</td>
+      <td class="name">Direct Waterfall Computation</td>
+      <td>
+        For waterfall sheets (European or American model) we send the <em>entire</em> sheet content as a
+        labelled <code>R&lt;row&gt;&nbsp;C&lt;col&gt;="&lt;value&gt;"</code> grid, plus LPA terms and capital
+        flows, in ONE Gemini call. Gemini returns the 4 primary metrics
+        (<code>carry_base</code>, <code>carry_amount_gross</code>, <code>gp_clawback_provision</code>,
+        <code>carry_amount_net</code>) with source-cell citations and reasoning. Python sanity-checks
+        <code>net == gross &minus; clawback</code> and backfills if Gemini contradicts itself. Born from the
+        observation that one prompt with the full sheet outperformed the layered pipeline.
+      </td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout green">
+  <strong>Two architectural rules that apply to every Pass:</strong>
+  <ul style="margin:6px 0 0 18px">
+    <li><strong>No hardcoded keywords / sheet names / column names</strong> &mdash; every semantic decision is Gemini's.</li>
+    <li><strong>Gemini never generates numbers that reach the database.</strong> Gemini proposes formulas; Python evaluates them using only values present in the catalogue. Any formula referencing an unknown variable is rejected.</li>
+  </ul>
+</div>
+
+<!-- =========================================================== -->
+<h2 id="table2">3. Table 2 &mdash; Stages (per-sheet scan)</h2>
+<p>
+  When an Excel file is uploaded, each individual sheet inside it is taken through <strong>three Gemini
+  Stages</strong>. The Passes from Table 1 are organised into these three Stages.
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Stage</th>
+      <th>Name</th>
+      <th>Purpose</th>
+      <th>Passes used</th>
+      <th>Output</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="stage">Stage 1</td>
+      <td class="name">Sheet Identity</td>
+      <td>Decide what kind of sheet this is, in business terms.</td>
+      <td>Pass&nbsp;1<br/>Pass&nbsp;1.5</td>
+      <td>
+        Sheet&nbsp;&rarr;&nbsp;domain map (e.g. &ldquo;Tab&nbsp;5 is a <code>capital_calls</code> sheet&rdquo;).
+        Section&nbsp;&rarr;&nbsp;sub-domain map for multi-section sheets.
+      </td>
+    </tr>
+    <tr>
+      <td class="stage">Stage 2</td>
+      <td class="name">Sheet Structure</td>
+      <td>Understand the sheet's internal anatomy &mdash; where data lives and what each column means.</td>
+      <td>Pass&nbsp;2.5<br/>Pass&nbsp;2<br/>Pass&nbsp;2.6</td>
+      <td>
+        Layout map (header row, data range, sub-tables, derived columns) &middot;
+        Raw-header&nbsp;&rarr;&nbsp;canonical-field alias map &middot;
+        Column semantic-role map.
+      </td>
+    </tr>
+    <tr>
+      <td class="stage">Stage 3</td>
+      <td class="name">Sheet Values</td>
+      <td>Extract or derive every numeric/text value the sheet contributes to the dashboard.</td>
+      <td>Pass&nbsp;3<br/>Pass&nbsp;3.5<br/>Pass&nbsp;4<br/>Pass&nbsp;6 / 6.5 / 6.6<br/>Pass&nbsp;8 (waterfall only)</td>
+      <td>
+        Rows written to Django models (PortfolioCompany, Investment, Investor, Commitment, CapitalCall,
+        Distribution, NAVRecord, PortfolioKPI, CarriedInterest, &hellip;) plus DerivedMetric rows
+        with full provenance.
+      </td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout blue">
+  <strong>Why Stages, not just Passes?</strong> &mdash; Stages are the user-facing mental model:
+  &ldquo;identify the sheet, then understand its shape, then read its values&rdquo;. Passes are the engineering
+  units: each Pass is one Gemini API contract with its own prompt, validator, and retry policy. Multiple Passes
+  collaborate inside a Stage.
+</div>
+
+<!-- =========================================================== -->
+<h2 id="dfd">4. Data-Flow Diagram (end-to-end)</h2>
+
+<div class="diagram">
+                  ┌──────────────────────────────────────────────────────────┐
+                  │                  USER (GP / Fund Admin)                  │
+                  │       Drops fund Excel into the Data Ingestion page       │
+                  └─────────────────────────┬────────────────────────────────┘
+                                            │ HTTPS multipart/form-data
+                                            ▼
+            ┌─────────────────────────────────────────────────────────────────┐
+            │  Frontend  (frontend/data-upload.js, v5-dashboard.js)           │
+            │     POST /api/dataimport/jobs/    (file + organization_id)      │
+            └─────────────────────────────┬───────────────────────────────────┘
+                                          │ JWT-authenticated REST
+                                          ▼
+       ┌──────────────────────────────────────────────────────────────────────┐
+       │  Django app: dataimport                                              │
+       │   • Saves the upload as ImportFile (multi-tenant: org FK)            │
+       │   • Creates ImportJob with status=queued                             │
+       │   • Calls FundImportService.import_fund(file, org, user)             │
+       └─────────────────────────────┬────────────────────────────────────────┘
+                                     │  in-process (sync) or via Celery worker
+                                     ▼
+   ┌──────────────────────────────────────────────────────────────────────────┐
+   │                       FundImportService Orchestrator                     │
+   │                                                                          │
+   │  ┌──────────── STAGE 1 — Sheet Identity ────────────┐                    │
+   │  │   Pass 1   sheet → domain      (1 Gemini call)   │                    │
+   │  │   Pass 1.5 section → sub-domain (1 batched call) │                    │
+   │  └──────────────────────────┬──────────────────────┘                    │
+   │                              │                                           │
+   │  ┌──────────── STAGE 2 — Sheet Structure ───────────┐                    │
+   │  │   Pass 2.5  layout per sheet  (1 call / sheet)   │                    │
+   │  │   Pass 2    column mapping    (parallel pool)    │                    │
+   │  │   Pass 2.6  column roles      (1 call / section) │                    │
+   │  └──────────────────────────┬──────────────────────┘                    │
+   │                              │                                           │
+   │  ┌──────────── STAGE 3 — Sheet Values ──────────────┐                    │
+   │  │   Pass 3 / 3.5  extract canonical values         │                    │
+   │  │   Pass 4        derive missing metrics (formulas)│                    │
+   │  │   Pass 8        direct waterfall (1 call / WF)   │                    │
+   │  │   Pass 6 / 6.5 / 6.6  per-row + KPI completers   │                    │
+   │  │   Pass 7        CarriedInterest writer           │                    │
+   │  │   Pass 5        completeness audit (diagnostic)  │                    │
+   │  └──────────────────────────┬──────────────────────┘                    │
+   └─────────────────────────────┼──────────────────────────────────────────┘
+                                 │  update_or_create  (idempotent writes)
+                                 ▼
+   ┌──────────────────────────────────────────────────────────────────────────┐
+   │                    PostgreSQL / SQLite (multi-tenant)                    │
+   │                                                                          │
+   │   funds         → Fund, Scheme, Entity, FundCategory                     │
+   │   investments   → PortfolioCompany, Investment, Tranche, Valuation,      │
+   │                   KPI / PortfolioKPI, ExitEvent                          │
+   │   lp            → Investor, Commitment, CapitalCall, Distribution,       │
+   │                   LPCapitalAccount                                       │
+   │   accounting    → NAVRecord, CarriedInterest, FundLedger, FeeSchedule    │
+   │   compliance    → SEBIReport, AMLDueDiligence, ComplianceCalendar        │
+   │   dataimport    → ImportFile, ImportJob, DerivedMetric (provenance)      │
+   └─────────────────────────────┬──────────────────────────────────────────┘
+                                 │  GET /api/&lt;app&gt;/&lt;resource&gt;
+                                 │  (JWT, fund=&lt;id&gt; query)
+                                 ▼
+            ┌─────────────────────────────────────────────────────────────────┐
+            │     Frontend Dashboard  (Vanilla JS SPA)                        │
+            │                                                                 │
+            │   • Overview   • Fund Performance   • Fund Reporting            │
+            │   • LP Management   • Compliance   • AI Analytics               │
+            │                                                                 │
+            │  Each KPI tile / row links back to DerivedMetric → provenance   │
+            │  panel showing formula + reasoning + source cells + confidence  │
+            └─────────────────────────────────────────────────────────────────┘
+</div>
+
+<!-- =========================================================== -->
+<h2 id="flow">5. Flowchart &mdash; from Excel upload to a number on the dashboard</h2>
+
+<div class="diagram">
+   [1]  User uploads fund_xyz.xlsx
+          │
+          ▼
+   [2]  POST /api/dataimport/jobs/   →  ImportFile + ImportJob created
+          │
+          ▼
+   [3]  STAGE 1 (Sheet Identity)
+          ├── Pass 1   :  for each sheet, ask Gemini "which domain is this?"
+          │              → {Sheet1: portfolio_companies, Sheet2: capital_calls, ...}
+          └── Pass 1.5 :  for multi-section sheets, classify each section
+                         → {Sheet5/section_A: compliance_per_company,
+                            Sheet5/section_B: fund_filings, ...}
+          │
+          ▼
+   [4]  STAGE 2 (Sheet Structure)
+          ├── Pass 2.5 :  per sheet, find headers / data range / sub-tables
+          │              → layout map
+          ├── Pass 2   :  per sheet, map column headers to canonical fields
+          │              (runs in parallel across sheets via ThreadPoolExecutor)
+          │              → "Cmp Nm" → company_name, "Cmt INR Cr" → commitment_amount
+          └── Pass 2.6 :  for each section, classify every column's semantic role
+                         → "Distribution INR Cr" is per_period_amount, not cumulative
+          │
+          ▼
+   [5]  STAGE 3 (Sheet Values)
+          │
+          ├── Read rows using the layout map; for each row:
+          │     a. Apply Pass 2 alias map to find values by canonical field
+          │     b. Use _is_junk_row() to skip subtotal / total / header / serial rows
+          │     c. update_or_create() into the target Django model
+          │
+          ├── Pass 3.5 : scan all sheets for cells matching canonical fund metrics
+          │              (NAV, MOIC, TVPI, IRR, called capital, ...).
+          │              Multi-candidate → Gemini disambiguates.
+          │              Writes DerivedMetric with formula = "(direct value imported)"
+          │              and inputs_used = {source_cell, source_label, source_sheet}
+          │
+          ├── Pass 4   : for metrics still missing, Gemini returns RANKED candidate
+          │              formulas. Python:
+          │                 ① AST-extracts the variable names from each formula
+          │                 ② rejects any formula referencing a variable that is NOT
+          │                    in the actual catalogue (hallucination guard)
+          │                 ③ evaluates the highest-ranked surviving formula using
+          │                    ONLY catalogue values, persists with full provenance
+          │
+          ├── Pass 8   : if any sheet is a waterfall, send the entire sheet content
+          │              + LPA terms + capital flows in ONE Gemini call.
+          │              Gemini returns 4 primary metrics with source-cell citations.
+          │              Python sanity-check: net == gross − clawback (backfill if not).
+          │
+          ├── Pass 6 / 6.5 / 6.6 : fill per-row null columns + project KPI columns into
+          │                       PortfolioKPI rows + derive percentage KPIs
+          │
+          ├── Pass 7   : read DerivedMetric carry rows → write CarriedInterest table
+          │              + run mathematical identity check on waterfall components
+          │
+          └── Pass 5   : diagnostic audit of extraction completeness
+          │
+          ▼
+   [6]  ImportJob.status = completed
+          │
+          ▼
+   [7]  Frontend polls /api/dataimport/jobs/&lt;id&gt;/status/  →  done
+          │
+          ▼
+   [8]  Frontend reloads dashboard panels via GET /api/&lt;app&gt;/&lt;resource&gt;?fund=&lt;id&gt;
+          The Carry &amp; Clawback Analysis, MOIC tile, Capital-Call table, etc. all
+          render from the rows the orchestrator wrote.
+          │
+          ▼
+   [9]  User clicks any KPI tile  →  side panel opens, fetched from
+          /api/dataimport/derived-metrics/?fund=&lt;id&gt;  →  shows the EXACT formula
+          Gemini chose, the source cells, the reasoning, and the confidence.
+</div>
+
+<!-- =========================================================== -->
+<h2 id="apps">6. How the Django apps are wired</h2>
+
+<p>
+  TrackFundAI is built as ~20 Django apps (folders inside <code>backend/</code>), each owning one bounded
+  context. They are <strong>not</strong> independent services &mdash; they share one database and call each
+  other via Python imports, not via HTTP. The HTTP boundary is between the frontend SPA and the backend.
+</p>
+
+<h3>App responsibility map</h3>
+<table>
+  <thead>
+    <tr><th>App</th><th>Owns these models</th><th>Reads from</th><th>Exposed at</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>accounts</code></td><td>Organization, User, FundAccess</td><td>&mdash;</td><td><code>/api/auth/</code></td></tr>
+    <tr><td><code>funds</code></td><td>FundCategory, Fund, Scheme, Entity</td><td>accounts</td><td><code>/api/funds/</code></td></tr>
+    <tr><td><code>investments</code></td><td>PortfolioCompany, Investment, Tranche, Valuation, KPI, PortfolioKPI, ExitEvent</td><td>funds, accounts</td><td><code>/api/portfolio-companies/</code>, <code>/api/investments/</code>, <code>/api/kpis/</code></td></tr>
+    <tr><td><code>lp</code></td><td>Investor, Commitment, CapitalCall, Distribution, LPCapitalAccount</td><td>funds, accounts</td><td><code>/api/lp/&hellip;</code></td></tr>
+    <tr><td><code>accounting</code></td><td>NAVRecord, CarriedInterest, FundLedger, ManagementFeeSchedule</td><td>funds, lp, investments</td><td><code>/api/accounting/&hellip;</code></td></tr>
+    <tr><td><code>portfolio</code></td><td>PortfolioSnapshot, PortfolioNode (dashboard hierarchy cache)</td><td>investments, accounting, lp</td><td><code>/api/portfolio/</code></td></tr>
+    <tr><td><code>compliance</code></td><td>SEBIReport, AMLDueDiligence, ComplianceCalendar, SEBICircular</td><td>funds, lp</td><td><code>/api/compliance/&hellip;</code></td></tr>
+    <tr><td><code>dataimport</code></td><td>ImportFile, ImportJob, DerivedMetric</td><td><em>writes to all of the above</em></td><td><code>/api/dataimport/&hellip;</code></td></tr>
+    <tr><td><code>api</code></td><td>&mdash; (no models; aggregator)</td><td>investments, accounting, lp, portfolio</td><td><code>/api/portfolio/&hellip;</code>, legacy</td></tr>
+    <tr><td><code>chatbot</code></td><td>&mdash;</td><td>investments, accounting, lp + Gemini</td><td><code>/api/chatbot/</code></td></tr>
+    <tr><td><code>reporting</code></td><td>ReportRun</td><td>everything (read-only)</td><td><code>/api/reporting/&hellip;</code></td></tr>
+    <tr><td><code>marketdata</code></td><td>PriceTick, FXRate</td><td>investments (for ticker lookup)</td><td><code>/api/market-data/&hellip;</code></td></tr>
+    <tr><td><code>riskscore</code></td><td>RiskScore</td><td>investments, accounting</td><td><code>/api/risk-scores/</code></td></tr>
+    <tr><td><code>ic_workflow</code></td><td>Deal, ICVote</td><td>funds, accounts</td><td><code>/api/ic/&hellip;</code></td></tr>
+    <tr><td><code>fundclose</code></td><td>FundClose, CloseAllocation</td><td>funds, lp</td><td><code>/api/fund-close/&hellip;</code></td></tr>
+    <tr><td><code>tds</code></td><td>TDSEvent</td><td>lp, accounting</td><td><code>/api/tds/&hellip;</code></td></tr>
+    <tr><td><code>mis_consolidation</code></td><td>MISReport</td><td>investments (KPIs)</td><td><code>/api/mis/&hellip;</code></td></tr>
+    <tr><td><code>marketresearch</code></td><td>ResearchNote</td><td>investments</td><td><code>/api/research/&hellip;</code></td></tr>
+    <tr><td><code>emailingestion</code></td><td>InboundEmail</td><td>dataimport (re-ingestion)</td><td><code>/api/email-ingestion/&hellip;</code></td></tr>
+    <tr><td><code>documents</code></td><td>DocumentFile</td><td>accounts</td><td><code>/api/documents/&hellip;</code></td></tr>
+    <tr><td><code>notifications</code></td><td>Notification</td><td>accounts</td><td><code>/api/notifications/&hellip;</code></td></tr>
+  </tbody>
+</table>
+
+<h3>Dependency direction (who depends on whom)</h3>
+<div class="diagram">
+                              ┌──────────┐
+                              │ accounts │  (foundational)
+                              └─────┬────┘
+                                    │
+                              ┌─────▼────┐
+                              │   funds  │
+                              └─────┬────┘
+                ┌───────────────────┼───────────────────┐
+                │                   │                   │
+           ┌────▼───┐         ┌─────▼─────┐       ┌─────▼─────┐
+           │   lp   │         │investments│       │compliance │
+           └────┬───┘         └─────┬─────┘       └───────────┘
+                │                   │
+                └───────┬───────────┘
+                        │
+                  ┌─────▼──────┐
+                  │ accounting │ (NAV, carry, ledger, fees)
+                  └─────┬──────┘
+                        │
+                  ┌─────▼──────┐
+                  │  portfolio │ (snapshot + node hierarchy for dashboard)
+                  └────────────┘
+
+       ┌────────────────────────────────────────────────────────────┐
+       │  dataimport  — orchestrator; writes to ALL apps above       │
+       │  (Pass 1 → Pass 8) using update_or_create for idempotency  │
+       └────────────────────────────────────────────────────────────┘
+
+       ┌────────────────────────────────────────────────────────────┐
+       │  api / chatbot / reporting  — READ-ONLY aggregators        │
+       │     over funds, investments, lp, accounting, portfolio     │
+       └────────────────────────────────────────────────────────────┘
+</div>
+
+<h3>Frontend &harr; backend communication pattern</h3>
+<p>
+  The frontend is a vanilla-JS SPA &mdash; <code>frontend/index.html</code> is the shell, and every page
+  is a <code>&lt;div class="v5-page"&gt;</code> swapped in by JS. All backend calls go through
+  <code>Auth.apiGet(url)</code> / <code>Auth.apiPost(url, body)</code> in <code>auth.js</code>, which
+  attaches the JWT and handles refresh.
+</p>
+<ul>
+  <li><strong>Read pattern:</strong> page mounts &rarr; <code>Auth.apiGet('/api/&lt;app&gt;/&lt;resource&gt;/?fund=&lt;id&gt;')</code> &rarr; render rows.</li>
+  <li><strong>Write pattern:</strong> the only writes from the SPA are file uploads to <code>/api/dataimport/jobs/</code>. Everything else (KPIs, NAV, carry) is computed by the import pipeline.</li>
+  <li><strong>Provenance pattern:</strong> click any KPI tile &rarr; the side panel reads <code>/api/dataimport/derived-metrics/?fund=&lt;id&gt;</code> and shows formula, reasoning, source cell, confidence for that metric.</li>
+</ul>
+
+<!-- =========================================================== -->
+<h2 id="semantic">7. Semantic analysis &mdash; sheets, sections, rows, columns, fields</h2>
+
+<p>
+  &ldquo;Semantic analysis&rdquo; in TrackFundAI means: <em>understanding what something MEANS, not what it
+  LOOKS like</em>. The same data can appear in a thousand layouts. We solve this with Gemini at each level
+  of granularity:
+</p>
+
+<table>
+  <thead>
+    <tr><th>Granularity</th><th>The question we ask Gemini</th><th>Result</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Sheet</strong></td>
+      <td>&ldquo;Given the first ~40 rows and the sheet name, which of these 19 domains is this sheet?&rdquo;</td>
+      <td>One of: <code>portfolio_companies</code>, <code>capital_calls</code>, <code>distributions</code>,
+        <code>nav_records</code>, <code>waterfall_carry</code>, <code>kpi_tracker</code>,
+        <code>scheme_lifecycle</code>, <code>investor_register</code>, <code>fund_pl</code>,
+        <code>fund_balance_sheet</code>, <code>fund_cashflow</code>, <code>compliance</code>,
+        <code>governance</code>, <code>exits</code>, <code>fees_expenses</code>,
+        <code>commitment_summary</code>, <code>bva</code>, <code>scheme_terms</code>, <code>unknown</code>.</td>
+    </tr>
+    <tr>
+      <td><strong>Section</strong> (banner row inside a sheet)</td>
+      <td>&ldquo;Inside this multi-section sheet, what is the sub-domain of each banner?&rdquo;</td>
+      <td>Sub-domain per section, e.g. one Compliance sheet may have section_A=per_company_filings and section_B=fund_filings.</td>
+    </tr>
+    <tr>
+      <td><strong>Layout</strong> (header row, data range)</td>
+      <td>&ldquo;Which rows are noise, which row is the real header, where does data start/end, are there multiple sub-tables?&rdquo;</td>
+      <td>Layout map per sheet. Used as the PRIMARY row reader &mdash; replaces the older Python heuristic that broke on disclaimer/banner rows.</td>
+    </tr>
+    <tr>
+      <td><strong>Column header</strong></td>
+      <td>&ldquo;Which canonical field is &lsquo;Cmt INR Cr&rsquo;?&rdquo;</td>
+      <td>Canonical field name from <code>canonical_schema.py</code> (<code>commitment_amount</code>). Built per sheet, cached.</td>
+    </tr>
+    <tr>
+      <td><strong>Column role</strong> (semantic)</td>
+      <td>&ldquo;Is this column a per-period value, a cumulative total, a ratio, an identifier, or metadata?&rdquo;</td>
+      <td>Semantic role per column. Pass 3.5 uses this to refuse mis-extractions like &ldquo;don't extract a per-period amount from a cumulative column&rdquo;.</td>
+    </tr>
+    <tr>
+      <td><strong>Row</strong></td>
+      <td>&ldquo;Is this row a real entity, a subtotal/total, a repeated header, a serial-number row, or a footnote?&rdquo;</td>
+      <td><code>real_entity</code> rows are written; everything else is junk and skipped.</td>
+    </tr>
+    <tr>
+      <td><strong>Cell value / label</strong></td>
+      <td>&ldquo;Which canonical category does the label &lsquo;Cost of Sales&rsquo; / &lsquo;COGS&rsquo; / &lsquo;Direct Cost&rsquo; map to?&rdquo;</td>
+      <td>Canonical key (<code>cogs</code>). Replaces ~1100 hardcoded keyword aliases that broke on non-Indian English.</td>
+    </tr>
+    <tr>
+      <td><strong>Metric (fund-level)</strong></td>
+      <td>&ldquo;Among these 3 cells all labelled &lsquo;NAV&rsquo;, which is the authoritative one (gross or net)?&rdquo;</td>
+      <td>Authoritative cell index + variant tag, written into DerivedMetric with full provenance.</td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- =========================================================== -->
+<h2 id="variations">8. Handling different Excel formats (names, ordering, abstraction)</h2>
+
+<h3>Different sheet names</h3>
+<p>
+  We never key off sheet names. Pass 1 sees the content of every sheet and decides its domain. A sheet named
+  &ldquo;Tab&nbsp;5&rdquo;, &ldquo;Cap Calls&rdquo;, or &ldquo;Drawdowns FY24&rdquo; can all be classified
+  as <code>capital_calls</code>. A sheet named &ldquo;Capital Calls&rdquo; that actually contains a summary
+  table will be re-classified by what its content looks like, not by the name.
+</p>
+
+<h3>Different column names</h3>
+<p>
+  Pass 2 reads the actual column headers + a few sample data rows and emits a mapping into canonical fields.
+  &ldquo;Cmp Nm&rdquo;, &ldquo;Investee Co&rdquo;, &ldquo;Portfolio Company&rdquo; all resolve to
+  <code>company_name</code>. The Python code reads values via <code>_find_col_str(row, &#39;Company Name&#39;, &#39;Company&#39;, &#39;Name&#39;)</code>
+  which uses a 5-pass fuzzy matcher (exact &rarr; case-insensitive &rarr; suffix &rarr; loose substring with
+  guards) on top of Gemini's alias map.
+</p>
+
+<h3>Different ordering of sheets / sections</h3>
+<p>
+  Order doesn't matter. The orchestrator iterates the sheet&nbsp;&rarr;&nbsp;domain map and dispatches each
+  sheet to its domain-specific importer regardless of position in the workbook. Within a sheet, Pass 1.5 finds
+  every section banner so a fund-level summary above per-company rows (or vice-versa) is handled identically.
+</p>
+
+<h3>Different architectures (single-sheet vs multi-sheet vs nested)</h3>
+<ul>
+  <li><strong>One sheet per domain:</strong> classical case. Each sheet is independently imported.</li>
+  <li><strong>Multiple sheets contributing to one domain:</strong> e.g. one Excel may have separate sheets for
+    Cat-I, Cat-II, Cat-III investors. All three classify as <code>investor_register</code>; importer iterates
+    all of them and de-duplicates by <code>(organization, pan)</code>.</li>
+  <li><strong>One sheet hosting multiple domains:</strong> Pass 1.5 splits it into sub-domains and each
+    section is dispatched independently.</li>
+  <li><strong>Vertical (key-value) layout:</strong> e.g. Scheme Terms sheets that read "Hurdle Rate: 8%".
+    <code>extract_structured_metadata</code> handles these without confusing them for tabular sheets.</li>
+</ul>
+
+<h3>Different abstractions (gross vs net, fund vs scheme, ₹ Crore vs $ Million)</h3>
+<ul>
+  <li>Metrics that have multiple variants (gross vs net) are tagged at extraction via
+    <code>classify_metric_variant</code>. The Variant Tag travels with the DerivedMetric, and downstream
+    readers (carry engine, dashboard) honour a <code>variant_default</code> declared in the canonical schema.</li>
+  <li>Currency + numeric unit are detected per sheet via <code>detect_currency_and_unit</code>: returns
+    <code>{currency: 'INR', unit_multiplier: 10000000, unit_label: 'Cr'}</code>. Values are stored normalised
+    so &ldquo;₹120 Cr&rdquo; and &ldquo;1.2 bn&rdquo; both land as the same canonical number.</li>
+  <li>Fund-level vs Scheme-level: every model has a <code>scheme</code> FK; fund-level aggregates are computed
+    on read by summing across the fund's schemes.</li>
+</ul>
+
+<h3>Different arbitration (multiple cells claim to be the same metric)</h3>
+<p>
+  When Pass 3.5 finds N cells all labelled like &ldquo;NAV&rdquo;:
+</p>
+<ol>
+  <li>If all N cells hold the <em>same</em> value &rarr; pick the first deterministically (no Gemini call).</li>
+  <li>If they disagree &rarr; call <code>select_authoritative_source(metric, candidates)</code>; Gemini returns
+    a <code>chosen_index</code> with reasoning.</li>
+  <li>If Gemini declines to choose &rarr; the metric is left for Pass 4 to derive from first principles instead
+    of guessing.</li>
+</ol>
+
+<!-- =========================================================== -->
+<h2 id="canonical">9. The canonical schema &mdash; the single source of truth</h2>
+
+<p>
+  <code>backend/dataimport/canonical_schema.py</code> is the dictionary of every domain, field, value
+  category, enum, and metric the system can ever talk about. Nothing else in the code hardcodes a name &mdash;
+  every other file references this catalogue.
+</p>
+
+<h3>What the canonical schema defines</h3>
+<ul>
+  <li><code>SHEET_DOMAINS</code> &mdash; the 19 domains a sheet can be classified as (Pass 1's allowed outputs).</li>
+  <li><code>DOMAIN_FIELDS</code> &mdash; for each domain, the canonical fields (with description, type, units)
+    that Pass 2 is allowed to map to.</li>
+  <li><code>CANONICAL_VALUE_CATEGORIES</code> &mdash; for category-based classification: e.g.
+    <code>pl_line_items</code> declares <code>revenue</code>, <code>cogs</code>, <code>ebitda</code>, &hellip;
+    with descriptions. Used by Pass 3 to map a label to a category.</li>
+  <li><code>CANONICAL_ENUM_TYPES</code> &mdash; closed enum sets: <code>exit_type</code>,
+    <code>distribution_type</code>, <code>valuation_methodology</code>, <code>quoted_status</code>, &hellip;</li>
+  <li><code>CANONICAL_METADATA_FIELDS</code> &mdash; for vertical key-value layouts:
+    <code>scheme_lifecycle</code> (tenure, hurdle, carry, fee &hellip;) and <code>fund_identity</code>
+    (SEBI reg, PAN, GSTIN, GIFT City flag &hellip;).</li>
+  <li><code>DERIVABLE_FUND_METRICS</code> &mdash; for Pass 4: per metric, its label, description, unit,
+    variant_default, and which inputs Gemini is allowed to assume.</li>
+  <li><code>VALUE_TYPE_TO_ALLOWED_COLUMN_ROLES</code> &mdash; the compatibility matrix Pass 3.5 uses to refuse
+    extracting (say) a per-period amount from a cumulative-total column.</li>
+</ul>
+
+<h3>How data is mapped to the canonical schema</h3>
+<div class="diagram">
+   Raw Excel       Gemini Pass that decides         Canonical schema entry           Storage
+   ─────────       ─────────────────────────         ───────────────────────         ────────
+   sheet  ──────►  Pass 1 (classify_sheets)  ──────► SHEET_DOMAINS key       ──────► (in-memory route)
+   section ─────►  Pass 1.5 (classify_sections)────► SHEET_DOMAINS sub-key  ──────► (in-memory route)
+   header  ─────►  Pass 2 (map_columns_for_sheet)──► DOMAIN_FIELDS[field]   ──────► ImportFile.column_mapping
+   label   ─────►  Pass 3 (classify_labels)  ──────► CANONICAL_VALUE_CAT…   ──────► PortfolioKPI, P&amp;L row
+   enum    ─────►  Pass 3 (classify_enum_values)──► CANONICAL_ENUM_TYPES   ──────► ExitEvent.exit_type, etc.
+   metric  ─────►  Pass 3.5 + Pass 4 + Pass 8 ────► DERIVABLE_FUND_METRICS ──────► DerivedMetric (provenance)
+</div>
+
+<p>
+  The canonical schema is the &ldquo;contract&rdquo; every Pass is held to: Gemini's outputs are validated
+  against it. If Gemini returns a domain that's not in <code>SHEET_DOMAINS</code> or a field that's not in
+  <code>DOMAIN_FIELDS</code>, the orchestrator rejects the response and either retries or falls through.
+</p>
+
+<!-- =========================================================== -->
+<h2 id="accuracy">10. How we get to 100&#37; accuracy</h2>
+
+<p>The accuracy properties are enforced by architectural rules, not by tests alone:</p>
+
+<ol>
+  <li><strong>Gemini judges, Python computes.</strong> Gemini is allowed to choose <em>which formula</em>
+    applies and <em>which cell</em> is authoritative. Python is the only thing that performs arithmetic, and
+    only on values that exist in the catalogue.</li>
+  <li><strong>Hallucination guard (AST validator).</strong> Every formula Gemini returns is parsed into an
+    Abstract Syntax Tree. We extract every variable name. If any variable is not in the actual catalogue, the
+    formula is rejected and we try the next ranked candidate.</li>
+  <li><strong>Idempotency.</strong> All writes use <code>update_or_create</code> keyed by natural identifiers
+    (e.g. <code>(organization, pan)</code> for Investor, <code>(scheme, metric_key, variant)</code> for
+    DerivedMetric). Re-importing the same file produces the same database state &mdash; no duplicates, no
+    drift.</li>
+  <li><strong>No phantom rows.</strong> Every importer calls <code>_is_junk_row(name)</code> before writing.
+    Subtotal / total / header / serial / footnote rows are filtered out by Pass 3 classification (not by
+    hardcoded keywords).</li>
+  <li><strong>No missing rows.</strong> Pass 2.5's layout map gives explicit <code>data_start</code> and
+    <code>data_end</code> bounds. Blank rows between groups are skipped, not treated as terminators.</li>
+  <li><strong>Mathematical identity checks.</strong> Pass 7 verifies
+    <em>Return of Capital + Preferred Return + GP Catch-up + Carry Base &asymp; Total Proceeds</em>. If the
+    identity breaks, the audit log surfaces it loudly.</li>
+  <li><strong>Provenance for every number.</strong> Every <code>DerivedMetric</code> row carries
+    <code>formula_expression</code>, <code>gemini_reasoning</code>, <code>inputs_used</code> (source cell + label
+    + sheet), and <code>confidence</code>. The frontend renders these in a side panel on click &mdash; the user
+    can audit any number.</li>
+  <li><strong>Pass 8 last-mile sanity check.</strong> For waterfall, even though Gemini computed gross / net /
+    clawback, Python re-checks <code>net == gross &minus; clawback</code>. If Gemini contradicts itself,
+    Python backfills using the identity.</li>
+</ol>
+
+<!-- =========================================================== -->
+<h2 id="glossary">11. Glossary</h2>
+<table>
+  <thead><tr><th>Term</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td>AIF</td><td>Alternative Investment Fund &mdash; SEBI-regulated pooled vehicle (Categories I, II, III).</td></tr>
+    <tr><td>GP / LP</td><td>General Partner (fund manager) / Limited Partner (investor).</td></tr>
+    <tr><td>LPA</td><td>Limited Partnership Agreement &mdash; the legal document defining fund terms (hurdle, carry, fee, waterfall type).</td></tr>
+    <tr><td>NAV</td><td>Net Asset Value &mdash; the fund's value at a point in time.</td></tr>
+    <tr><td>MOIC</td><td>Multiple on Invested Capital = (realised + unrealised value) / invested.</td></tr>
+    <tr><td>TVPI</td><td>Total Value to Paid-In = (distributions + unrealised) / called capital.</td></tr>
+    <tr><td>DPI</td><td>Distributed to Paid-In = distributions / called capital.</td></tr>
+    <tr><td>IRR</td><td>Internal Rate of Return &mdash; time-weighted annualised return.</td></tr>
+    <tr><td>Cr</td><td>Crore (Indian unit) = 10,000,000 = 10 million.</td></tr>
+    <tr><td>European waterfall</td><td>Whole-fund waterfall &mdash; carry is paid only after LPs have received their entire committed capital plus hurdle.</td></tr>
+    <tr><td>American waterfall</td><td>Deal-by-deal waterfall &mdash; carry can be paid on profitable exits before all LP capital is returned.</td></tr>
+    <tr><td>Hurdle / Preferred Return</td><td>Minimum return LPs must receive before the GP earns carry (typically 8% in Indian AIFs).</td></tr>
+    <tr><td>Carry</td><td>The GP's share of profits above the hurdle (typically 20%).</td></tr>
+    <tr><td>Clawback</td><td>Mechanism to return excess carry to LPs if cumulative GP distributions exceed the contractual share.</td></tr>
+    <tr><td>DerivedMetric</td><td>Our provenance-bearing row that records, for every fund-level number, the formula used + inputs + reasoning + confidence.</td></tr>
+    <tr><td>Pass</td><td>One discrete stage in the import pipeline (engineering unit). Each Pass has its own Gemini contract.</td></tr>
+    <tr><td>Stage</td><td>The user-facing grouping of Passes &mdash; Identity / Structure / Values &mdash; applied to each sheet.</td></tr>
+    <tr><td>Canonical schema</td><td>The fixed dictionary of every domain / field / category / enum / metric the system recognises. Single source of truth.</td></tr>
+  </tbody>
+</table>
+
+<div class="footer">
+  TrackFundAI &mdash; Architecture &amp; Data Flow.<br/>
+  Open this file in any browser &mdash; use <em>File &rarr; Print &rarr; Save as PDF</em> to export.
+</div>
+
+</body>
+</html>

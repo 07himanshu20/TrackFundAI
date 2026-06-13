@@ -145,6 +145,78 @@ def _parse_pct(raw):
     return val
 
 
+def _parse_amount(raw):
+    """Parse currency amounts with prefix/suffix into a normalised Decimal.
+
+    Cover/Summary sheets routinely store amounts as decorated strings:
+        "₹3,800 Cr"   "Rs 3,458 Cr"   "$5 Mn"   "INR 100 Lakhs"   "₹1.2 Bn"
+
+    The plain `_d()` path drops these (Decimal can't parse the symbols), so
+    Pass 3.5 silently fell back to cleanly-parseable neighbour cells — which
+    is exactly how `Fund Corpus = ₹3,800 Cr` collapsed into
+    `committed_capital = 4.52` (the Portfolio MOIC cell on the same row).
+
+    Returns a tuple (value:Decimal | None, unit_hint:str) where unit_hint ∈
+    {'amount', 'percent', 'multiple', 'unknown'}. The unit hint lets the
+    caller refuse mismatches like "extract carry_amount_gross from a
+    percentage cell".
+
+    Conventions:
+      * Crore (Cr)  ×1                  ← we report in Cr already
+      * Lakhs       ×0.01
+      * Million     ×0.1                (10 Lakh = 1 Million)
+      * Billion     ×100                (100 Cr = 1 Bn)
+      * percent (%) → unit_hint = 'percent', raw number returned as-is
+      * multiple (x, X) → unit_hint = 'multiple', raw number returned as-is
+    """
+    if raw is None:
+        return (None, 'unknown')
+    if isinstance(raw, bool):
+        return (None, 'unknown')
+    if isinstance(raw, (int, float, Decimal)):
+        try:
+            return (Decimal(str(raw)), 'amount')
+        except (InvalidOperation, ValueError):
+            return (None, 'unknown')
+    s = str(raw).strip()
+    if not s or s.upper() in ('N/A', 'NA', '--', '—', '-', 'NIL', 'NULL'):
+        return (None, 'unknown')
+
+    s_lower = s.lower()
+    # Detect unit hint BEFORE stripping anything
+    if '%' in s:
+        unit_hint = 'percent'
+    elif re.search(r'(?<![A-Za-z])(x|X)(?![A-Za-z])', s):
+        unit_hint = 'multiple'
+    else:
+        unit_hint = 'amount'
+
+    # Pull the first signed numeric token (handles comma-grouping like 3,800)
+    m = re.search(r'-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?', s)
+    if not m:
+        return (None, unit_hint)
+    try:
+        val = Decimal(m.group().replace(',', ''))
+    except (InvalidOperation, ValueError):
+        return (None, unit_hint)
+
+    # Unit-multiplier suffix detection. Order matters: check longer first
+    # (Billion before B, Million before Mn before M).
+    multiplier = Decimal('1')
+    if re.search(r'\b(billion|bn)\b', s_lower):
+        multiplier = Decimal('100')          # 1 Bn = 100 Cr
+    elif re.search(r'\b(million|mn|mln)\b', s_lower):
+        multiplier = Decimal('0.1')          # 1 Mn = 0.1 Cr
+    elif re.search(r'\b(lakhs?|lac)\b', s_lower):
+        multiplier = Decimal('0.01')         # 1 Lakh = 0.01 Cr
+    elif re.search(r'\b(crores?|cr)\b', s_lower):
+        multiplier = Decimal('1')            # already Cr
+    elif re.search(r'\b(thousand|k)\b', s_lower) and unit_hint == 'amount':
+        multiplier = Decimal('0.0001')       # 1 K = 0.0001 Cr (rarely useful)
+
+    return (val * multiplier, unit_hint)
+
+
 def _date(val):
     if val is None:
         return None
@@ -1409,64 +1481,214 @@ class FundImportService:
         # with full provenance (chosen formula, inputs used, Gemini reasoning,
         # alternates considered). All formulas come from Gemini — nothing
         # is hardcoded in derivation_service.
-        # Pass 3.5: universal explicit-value scanner. BEFORE Pass 4 derivation,
-        # scan every sheet for label-value pairs (column 1 label, column 2
-        # numeric) and ask Gemini to identify any that are fund-performance
-        # metrics (Net IRR, MOIC, TVPI, DPI, RVPI, NAV, etc.). Found values
-        # are persisted as DerivedMetric rows with formula='(direct value
-        # imported)' so Pass 4 sees them as authoritative and skips
-        # derivation. ZERO keyword matching here — Gemini decides what's a
-        # performance metric via semantic equivalence against the
-        # fund_performance_metrics canonical category.
+        # Pass 2.6 — Column Semantic Role Classifier.
+        # For each horizontal section that Pass 2.5 found, classify every
+        # column's SEMANTIC role (per_period_amount / cumulative_total /
+        # ratio_percent / identifier / metadata_text / derived_indicator /
+        # unknown). Pass 3.5 uses these roles to filter candidate cells
+        # by metric-vs-role compatibility BEFORE disambiguation — this
+        # is what prevents a "per_step" metric like preferred_return_amount
+        # from being extracted from a "Cumulative Distributed" column.
+        # ZERO keyword matching — Gemini reads headers + sample data and
+        # reasons about each column's intent.
         try:
-            _progress(93, 'Pass 3.5: Universal performance-metric extractor...')
-            self._extract_explicit_performance_metrics(
-                import_file_record=import_file_record,
-            )
+            _progress(91, 'Pass 2.6: Classifying column semantic roles...')
+            self._classify_column_roles(import_file_record=import_file_record)
         except Exception as e:
             logger.warning(
-                f'Pass 3.5 explicit performance-metric extraction failed: {e}'
+                f'Pass 2.6 column-role classification failed: {e} — '
+                f'Pass 3.5 will fall back to no role filter.'
             )
 
+        # ────────────────────────────────────────────────────────────
+        # ANCHOR-FIRST PIPELINE — replaces Pass 3.5 / Pass 4 / Pass 8 /
+        # Pass 9 / MetricArbiter for fund-level metrics.
+        #
+        # Stages (all in anchor_pipeline.py):
+        #   0. workbook_census    (Python, no AI)
+        #   1. identity_hunt      (Gemini, 1 call, role-based prompt)
+        #   2. anchor_extraction  (Gemini, 1 call, role-based prompt)
+        #   3. cash_flow_series   (Gemini, 1 call)
+        #   5. compute_metrics    (Python, textbook formulas)
+        #   6. audit_assertions   (Python, accounting identities)
+        #   7. persist            (writes FundMetric + mirrors to
+        #                          DerivedMetric for backward-compat)
+        #
+        # Determinism: same file → same numbers, every time.
+        # Tokens: ~3 Gemini calls per scheme (vs ~dozens before).
+        # No catalogue formulas, no trust tiers, no Arbiter, no
+        # candidate competition.  No hardcoded value ranges or
+        # keyword lists in any prompt.
+        # ────────────────────────────────────────────────────────────
         try:
-            _progress(95, 'Pass 4: Deriving missing fund metrics via Gemini...')
-            from .derivation_service import MetricDerivationService
+            _progress(93, 'Anchor pipeline: workbook census + identity + anchors + cash flows...')
+            from .anchor_pipeline import run_anchor_pipeline
 
-            schemes = []
+            anchor_summary = []
             if self._imported_fund:
-                schemes = list(self._imported_fund.schemes.all())
-
-            derivation_summary = []
-            for sch in schemes:
-                svc = MetricDerivationService(
-                    organization=self.org,
-                    scheme=sch,
-                    source_import_file=import_file_record,
-                )
-                outcomes = svc.derive_all()
-                derivation_summary.append({
-                    'scheme_id': str(sch.id),
-                    'scheme_name': sch.name,
-                    'outcomes': outcomes,
-                })
-                logger.info(
-                    f'[Pass4] scheme={sch.name}: {outcomes}'
-                )
+                for sch in self._imported_fund.schemes.all():
+                    try:
+                        ap_result = run_anchor_pipeline(
+                            filepath=filepath,
+                            scheme=sch,
+                            organization=self.org,
+                            source_import_file=import_file_record,
+                            progress_cb=_progress,
+                        )
+                        anchor_summary.append({
+                            'scheme_id':   str(sch.id),
+                            'scheme_name': sch.name,
+                            'result':      {
+                                'metrics_count':   ap_result.get('metrics_count'),
+                                'cash_flow_count': ap_result.get('cash_flow_count'),
+                                'audits_pass':     sum(1 for a in ap_result.get('audits', []) if a['status'] == 'pass'),
+                                'audits_fail':     sum(1 for a in ap_result.get('audits', []) if a['status'] == 'fail'),
+                                'conflicts':       len(ap_result.get('conflicts', [])),
+                            },
+                        })
+                        logger.info(
+                            f'[anchor_pipeline] scheme={sch.name} '
+                            f'metrics={ap_result.get("metrics_count")} '
+                            f'cashflows={ap_result.get("cash_flow_count")} '
+                            f'audits_fail={sum(1 for a in ap_result.get("audits", []) if a["status"] == "fail")}'
+                        )
+                    except Exception as inner:
+                        import traceback as _tb
+                        logger.error(
+                            f'[anchor_pipeline] FAILED for scheme={sch.name}: '
+                            f'{type(inner).__name__}: {inner}\n{_tb.format_exc()}'
+                        )
+                        self.errors.append({
+                            'section': 'anchor_pipeline',
+                            'scheme':  sch.name,
+                            'error':   f'{type(inner).__name__}: {inner}',
+                        })
 
             if isinstance(result, dict):
-                result['derivation_summary'] = derivation_summary
-
-            _progress(99, 'Pass 4 complete')
+                result['anchor_pipeline_summary'] = anchor_summary
+            _progress(96, 'Anchor pipeline complete')
         except Exception as e:
             import traceback
-            logger.warning(
-                f'Pass 4 (metric derivation) failed: {type(e).__name__}: {e}\n'
-                f'{traceback.format_exc()}'
+            logger.error(
+                f'Anchor pipeline orchestration failed: '
+                f'{type(e).__name__}: {e}\n{traceback.format_exc()}'
             )
             self.errors.append({
-                'section': 'pass4_derivation',
-                'error': f'{type(e).__name__}: {e}',
+                'section': 'anchor_pipeline',
+                'error':   f'{type(e).__name__}: {e}',
             })
+
+        # Pass 7 — Carry & Clawback writer.
+        # AFTER Pass 4 has populated DerivedMetric with both extracted
+        # (Pass 3.5) and Gemini-derived waterfall components, write the
+        # CarriedInterest record by consuming those DerivedMetric values
+        # directly. ZERO hardcoded waterfall math — compute_carry() is
+        # now a pure record-writer that surfaces whatever Pass 3.5/Pass 4
+        # produced, with full provenance in CarriedInterest.notes.
+        # Synchronous (no Celery dependence) so the dashboard reflects
+        # the latest carry numbers the moment the import finishes.
+        try:
+            _progress(99, 'Pass 7: Writing CarriedInterest from Pass 3.5/Pass 4/Pass 8 outputs...')
+            from accounting.carry_engine import compute_carry
+            from .gemini_column_mapper import validate_waterfall_identity
+            from .models import DerivedMetric
+
+            today_ = date.today()
+            if self._imported_fund:
+                for sch in self._imported_fund.schemes.all():
+                    try:
+                        compute_carry(sch, today_)
+                        logger.info(f'[Pass7] CarriedInterest written for scheme={sch.name}')
+
+                        # Layer E identity check — purely mathematical, no
+                        # heuristics. Confirms that the extracted +
+                        # derived waterfall components satisfy
+                        #   ROC + PrefRet + GPCatchup + CarryBase ≈ TotalProceeds
+                        # If they don't, log loudly so the audit log
+                        # surfaces a likely Pass 3.5 column-pick or
+                        # Pass 4 disjointness error.
+                        identity_inputs = {}
+                        for k in ['return_of_capital_amount',
+                                  'preferred_return_amount',
+                                  'gp_catchup_amount',
+                                  'carry_base',
+                                  'total_realised_proceeds',
+                                  'total_unrealised_fair_value']:
+                            dm = DerivedMetric.objects.filter(
+                                scheme=sch, metric_key=k,
+                            ).exclude(value=None).first()
+                            if dm and dm.value is not None:
+                                identity_inputs[k] = float(dm.value)
+                        identity_result = validate_waterfall_identity(
+                            identity_inputs, tolerance_pct=2.0,
+                        )
+                        logger.info(
+                            f'[Pass7 identity-check scheme={sch.name}] '
+                            f'status={identity_result["status"]} '
+                            f'diff_pct={identity_result.get("diff_pct")} '
+                            f'reasoning={identity_result["reasoning"]}'
+                        )
+                    except Exception as inner:
+                        logger.warning(
+                            f'[Pass7] compute_carry/identity-check failed '
+                            f'for {sch.name}: '
+                            f'{type(inner).__name__}: {inner}'
+                        )
+        except Exception as e:
+            logger.warning(f'Pass 7 (CarriedInterest writer) failed: {e}')
+
+        # Pass 6 — Per-row metric completer.
+        # Walks every fund-data model whose rows belong to this fund, finds
+        # numeric/percent/decimal fields that are null on most rows, and asks
+        # Gemini for the formula to compute each missing field from the
+        # other available row-level inputs. Then evaluates the formula per
+        # row via the same safe AST walker used by Pass 4. NO hardcoded
+        # field names — discovery is via Django _meta introspection;
+        # formulas are whatever Gemini returns. The killer feature: per-
+        # company IRR, ownership %, holding period, unrealised gain — any
+        # missing numeric column on any model — gets filled when derivable.
+        try:
+            _progress(98, 'Pass 6: per-row metric completion via Gemini...')
+            from .derivation_service import PerRowMetricCompleter
+            if self._imported_fund:
+                pass6 = PerRowMetricCompleter(
+                    organization=self.org,
+                    fund=self._imported_fund,
+                )
+                pass6_outcomes = pass6.complete_all()
+                if isinstance(result, dict):
+                    result['pass6_per_row_completion'] = pass6_outcomes
+        except Exception as e:
+            logger.warning(f'Pass 6 (per-row completion) failed: {e}')
+
+        # Pass 6.5 — Universal KPI projection.
+        # Walks every sheet's Gemini Pass 2 column_mapping; for every column
+        # mapped to a KPI canonical field (revenue / ebitda / gmv / mrr /
+        # arr / orders / aov / cac / *_pct etc.) AND a sibling
+        # `company_name` column, creates one PortfolioKPI row per
+        # company × metric. Fixes the gap where PORTFOLIO_MASTER's
+        # Revenue/EBITDA columns were dropped (no matching Investment
+        # field) — the KPI matrix endpoint reads PortfolioKPI, so
+        # without this projection the matrix shows blank for any
+        # non-SaaS KPI. ZERO English keywords — relies entirely on
+        # Gemini Pass 2's canonical-field assignments.
+        try:
+            _progress(98, 'Pass 6.5: Universal KPI projection to PortfolioKPI...')
+            self._project_kpi_columns_to_portfolio_kpi(import_file_record)
+        except Exception as e:
+            logger.warning(f'Pass 6.5 (KPI projection) failed: {e}')
+
+        # Pass 6.6 — Derived percentage KPIs.
+        # After Pass 6.5 populates raw values, ask Gemini ONCE per missing
+        # percentage canonical field (e.g. ebitda_margin_pct,
+        # gross_margin_pct) for the formula to derive it from the raw
+        # inputs available on each investment, then evaluate via the
+        # safe AST walker. ZERO hardcoded formulas — Gemini picks them.
+        try:
+            _progress(98, 'Pass 6.6: Derive missing KPI percentages via Gemini...')
+            self._complete_portfolio_kpi_percentages(import_file_record)
+        except Exception as e:
+            logger.warning(f'Pass 6.6 (percentage derivation) failed: {e}')
 
         # Pass 5 — extraction completeness audit (diagnostic only).
         # Walks every dashboard-critical model and reports empty tables,
@@ -2262,12 +2484,17 @@ class FundImportService:
                     default_scheme.scheme_size = c_val2
                     scheme_updates.append('scheme_size')
 
-            sponsor_raw = scheme_lifecycle.get('sponsor_commitment_pct')
-            if sponsor_raw and not default_scheme.sponsor_commitment_pct:
-                s_val = _parse_pct(sponsor_raw)
-                if s_val:
-                    default_scheme.sponsor_commitment_pct = s_val
-                    scheme_updates.append('sponsor_commitment_pct')
+            # Phase 5 (Bug F): the Gemini extract_structured_metadata
+            # call sometimes hallucinated sponsor_commitment_pct from
+            # unrelated cells (e.g. an LP's "% Fund" share, or the
+            # corpus-expense ratio). Sponsor Commitment is now ONLY
+            # populated by anchor_pipeline.persist_fund() from
+            # FundMetric.sponsor_commitment_pct, which is in turn set
+            # from a SEMANTIC sponsor LP detection (Pass 3 + FUND_MASTER
+            # cross-check). Stopping the legacy write here ensures the
+            # mirror cannot drift from canonical. Leaving the code path
+            # in place but no-op so callers don't break.
+            _ = scheme_lifecycle.get('sponsor_commitment_pct')  # intentionally unused
 
             if scheme_updates:
                 default_scheme.save(update_fields=scheme_updates)
@@ -2847,6 +3074,62 @@ class FundImportService:
     # Portfolio companies & investments
     # ------------------------------------------------------------------
 
+    def _row_natural_key(self, row, name, inv_date, stage):
+        """Stable per-row identifier. Prefer the file's Co.ID/instrument
+        ID columns when present; fall back to a deterministic fingerprint
+        so re-imports are still idempotent."""
+        import hashlib
+        for header in ('Co.ID', 'Co ID', 'CoID', 'Investment ID',
+                       'Instrument ID', 'Security ID', 'ISIN',
+                       'Tranche ID', 'Round ID'):
+            val = _find_col_str(row, header)
+            if val:
+                return str(val).strip()[:64]
+        parts = [name or '', str(inv_date or ''), stage or '']
+        fp = hashlib.sha1('|'.join(parts).encode()).hexdigest()[:16]
+        return f'fp:{fp}'
+
+    def _record_investment_row(self, inv, row, name, company, *,
+                                cost, inv_date, stage, instrument,
+                                hold_pct=None, fd_pct=None,
+                                fv=None, val_date=None, unrealized=None):
+        """Write one Tranche (and optionally one Valuation) per source row.
+        Investment aggregate fields are NEVER set here — they are derived
+        by reconcile_investment_from_tranches() at end of import.
+        """
+        from investments.services import (
+            upsert_tranche_from_row, upsert_valuation_from_row,
+        )
+        nk = self._row_natural_key(row, name, inv_date, stage)
+        upsert_tranche_from_row(
+            inv, natural_key=nk, amount=cost, tranche_date=inv_date,
+            round_name=stage or '', instrument_type=instrument or '',
+            ownership_pct=hold_pct, fully_diluted_pct=fd_pct,
+        )
+        if fv is not None:
+            upsert_valuation_from_row(
+                inv, valuation_date=val_date or date.today(),
+                methodology='cost', fair_value=fv,
+                source_tranche_key=nk,
+                cost_basis=cost, unrealized=unrealized,
+            )
+
+    def _reconcile_imported_investments(self, investments_dict):
+        from investments.services import reconcile_investment_from_tranches
+        seen = set()
+        for inv in investments_dict.values():
+            if inv.id in seen:
+                continue
+            seen.add(inv.id)
+            try:
+                reconcile_investment_from_tranches(inv.id)
+            except Exception as e:
+                logger.warning(
+                    f'reconcile_investment_from_tranches failed for '
+                    f'{getattr(inv, "company_name", "?")}: '
+                    f'{type(e).__name__}: {e}'
+                )
+
     def _import_portfolio(self, wb, org, schemes, domain_map, progress_cb=None):
         """Import portfolio companies and investments.
 
@@ -3017,7 +3300,8 @@ class FundImportService:
                 status = status_result.get(status_raw, 'active')
 
                 inv_defaults = {
-                    'portfolio_company': company,
+                    'company_name': name,
+                    'instrument_type': instrument,
                     'currency': 'INR',
                     'status': status,
                     'sector': company.sector or '',
@@ -3029,26 +3313,24 @@ class FundImportService:
                 if irr_raw is not None:
                     irr_val = irr_raw * 100 if abs(irr_raw) <= 2 else irr_raw
                     inv_defaults['irr_pct'] = round(irr_val, 2)
-                if hold_pct is not None:
-                    inv_defaults['ownership_pct'] = hold_pct
-                if fd_pct is not None:
-                    inv_defaults['percentage_stake_fully_diluted'] = fd_pct
-                if invested is not None:
-                    inv_defaults['total_invested'] = abs(invested)
-                if inv_date:
-                    inv_defaults['investment_date'] = inv_date
 
-                inv, created = Investment.objects.update_or_create(
+                inv, _created = Investment.objects.get_or_create(
                     scheme=target_scheme,
-                    company_name=name,
-                    instrument_type=instrument,
+                    portfolio_company=company,
                     defaults=inv_defaults,
                 )
                 key = f'{name}|{target_scheme.name}|{instrument}'
                 investments[key] = inv
+                self._record_investment_row(
+                    inv, row, name, company,
+                    cost=invested, inv_date=inv_date,
+                    stage=stage, instrument=instrument,
+                    hold_pct=hold_pct, fd_pct=fd_pct,
+                )
 
             logger.info(f'  Portfolio (structured): {len(companies)} companies, '
                          f'{len(investments)} investments')
+            self._reconcile_imported_investments(investments)
             return companies, investments
 
         # --- Format A: Flat combined table (one row = company + investment) ---
@@ -3163,18 +3445,20 @@ class FundImportService:
             if inv_date:
                 inv_a_defaults['investment_date'] = inv_date
 
-            inv, created = Investment.objects.update_or_create(
+            inv_a_defaults.pop('total_invested', None)
+            inv_a_defaults.pop('investment_date', None)
+            inv_a_defaults.pop('ownership_pct', None)
+            inv_a_defaults.pop('percentage_stake_fully_diluted', None)
+            inv_a_defaults['company_name'] = name
+
+            inv, _created = Investment.objects.get_or_create(
                 scheme=default_scheme,
-                company_name=name,
+                portfolio_company=company,
                 defaults=inv_a_defaults,
             )
             key = f'{name}|{default_scheme.name}|equity'
             investments[key] = inv
 
-            # If the flat table also carries FV (Cr) / Val. Date columns,
-            # create a Valuation record now. This covers files that have no
-            # dedicated Valuations sheet — the Portfolio Investments row is the
-            # single source of truth for both cost and fair value.
             fv_raw = _find_col_decimal(
                 row, 'FV (Cr)', 'FV(Cr)', 'FV(₹Cr)',
                 'Fair Value (Cr)', 'Fair Value', 'Current Value (Cr)',
@@ -3186,21 +3470,18 @@ class FundImportService:
                 row, 'Unrealised (Cr)', 'Unrealized (Cr)',
                 'Unrealized Gain/Loss (Cr)', 'Unrealized Gain',
                 'Unrealised', 'unrealized_gain_loss')
-            if fv_raw is not None:
-                Valuation.objects.update_or_create(
-                    investment=inv,
-                    valuation_date=val_date_raw or date.today(),
-                    methodology='cost',
-                    defaults={
-                        'fair_value': fv_raw,
-                        'cost_basis': invested,
-                        'unrealized_gain_loss': unrealized_raw,
-                        'status': 'approved',
-                    },
-                )
+            self._record_investment_row(
+                inv, row, name, company,
+                cost=invested, inv_date=inv_date,
+                stage=round_name, instrument='equity',
+                hold_pct=hold_pct, fd_pct=fd_pct,
+                fv=fv_raw, val_date=val_date_raw,
+                unrealized=unrealized_raw,
+            )
 
         logger.info(f'  Portfolio: {len(companies)} companies, '
                      f'{len(investments)} investments')
+        self._reconcile_imported_investments(investments)
         return companies, investments
 
     # ------------------------------------------------------------------
@@ -3219,9 +3500,14 @@ class FundImportService:
         if not sheet_name or sheet_name not in wb.sheetnames:
             return
 
+        if investments and all(
+            InvestmentTranche.objects.filter(investment=inv).exists()
+            for inv in investments.values()
+        ):
+            return
+
         ws = wb[sheet_name]
 
-        # Try multi-section approach first
         sections = self._read_sheet_via_layout(ws, alias_map=self._get_alias(ws))
         tranche_rows = None
         for sec_name, (sec_headers, sec_rows) in sections.items():
@@ -5420,6 +5706,972 @@ class FundImportService:
 
         return audit
 
+    # ── Canonical KPI fields that the dashboard "Portfolio KPIs" matrix
+    # surfaces. Every value here is a canonical field name produced by
+    # Gemini Pass 2 (see canonical_schema.VALUATIONS_KPIS_FIELDS). NO
+    # English keyword matching — Gemini is the sole author of these
+    # canonical-field assignments per column. We simply iterate over
+    # whatever Gemini classified.
+    _KPI_CANONICAL_FIELDS = {
+        # raw amount KPIs (currency / count)
+        'gmv', 'revenue', 'ebitda', 'ebitda_value', 'mrr', 'arr',
+        'orders', 'aov', 'cac', 'ltv', 'headcount', 'arpob',
+        'aum_value', 'investment_cost',
+        # percentage / ratio KPIs (already in % form when extracted)
+        'gross_margin_pct', 'ebitda_margin_pct', 'returns_pct',
+        'repeat_pct', 'churn_rate', 'nrr', 'ltv_cac_ratio',
+        'nim_pct', 'gnpa_pct', 'nnpa_pct', 'roe_pct',
+        'capacity_utilization', 'export_pct', 'bed_occupancy',
+        'cap_rate_pct', 'debt_to_ebitda', 'cost_to_income',
+    }
+
+    def _project_kpi_columns_to_portfolio_kpi(self, import_file_record):
+        """Pass 6.5 — Universal KPI projection.
+
+        Walks the Gemini-built column_mapping for EVERY sheet. For any
+        column whose canonical_field is in _KPI_CANONICAL_FIELDS AND whose
+        section has a column mapped to 'company_name', creates one
+        PortfolioKPI row per data row (company × kpi).
+
+        This bridges the gap between Pass 2 (which faithfully maps
+        Excel columns to canonical names) and the dashboard KPI matrix
+        (which reads only PortfolioKPI). Previously, columns like
+        PORTFOLIO_MASTER!"Revenue TTM" → canonical 'revenue' were
+        dropped because Investment has no `revenue` field.
+
+        Zero hardcoded English keywords here. The set of recognised KPI
+        fields is the canonical-field names produced by Gemini Pass 2
+        against the canonical_schema catalogue.
+        """
+        import openpyxl
+        from .models import DerivedMetric  # noqa: F401 (kept for symmetry)
+
+        if not self._imported_fund:
+            return
+        if not import_file_record or not import_file_record.column_mapping:
+            return
+
+        filepath = getattr(self, '_filepath', None) or import_file_record.file.path
+        try:
+            wb = openpyxl.load_workbook(filepath, data_only=True)
+        except Exception as e:
+            logger.warning(f'Pass 6.5: cannot reopen workbook: {e}')
+            return
+
+        # Build a (company_name → investment) resolver for the fund.
+        investments_by_name = {}
+        try:
+            for sch in self._imported_fund.schemes.all():
+                for inv in Investment.objects.filter(scheme=sch):
+                    nm = (inv.company_name or '').strip()
+                    if nm and nm not in investments_by_name:
+                        investments_by_name[nm] = inv
+        except Exception as e:
+            logger.warning(f'Pass 6.5: investment resolver build failed: {e}')
+
+        companies_by_name = {}
+        try:
+            for co in PortfolioCompany.objects.filter(organization=self.org):
+                nm = (co.name or '').strip()
+                if nm and nm not in companies_by_name:
+                    companies_by_name[nm] = co
+        except Exception as e:
+            logger.warning(f'Pass 6.5: company resolver build failed: {e}')
+
+        snapshot_date = date.today()
+        written = 0
+        sheets_touched = []
+
+        try:
+            for sheet_name, sheet_meta in (import_file_record.column_mapping or {}).items():
+                if not isinstance(sheet_meta, dict):
+                    continue
+                if sheet_name not in wb.sheetnames:
+                    continue
+                ws = wb[sheet_name]
+                max_col = ws.max_column or 0
+
+                sections = sheet_meta.get('sections') or []
+                for section in sections:
+                    if not isinstance(section, dict):
+                        continue
+                    layout = section.get('layout')
+                    mappings = section.get('mappings') or []
+                    if layout != 'horizontal':
+                        continue
+
+                    # Locate the company-name column + every KPI canonical
+                    # column within this section. Multiple mappings may
+                    # point at the same column_index — keep the first per
+                    # canonical_field.
+                    company_col_idx = None
+                    period_col_idx = None
+                    kpi_cols = []  # list of (col_idx, canonical_field, header_text)
+                    seen_canonical = set()
+                    for m in mappings:
+                        if not isinstance(m, dict):
+                            continue
+                        cf = m.get('canonical_field')
+                        ci = m.get('column_index')
+                        if not cf or not ci:
+                            continue
+                        if cf == 'company_name' and company_col_idx is None:
+                            company_col_idx = ci
+                            continue
+                        if cf in ('period', 'kpi_period', 'valuation_date') and period_col_idx is None:
+                            period_col_idx = ci
+                            continue
+                        if cf in self._KPI_CANONICAL_FIELDS and cf not in seen_canonical:
+                            kpi_cols.append((ci, cf, m.get('excel_column') or cf))
+                            seen_canonical.add(cf)
+
+                    if company_col_idx is None or not kpi_cols:
+                        continue
+
+                    data_start = int(section.get('data_start_row') or 2)
+                    last_row = ws.max_row or data_start
+                    for r in range(data_start, last_row + 1):
+                        # company name
+                        if company_col_idx > max_col:
+                            continue
+                        cname_raw = ws.cell(r, company_col_idx).value
+                        if cname_raw is None:
+                            continue
+                        cname = str(cname_raw).strip()
+                        if not cname or _is_junk_row(cname):
+                            continue
+
+                        inv = investments_by_name.get(cname)
+                        if inv is None:
+                            # case-insensitive fallback
+                            for k, v in investments_by_name.items():
+                                if k.lower() == cname.lower():
+                                    inv = v
+                                    break
+                        if inv is None:
+                            continue
+                        company_obj = companies_by_name.get(cname)
+                        if company_obj is None:
+                            for k, v in companies_by_name.items():
+                                if k.lower() == cname.lower():
+                                    company_obj = v
+                                    break
+
+                        # period: prefer mapped period column, else today
+                        period_val = snapshot_date
+                        if period_col_idx and period_col_idx <= max_col:
+                            pcell = ws.cell(r, period_col_idx).value
+                            try:
+                                if hasattr(pcell, 'date'):
+                                    period_val = pcell.date() if hasattr(pcell.date, '__call__') else pcell
+                                elif isinstance(pcell, date):
+                                    period_val = pcell
+                            except Exception:
+                                period_val = snapshot_date
+
+                        for (ci, cf, header_text) in kpi_cols:
+                            if ci > max_col:
+                                continue
+                            v = ws.cell(r, ci).value
+                            dec_val = _d(v)
+                            if dec_val is None:
+                                continue
+                            slug = slugify(cf.replace('_', '-'))
+                            # Map canonical field name → display name + format
+                            display = cf.replace('_', ' ').title()
+                            fmt = 'percent' if cf.endswith('_pct') or cf in (
+                                'churn_rate', 'nrr', 'capacity_utilization',
+                                'bed_occupancy', 'cost_to_income',
+                            ) else (
+                                'ratio' if cf in ('ltv_cac_ratio', 'debt_to_ebitda')
+                                else 'number'
+                            )
+                            try:
+                                kdef, _ = KPIDefinition.objects.update_or_create(
+                                    organization=self.org,
+                                    slug=slug,
+                                    defaults={
+                                        'name': display,
+                                        'format': fmt,
+                                        'frequency': 'monthly',
+                                        'sector_template': 'generic',
+                                    },
+                                )
+                                PortfolioKPI.objects.update_or_create(
+                                    investment=inv,
+                                    kpi_definition=kdef,
+                                    period=period_val,
+                                    defaults={
+                                        'portfolio_company': company_obj,
+                                        'value': dec_val,
+                                        'source': 'excel_upload',
+                                        'status': 'approved',
+                                        'notes': (
+                                            f'Pass 6.5 projection from '
+                                            f'{sheet_name}!{header_text} '
+                                            f'(canonical: {cf})'
+                                        )[:500],
+                                    },
+                                )
+                                written += 1
+                            except Exception as e:
+                                logger.warning(
+                                    f'Pass 6.5 persist failed for {cname}.{cf} '
+                                    f'at {sheet_name} row {r}: {e}'
+                                )
+                    sheets_touched.append((sheet_name, [k[1] for k in kpi_cols]))
+        finally:
+            try:
+                wb.close()
+            except Exception:
+                pass
+
+        logger.info(
+            f'[Pass6.5] projected {written} PortfolioKPI rows from '
+            f'{len(sheets_touched)} (sheet, kpi_fields) pairs: {sheets_touched}'
+        )
+
+    def _complete_portfolio_kpi_percentages(self, import_file_record):
+        """Pass 6.6 — Derive missing percentage KPIs from raw inputs.
+
+        After Pass 6.5 populates PortfolioKPI rows for every Gemini-
+        classified KPI column, some PE/VC dashboards still expect
+        derived percentages (EBITDA Margin %, Gross Margin %, etc.)
+        that weren't reported directly in the Excel. For each derived
+        percentage, ask Gemini ONCE which formula to use (given the
+        canonical raw KPIs the dashboard has on hand), then evaluate
+        that formula per Investment using the existing safe AST walker.
+
+        Zero hardcoded formulas. Zero hardcoded keywords. Gemini
+        chooses the formula and the inputs.
+        """
+        from decimal import Decimal as _D
+        from .derivation_service import _safe_eval
+        from .gemini_column_mapper import derive_per_row_formulas
+
+        if not self._imported_fund:
+            return
+
+        # Targets we want to derive: any percentage canonical field whose
+        # slug feeds the KPI matrix percent columns. Discovery, not
+        # keywords: pull from the canonical fields whose name ends with
+        # '_pct' (Gemini's naming convention for percentage metrics).
+        target_pct_fields = sorted(
+            f for f in self._KPI_CANONICAL_FIELDS if f.endswith('_pct')
+        )
+        if not target_pct_fields:
+            return
+
+        # Build (company → {canonical_kpi_field: value}) snapshot from
+        # PortfolioKPI rows just written by Pass 6.5.
+        from collections import defaultdict
+        inv_kpis = defaultdict(dict)  # investment_id → {field_name: float}
+        try:
+            for sch in self._imported_fund.schemes.all():
+                qs = PortfolioKPI.objects.filter(
+                    investment__scheme=sch,
+                ).select_related('kpi_definition', 'investment')
+                for k in qs:
+                    if k.kpi_definition is None or k.value is None:
+                        continue
+                    # Recover canonical field from slug. slug = canonical
+                    # field with underscores → hyphens; reverse it.
+                    cf = (k.kpi_definition.slug or '').replace('-', '_')
+                    if not cf:
+                        continue
+                    if cf not in inv_kpis[k.investment_id]:
+                        try:
+                            inv_kpis[k.investment_id][cf] = float(k.value)
+                        except Exception:
+                            pass
+        except Exception as e:
+            logger.warning(f'Pass 6.6: snapshot build failed: {e}')
+            return
+
+        if not inv_kpis:
+            logger.info('Pass 6.6: no PortfolioKPI inputs available — nothing to derive')
+            return
+
+        # For each target percentage, determine which targets are missing
+        # for at least some investments AND which raw inputs are available
+        # on those investments. Then ask Gemini for the formula ONCE per
+        # target (cached across all investments).
+        all_known_fields = set()
+        for d in inv_kpis.values():
+            all_known_fields.update(d.keys())
+
+        missing_targets = [
+            t for t in target_pct_fields if t not in all_known_fields
+        ]
+        if not missing_targets:
+            logger.info('Pass 6.6: every target percentage already present')
+            return
+
+        # Build inputs catalogue: only canonical fields that are actually
+        # available on at least one investment.
+        from .canonical_schema import VALUATIONS_KPIS_FIELDS
+        available_inputs = {}
+        for cf in sorted(all_known_fields):
+            if cf in missing_targets:
+                continue
+            desc = VALUATIONS_KPIS_FIELDS.get(cf, cf)
+            sample_val = None
+            for d in inv_kpis.values():
+                if cf in d:
+                    sample_val = d[cf]
+                    break
+            available_inputs[cf] = {
+                'description': desc,
+                'sample_value': sample_val,
+                'unit': 'percent' if cf.endswith('_pct') else 'auto',
+            }
+
+        if not available_inputs:
+            logger.info('Pass 6.6: no available inputs to derive percentages from')
+            return
+
+        # Build "missing fields" catalogue
+        missing_fields = {
+            t: {
+                'description': VALUATIONS_KPIS_FIELDS.get(t, t),
+                'unit': 'percent',
+            }
+            for t in missing_targets
+        }
+
+        # Pick 3 sample rows with the richest field coverage for Gemini
+        scored = sorted(
+            inv_kpis.items(),
+            key=lambda kv: -len(kv[1]),
+        )[:3]
+        sample_rows = [d for (_iid, d) in scored]
+
+        try:
+            formulas = derive_per_row_formulas(
+                model_label='investments.PortfolioKPI',
+                available_inputs=available_inputs,
+                missing_fields=missing_fields,
+                sample_row_values=sample_rows,
+            )
+        except Exception as e:
+            logger.warning(f'Pass 6.6: Gemini derive_per_row_formulas failed: {e}')
+            return
+
+        if not formulas:
+            logger.info('Pass 6.6: Gemini declined to provide formulas')
+            return
+
+        snapshot_date = date.today()
+        written = 0
+        # derive_per_row_formulas now returns a RANKED candidate list per
+        # field — same shape as Pass 6. For each row, try candidates in
+        # rank order; the first whose declared inputs are all present
+        # and non-null wins. This matches the Pass 6 evaluator contract
+        # so heterogeneous row classes are handled correctly.
+        for target_field, spec in formulas.items():
+            candidates = spec.get('candidate_formulas') or []
+            if not candidates:
+                continue
+            slug = slugify(target_field.replace('_', '-'))
+            display = target_field.replace('_', ' ').title()
+            try:
+                kdef, _ = KPIDefinition.objects.update_or_create(
+                    organization=self.org,
+                    slug=slug,
+                    defaults={
+                        'name': display,
+                        'format': 'percent',
+                        'frequency': 'monthly',
+                        'sector_template': 'generic',
+                    },
+                )
+            except Exception as e:
+                logger.warning(f'Pass 6.6: KPIDefinition create failed for {target_field}: {e}')
+                continue
+
+            rank_counts = {c['rank']: 0 for c in candidates}
+            # Evaluate per investment using ranked fallback chain
+            for inv_id, row in inv_kpis.items():
+                chosen = None
+                chosen_value = None
+                for cand in candidates:
+                    inputs_req = cand.get('inputs_required') or []
+                    if not all(k in row and row[k] is not None for k in inputs_req):
+                        continue
+                    try:
+                        val = _safe_eval(cand['formula_expression'], row)
+                    except Exception as e:
+                        logger.debug(
+                            f'Pass 6.6: eval failed inv={inv_id} '
+                            f'target={target_field} formula="{cand["formula_expression"]}": {e}'
+                        )
+                        continue
+                    if val is None:
+                        continue
+                    chosen, chosen_value = cand, val
+                    break
+                if chosen is None:
+                    continue
+                try:
+                    inv = Investment.objects.get(id=inv_id)
+                except Investment.DoesNotExist:
+                    continue
+                try:
+                    PortfolioKPI.objects.update_or_create(
+                        investment=inv,
+                        kpi_definition=kdef,
+                        period=snapshot_date,
+                        defaults={
+                            'portfolio_company': inv.portfolio_company,
+                            'value': _D(str(chosen_value)),
+                            'source': 'excel_upload',
+                            'status': 'approved',
+                            'notes': (
+                                f'Pass 6.6 derived (rank={chosen["rank"]}, '
+                                f'conf={chosen["confidence"]:.2f}): '
+                                f'{chosen["formula_expression"]}'
+                            )[:500],
+                        },
+                    )
+                    written += 1
+                    rank_counts[chosen['rank']] = rank_counts.get(chosen['rank'], 0) + 1
+                except Exception as e:
+                    logger.warning(
+                        f'Pass 6.6: persist failed for inv={inv_id} '
+                        f'target={target_field}: {e}'
+                    )
+
+        logger.info(
+            f'[Pass6.6] derived {written} percentage PortfolioKPI rows '
+            f'across {len(formulas)} target metrics ({sorted(formulas.keys())})'
+        )
+
+    def _compute_fund_metrics_via_pass9(self, import_file_record):
+        """Pass 9 — UNIFIED FUND METRICS COMPUTE.
+
+        ONE Gemini call sees the raw content of every fund-level sheet
+        (waterfall, NAV, capital calls, distributions, exits, P&L,
+        scheme lifecycle, BvA, MOIC/TVPI summary, etc.) plus the
+        scheme's LPA terms, and returns every dashboard fund metric
+        (moic, tvpi, dpi, rvpi, net_irr, nav, total_*, return_of_capital,
+        preferred_return, gp_catchup, carry_base, carry_amount_gross,
+        gp_clawback_provision, carry_amount_net, lp_total_return,
+        gp_total_distribution, total_proceeds_available) with formulas,
+        source-cell citations, and confidence.
+
+        Persists each metric as a DerivedMetric with
+        formula_expression='(Pass 9 unified) <formula>'.  Overwrites any
+        Pass 3.5 imported_direct or Pass 4 derived row for the same
+        (scheme, metric_key) — Pass 9's read of the raw sheet is the
+        most authoritative signal we have.
+
+        Pass 4 runs AFTER this and ONLY processes metrics Pass 9 did not
+        return (the catalogue-of-variables formula path is now the
+        fallback, not the primary).
+        """
+        from decimal import Decimal as _D
+        from .gemini_column_mapper import (
+            compute_fund_metrics_unified, PASS9_METRIC_KEYS,
+        )
+        from .models import DerivedMetric
+        from datetime import date
+
+        if not self._imported_fund:
+            return
+        if not import_file_record:
+            return
+
+        schemes = list(self._imported_fund.schemes.all())
+        if not schemes:
+            return
+
+        filepath = (
+            getattr(self, '_filepath', None) or import_file_record.file.path
+        )
+        cm = import_file_record.column_mapping or {}
+        # Reduce the per-sheet metadata dict to the {sheet: {'primary_domain': str}}
+        # shape Pass 9 expects.
+        sheet_classifications = {}
+        for sname, meta in cm.items():
+            if not isinstance(meta, dict):
+                continue
+            domains = meta.get('domains') or []
+            primary = domains[0] if domains else meta.get('primary_domain')
+            sheet_classifications[sname] = {'primary_domain': primary}
+
+        for sch in schemes:
+            lpa_terms = {
+                'hurdle_rate_pct': self._safe_float(
+                    getattr(sch, 'hurdle_rate_pct', None)),
+                'carry_pct': self._safe_float(
+                    getattr(sch, 'carry_pct', None)),
+                'carry_type': getattr(sch, 'carry_type', None) or None,
+                'management_fee_pct': self._safe_float(
+                    getattr(sch, 'management_fee_pct', None)),
+                'management_fee_basis': (
+                    getattr(sch, 'management_fee_basis', None) or None
+                ),
+                'tenure_years': self._safe_float(
+                    getattr(sch, 'tenure_years', None)),
+                'sponsor_commitment_pct': self._safe_float(
+                    getattr(sch, 'sponsor_commitment_pct', None)),
+                'vintage_year': self._safe_float(
+                    getattr(sch, 'vintage_year', None)),
+            }
+
+            try:
+                result = compute_fund_metrics_unified(
+                    filepath=filepath,
+                    sheet_classifications=sheet_classifications,
+                    lpa_terms=lpa_terms,
+                    as_of_date=date.today(),
+                )
+            except Exception as e:
+                logger.warning(
+                    f'Pass 9 Gemini call failed for scheme={sch.name}: '
+                    f'{type(e).__name__}: {e}'
+                )
+                continue
+
+            metrics = result.get('metrics') or {}
+            if not metrics:
+                logger.info(
+                    f'Pass 9: Gemini returned no metrics for scheme={sch.name}'
+                )
+                continue
+
+            written = []
+            for metric_key in PASS9_METRIC_KEYS:
+                entry = metrics.get(metric_key)
+                if not entry or entry.get('value') is None:
+                    continue
+                # Only persist when confidence is reasonable. Gemini
+                # is allowed to return low-confidence "best guess"
+                # entries; we filter them out so Pass 4 can take a
+                # fresh stab. Threshold deliberately low (>= 0.4) so
+                # we don't lose a real number Gemini was honest about
+                # being uncertain on.
+                conf = entry.get('confidence', 0.0)
+                if conf < 0.4:
+                    logger.info(
+                        f'Pass 9: skipping {metric_key} '
+                        f'(confidence {conf:.2f} below threshold)'
+                    )
+                    continue
+                try:
+                    DerivedMetric.objects.update_or_create(
+                        scheme=sch,
+                        metric_key=metric_key,
+                        variant=None,
+                        defaults={
+                            'organization': self.org,
+                            'value': _D(str(entry['value'])),
+                            'formula_expression': (
+                                f'(Pass 9 unified) '
+                                f'{entry.get("formula_used", "")}'
+                            )[:2000],
+                            'inputs_used': {
+                                'source_cells': entry.get('source_cells', []),
+                                'formula_used': entry.get('formula_used', ''),
+                                'sheets_used': result.get('sheets_used'),
+                            },
+                            'confidence': conf,
+                            'gemini_reasoning': (
+                                f'[Pass 9 unified] '
+                                f'{entry.get("reasoning", "")}'
+                            )[:4000],
+                            'candidate_formulas': [],
+                            'source_import_file': import_file_record,
+                        },
+                    )
+                    # Record candidate for the Arbiter. Tier classification
+                    # uses the formula prefix to decide P9-direct (tier A)
+                    # vs P9-derivation (tier B).
+                    from .metric_arbiter import record_metric_candidate
+                    record_metric_candidate(
+                        scheme=sch,
+                        organization=self.org,
+                        metric_key=metric_key,
+                        variant=None,
+                        pass_id='P9',
+                        value=entry['value'],
+                        formula_expression=entry.get('formula_used', ''),
+                        confidence=conf,
+                        inputs_used={
+                            'source_cells': entry.get('source_cells', []),
+                            'sheets_used': result.get('sheets_used'),
+                        },
+                        source_cells=entry.get('source_cells', []),
+                        gemini_reasoning=entry.get('reasoning', ''),
+                        source_import_file=import_file_record,
+                    )
+                    written.append(metric_key)
+                except Exception as e:
+                    logger.warning(
+                        f'Pass 9 persist failed for {metric_key}: {e}'
+                    )
+
+            # Clean up stale variant-tagged rows that would shadow the
+            # Pass-9 unauthoritative (variant=None) row at downstream
+            # read time.
+            try:
+                stale = DerivedMetric.objects.filter(
+                    scheme=sch,
+                    metric_key__in=written,
+                ).exclude(variant=None)
+                deleted_n = stale.count()
+                if deleted_n:
+                    stale.delete()
+                    logger.info(
+                        f'Pass 9: deleted {deleted_n} stale variant-tagged '
+                        f'rows that would have shadowed Pass 9 values.'
+                    )
+            except Exception as e:
+                logger.warning(f'Pass 9 stale-cleanup failed: {e}')
+
+            logger.info(
+                f'[Pass9 scheme={sch.name}] wrote {len(written)} metrics: '
+                f'{written}; sheets_used={result.get("sheets_used")}'
+            )
+
+    def _compute_carry_via_direct_waterfall(self, import_file_record):
+        """Pass 8 — Direct Waterfall Computation.
+
+        Replaces the layered Pass 3.5 + Pass 4 derivation for the four
+        carry/clawback dashboard fields with ONE Gemini call that sees
+        the complete waterfall sheet content + LPA terms + capital
+        flows, and returns the four values with source-cell citations
+        and confidence.
+
+        OVERWRITES any DerivedMetric rows for these 4 keys (and the 6
+        supplementary keys) that Pass 3.5 or Pass 4 may have written —
+        Pass 8's read of the raw waterfall sheet is more trustworthy
+        than fragment-by-fragment extraction-then-reassembly.
+
+        ZERO formulas in code. Gemini returns the formula it used as
+        plain text in the DerivedMetric record.
+        """
+        import openpyxl
+        from decimal import Decimal as _D
+        from .gemini_column_mapper import (
+            compute_waterfall_metrics_directly,
+            WATERFALL_PASS8_METRIC_KEYS,
+            WATERFALL_PASS8_SUPPLEMENTARY_KEYS,
+        )
+        from .models import DerivedMetric
+
+        if not self._imported_fund:
+            return
+        if not import_file_record or not import_file_record.column_mapping:
+            return
+
+        # Find waterfall sheets via Pass 1 domain classification — the
+        # canonical signal that a sheet contains waterfall computations.
+        waterfall_sheet_names = []
+        cm = import_file_record.column_mapping or {}
+        for sheet_name, meta in cm.items():
+            if not isinstance(meta, dict):
+                continue
+            domains = meta.get('domains') or []
+            if 'waterfall_carry' in domains:
+                waterfall_sheet_names.append(sheet_name)
+        if not waterfall_sheet_names:
+            logger.info(
+                'Pass 8: no waterfall_carry sheets in domain map — '
+                'skipping direct waterfall pass.'
+            )
+            return
+
+        filepath = getattr(self, '_filepath', None) or import_file_record.file.path
+        try:
+            wb = openpyxl.load_workbook(filepath, data_only=True)
+        except Exception as e:
+            logger.warning(f'Pass 8: cannot reopen workbook: {e}')
+            return
+
+        waterfall_sheets = {}
+        try:
+            for sname in waterfall_sheet_names:
+                if sname in wb.sheetnames:
+                    waterfall_sheets[sname] = wb[sname]
+
+            if not waterfall_sheets:
+                logger.info('Pass 8: waterfall sheet names not found in workbook')
+                return
+
+            # Build LPA-terms block from the imported scheme(s).
+            schemes = list(self._imported_fund.schemes.all())
+            if not schemes:
+                logger.info('Pass 8: no schemes imported, skipping')
+                return
+
+            for sch in schemes:
+                lpa_terms = {
+                    'hurdle_rate_pct': self._safe_float(sch.hurdle_rate_pct),
+                    'carry_pct': self._safe_float(sch.carry_pct),
+                    'carry_type': sch.carry_type,
+                    'management_fee_pct': self._safe_float(sch.management_fee_pct),
+                    'management_fee_basis': sch.management_fee_basis,
+                    'tenure_years': self._safe_float(sch.tenure_years),
+                    'sponsor_commitment_pct': self._safe_float(
+                        sch.sponsor_commitment_pct
+                    ),
+                }
+
+                # Capital-flow context — pull whatever Pass 3.5 / Pass 4
+                # already wrote so Gemini can cross-check against the
+                # waterfall sheet's own numbers.
+                capital_flows = {}
+                for k in ('total_called_capital', 'total_committed_capital',
+                          'total_distributions', 'total_realised_proceeds',
+                          'total_unrealised_fair_value'):
+                    dm = DerivedMetric.objects.filter(
+                        scheme=sch, metric_key=k,
+                    ).exclude(value=None).first()
+                    if dm and dm.value is not None:
+                        capital_flows[k] = float(dm.value)
+
+                try:
+                    result = compute_waterfall_metrics_directly(
+                        waterfall_sheets=waterfall_sheets,
+                        lpa_terms=lpa_terms,
+                        capital_flows=capital_flows,
+                        as_of_date=date.today(),
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f'Pass 8 Gemini call failed for scheme={sch.name}: '
+                        f'{type(e).__name__}: {e}'
+                    )
+                    continue
+
+                metrics = result.get('metrics') or {}
+                if not metrics:
+                    logger.info(
+                        f'Pass 8: Gemini returned no metrics for scheme={sch.name}'
+                    )
+                    continue
+
+                # Persist each metric as a DerivedMetric, OVERWRITING any
+                # prior Pass 3.5 / Pass 4 row for the same (scheme,
+                # metric_key, variant=None) tuple.
+                written = []
+                for metric_key in (WATERFALL_PASS8_METRIC_KEYS
+                                   + WATERFALL_PASS8_SUPPLEMENTARY_KEYS):
+                    entry = metrics.get(metric_key)
+                    if not entry or entry.get('value') is None:
+                        continue
+                    try:
+                        DerivedMetric.objects.update_or_create(
+                            scheme=sch,
+                            metric_key=metric_key,
+                            variant=None,
+                            defaults={
+                                'organization': self.org,
+                                'value': _D(str(entry['value'])),
+                                'formula_expression': (
+                                    f'(Pass 8 direct waterfall) '
+                                    f'{entry.get("formula_used", "")}'
+                                )[:2000],
+                                'inputs_used': {
+                                    'source_cells': entry.get('source_cells', []),
+                                    'formula_used': entry.get('formula_used', ''),
+                                    'sheet_used': result.get('sheet_used'),
+                                },
+                                'confidence': entry.get('confidence', 0.0),
+                                'gemini_reasoning': (
+                                    f'[Pass 8 direct waterfall] '
+                                    f'{entry.get("reasoning", "")}'
+                                )[:4000],
+                                'candidate_formulas': [],
+                                'source_import_file': import_file_record,
+                            },
+                        )
+                        # Record candidate for the Arbiter (Pass 8 = Tier A direct read)
+                        from .metric_arbiter import record_metric_candidate
+                        record_metric_candidate(
+                            scheme=sch,
+                            organization=self.org,
+                            metric_key=metric_key,
+                            variant=None,
+                            pass_id='P8',
+                            value=entry['value'],
+                            formula_expression=entry.get('formula_used', ''),
+                            confidence=entry.get('confidence', 0.0),
+                            inputs_used={
+                                'source_cells': entry.get('source_cells', []),
+                                'sheet_used': result.get('sheet_used'),
+                            },
+                            source_cells=entry.get('source_cells', []),
+                            gemini_reasoning=entry.get('reasoning', ''),
+                            source_import_file=import_file_record,
+                        )
+                        written.append(metric_key)
+                    except Exception as e:
+                        logger.warning(
+                            f'Pass 8 persist failed for {metric_key}: {e}'
+                        )
+
+                # If Pass 3.5 wrote variant-tagged rows for any of these
+                # metrics, those become stale and would shadow the Pass-8
+                # value via the variant-default lookup. Delete them.
+                try:
+                    stale = DerivedMetric.objects.filter(
+                        scheme=sch,
+                        metric_key__in=list(WATERFALL_PASS8_METRIC_KEYS
+                                            + WATERFALL_PASS8_SUPPLEMENTARY_KEYS),
+                    ).exclude(variant=None)
+                    deleted_n = stale.count()
+                    if deleted_n:
+                        stale.delete()
+                        logger.info(
+                            f'[Pass8] removed {deleted_n} stale variant-tagged '
+                            f'DerivedMetric rows superseded by Pass 8 outputs.'
+                        )
+                except Exception as e:
+                    logger.warning(f'Pass 8 stale-row cleanup failed: {e}')
+
+                logger.info(
+                    f'[Pass8] scheme={sch.name} wrote {len(written)} '
+                    f'DerivedMetric rows: {written}. '
+                    f'Overall reasoning: '
+                    f'{result.get("overall_reasoning", "")[:300]}'
+                )
+        finally:
+            try:
+                wb.close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _safe_float(v):
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _classify_column_roles(self, import_file_record):
+        """Pass 2.6 — Column Semantic Role Classifier.
+
+        For every horizontal sub-section that Pass 2.5 detected, classify
+        each numeric column's semantic role (per_period_amount,
+        cumulative_total, ratio_percent, identifier, metadata_text,
+        derived_indicator, unknown) via one Gemini call per section. The
+        roles get stored back on the column_mapping JSON so Pass 3.5 can
+        filter candidate cells by metric-vs-role compatibility before
+        disambiguation.
+
+        ZERO keyword matching. Universal for any tabular sheet.
+        """
+        import openpyxl
+        from .gemini_column_mapper import classify_column_roles
+
+        if not import_file_record or not import_file_record.column_mapping:
+            return
+
+        filepath = getattr(self, '_filepath', None) or import_file_record.file.path
+        try:
+            wb = openpyxl.load_workbook(filepath, data_only=True)
+        except Exception as e:
+            logger.warning(f'Pass 2.6: cannot reopen workbook: {e}')
+            return
+
+        sections_classified = 0
+        try:
+            cm = import_file_record.column_mapping or {}
+            for sheet_name, sheet_meta in cm.items():
+                if not isinstance(sheet_meta, dict):
+                    continue
+                if sheet_name not in wb.sheetnames:
+                    continue
+                ws = wb[sheet_name]
+                max_col = ws.max_column or 0
+                sections = sheet_meta.get('sections') or []
+                for sec in sections:
+                    if not isinstance(sec, dict):
+                        continue
+                    if sec.get('layout') != 'horizontal':
+                        continue
+                    try:
+                        header_row = int(sec.get('header_row') or 0)
+                        data_start = int(
+                            sec.get('data_start_row') or (header_row + 1)
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                    if header_row <= 0:
+                        continue
+                    # Headers (every non-empty cell in header_row)
+                    headers = {}
+                    for c in range(1, max_col + 1):
+                        hv = ws.cell(header_row, c).value
+                        if hv is None:
+                            continue
+                        ht = str(hv).strip()
+                        if ht:
+                            headers[c] = ht
+                    if not headers:
+                        continue
+                    # Sample up to 3 data rows for Gemini to see magnitudes
+                    samples = []
+                    sample_count = 0
+                    r = data_start
+                    while sample_count < 3 and r <= (ws.max_row or data_start):
+                        row_dict = {}
+                        any_non_null = False
+                        for c in headers.keys():
+                            v = ws.cell(r, c).value
+                            if v is not None:
+                                any_non_null = True
+                            row_dict[c] = v
+                        if any_non_null:
+                            samples.append(row_dict)
+                            sample_count += 1
+                        r += 1
+                    section_title = sec.get('section_name') or '(no title)'
+                    try:
+                        roles = classify_column_roles(
+                            section_title=section_title,
+                            column_headers=headers,
+                            sample_data_rows=samples,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f'Pass 2.6 classify_column_roles failed for '
+                            f'{sheet_name}/{section_title}: '
+                            f'{type(e).__name__}: {e} — leaving roles empty'
+                        )
+                        roles = {}
+                    # Persist back on the section dict so Pass 3.5 can read
+                    # it. We keep both the column header map AND the role
+                    # map for downstream debug visibility.
+                    sec['column_role_headers'] = {
+                        str(ci): ht for ci, ht in headers.items()
+                    }
+                    sec['column_roles'] = {
+                        str(ci): roles.get(ci, 'unknown')
+                        for ci in headers.keys()
+                    }
+                    sections_classified += 1
+        finally:
+            try:
+                wb.close()
+            except Exception:
+                pass
+
+        # Persist the augmented column_mapping back to the DB so Pass 3.5
+        # (which re-reads from import_file_record.column_mapping) sees it.
+        try:
+            import_file_record.column_mapping = cm
+            import_file_record.save(update_fields=['column_mapping'])
+        except Exception as e:
+            logger.warning(f'Pass 2.6: persist updated column_mapping failed: {e}')
+
+        logger.info(
+            f'[Pass2.6] classify_column_roles: classified roles for '
+            f'{sections_classified} horizontal section(s)'
+        )
+
     def _extract_explicit_performance_metrics(self, import_file_record):
         """Pass 3.5 — Universal explicit-value scanner.
 
@@ -5457,86 +6709,278 @@ class FundImportService:
             logger.warning(f'Pass 3.5: cannot reopen workbook: {e}')
             return
 
+        def _parse_with_hint(v):
+            """Return (float | None, unit_hint). unit_hint ∈
+            {'amount','percent','multiple','unknown'}. Uses the global
+            _parse_amount so 'Rs 3,800 Cr' → (3800.0, 'amount') and
+            '20% (above hurdle)' → (20.0, 'percent'). The hint travels with
+            the candidate so the canonical-metric unit filter can reject
+            mismatches (e.g. an 'amount' metric must not be filled by a
+            'percent' cell)."""
+            val, hint = _parse_amount(v)
+            if val is None:
+                return (None, hint)
+            try:
+                return (float(val), hint)
+            except (TypeError, ValueError):
+                return (None, hint)
+
         def _is_numeric(v):
-            if v is None:
-                return False
-            if isinstance(v, bool):
-                return False
-            if isinstance(v, (int, float, Decimal)):
-                return True
-            if isinstance(v, str):
-                s = v.strip().replace(',', '').replace('₹', '').rstrip('%').rstrip('x')
-                if not s:
-                    return False
-                try:
-                    float(s)
-                    return True
-                except (ValueError, InvalidOperation):
-                    return False
-            return False
+            num, _hint = _parse_with_hint(v)
+            return num is not None
 
         def _to_number(v):
-            if isinstance(v, (int, float)):
-                return float(v)
-            if isinstance(v, Decimal):
-                return float(v)
-            if isinstance(v, str):
-                s = v.strip().replace(',', '').replace('₹', '').strip()
-                pct = s.endswith('%')
-                if pct:
-                    s = s[:-1].strip()
-                if s.endswith('x') or s.endswith('X'):
-                    s = s[:-1].strip()
-                try:
-                    n = float(s)
-                except ValueError:
-                    return None
-                return n / 100.0 if pct else n
+            num, _hint = _parse_with_hint(v)
+            return num
+
+        def _unit_hint_for(v):
+            _num, hint = _parse_with_hint(v)
+            return hint
+
+        # Pre-compute per-sheet header-row maps using Pass 2.5 sub-table
+        # layout info (already stored on the ImportFile by Pass 2). For each
+        # horizontal section we know (header_row, data_start_row, ...). The
+        # cells in header_row tell us what each numeric column MEANS, which
+        # is essential for tabular waterfall sheets where one row carries
+        # several metrics (LP share, GP share, total, ...) in different
+        # columns. Without column headers, Pass 3.5 can only pick "first
+        # numeric after label" — which silently picks the wrong cell.
+        # sheet_header_map: {sheet_name: {col_idx: column_header_text}} for
+        # the most specific (closest-above) header per data row.
+        sheet_section_headers = {}  # {sheet: [{header_row, data_start, data_end, headers:{col:text}}]}
+        try:
+            cm = (import_file_record.column_mapping or {})
+            for sname, smeta in cm.items():
+                if not isinstance(smeta, dict):
+                    continue
+                if sname not in wb.sheetnames:
+                    continue
+                ws_for_headers = wb[sname]
+                max_col_h = ws_for_headers.max_column or 0
+                max_row_h = ws_for_headers.max_row or 0
+                section_records = []
+                sections = smeta.get('sections') or []
+                # Sort by header_row so we can compute each section's effective
+                # end row as (next section's header_row - 1).
+                section_specs = []
+                for sec in sections:
+                    if not isinstance(sec, dict):
+                        continue
+                    if sec.get('layout') != 'horizontal':
+                        continue
+                    try:
+                        hr = int(sec.get('header_row') or 0)
+                        ds = int(sec.get('data_start_row') or (hr + 1))
+                    except (TypeError, ValueError):
+                        continue
+                    if hr <= 0:
+                        continue
+                    section_specs.append((hr, ds, sec))
+                section_specs.sort(key=lambda t: t[0])
+                for i, (hr, ds, sec) in enumerate(section_specs):
+                    end_row = max_row_h
+                    if i + 1 < len(section_specs):
+                        end_row = section_specs[i + 1][0] - 1
+                    headers = {}
+                    for c in range(1, max_col_h + 1):
+                        hv = ws_for_headers.cell(hr, c).value
+                        if hv is None:
+                            continue
+                        ht = str(hv).strip()
+                        if ht:
+                            headers[c] = ht
+                    # Pass 2.6 column-role classification — stored on the
+                    # section dict by _classify_column_roles. Keys are
+                    # stringified col_idx; cast back to int for lookup.
+                    roles_raw = sec.get('column_roles') or {}
+                    column_roles = {}
+                    for k, v in roles_raw.items():
+                        try:
+                            column_roles[int(k)] = str(v or 'unknown')
+                        except (TypeError, ValueError):
+                            continue
+                    if headers:
+                        section_records.append({
+                            'header_row': hr,
+                            'data_start_row': ds,
+                            'data_end_row': end_row,
+                            'headers': headers,
+                            'column_roles': column_roles,
+                        })
+                if section_records:
+                    sheet_section_headers[sname] = section_records
+        except Exception as e:
+            logger.warning(f'Pass 3.5: section-header pre-compute failed: {e}')
+
+        def _column_header_for(sname, row_idx, col_idx):
+            """Return the column-header text for (sheet, row, col), or '' if
+            this row doesn't sit inside any known horizontal section."""
+            for sec in sheet_section_headers.get(sname, []):
+                if sec['data_start_row'] <= row_idx <= sec['data_end_row']:
+                    return sec['headers'].get(col_idx, '')
+            return ''
+
+        def _column_role_for(sname, row_idx, col_idx):
+            """Return the Pass 2.6 semantic role for (sheet, row, col), or
+            None if no role was classified (free-form cells / sections
+            without column_role data)."""
+            for sec in sheet_section_headers.get(sname, []):
+                if sec['data_start_row'] <= row_idx <= sec['data_end_row']:
+                    return sec.get('column_roles', {}).get(col_idx)
             return None
 
-        # label_to_value: dict of unique label-text → first non-null number seen.
-        # Same label may appear with multiple values in different rows; we
-        # keep the FIRST one encountered (closer-to-top usually wins). For
-        # collision visibility, we also track source.
-        label_to_value = {}
-        label_to_source = {}
+        def _row_is_inside_horizontal_section(sname, row_idx):
+            for sec in sheet_section_headers.get(sname, []):
+                if sec['data_start_row'] <= row_idx <= sec['data_end_row']:
+                    return True
+            return False
+
+        # Collect EVERY (label, value, source_cell, column_header) tuple.
+        # For rows inside horizontal tabular sections (Pass 2.5 layout
+        # known), emit ONE candidate per numeric column so the
+        # disambiguation step can pick the right column. For rows outside
+        # any section (free-form label-value pairs), fall back to
+        # "first numeric after label".
+        # label_occurrences: dict label_text -> list[(value, source_cell, column_header)]
+        label_occurrences = {}
         try:
             for sname in wb.sheetnames:
                 ws = wb[sname]
+                max_col_w = ws.max_column or 0
                 for r in range(1, (ws.max_row or 0) + 1):
                     row_cells = [
                         ws.cell(r, c).value
-                        for c in range(1, (ws.max_column or 0) + 1)
+                        for c in range(1, max_col_w + 1)
                     ]
-                    # Find first non-null text cell and first numeric cell
-                    # following it.
+                    # Find the label (first non-empty text cell) and its
+                    # column index. label_col_idx is 1-based.
                     label = None
-                    numeric_val = None
-                    for v in row_cells:
+                    label_col_idx = None
+                    for idx, v in enumerate(row_cells, start=1):
                         if v is None:
                             continue
-                        if label is None:
-                            if isinstance(v, str) and v.strip():
-                                label = v.strip()
-                            continue
-                        if _is_numeric(v):
-                            numeric_val = _to_number(v)
+                        if isinstance(v, str) and v.strip():
+                            label = v.strip()
+                            label_col_idx = idx
                             break
-                    if label and numeric_val is not None:
-                        if label not in label_to_value:
-                            label_to_value[label] = numeric_val
-                            label_to_source[label] = f'{sname}!row{r}'
+                    if label is None:
+                        continue
+
+                    if _row_is_inside_horizontal_section(sname, r):
+                        # Tabular row — emit one candidate per numeric cell
+                        # AFTER the label, each carrying its column header,
+                        # its Pass 2.6 semantic role, AND its unit hint
+                        # (amount / percent / multiple).
+                        #
+                        # Mid-row label boundary (Fix E): in Cover/Summary
+                        # sheets that Pass 2.5 wrongly classified as a
+                        # single horizontal section, two parallel two-column
+                        # blocks share one row, e.g. Cover R18:
+                        #   [col2 "Carried Interest"]  [col3 "20%..."]
+                        #   [col6 "LP Count"]          [col7 14]
+                        # Without a boundary, "Carried Interest" used to
+                        # absorb the 14 at col 7 as its value, then Pass 3.5
+                        # wrote carry_amount_gross = ₹14 Cr. Now we stop
+                        # scanning the moment we hit ANOTHER text cell that
+                        # itself looks like a label (a free-text string,
+                        # non-numeric-when-parsed, ≥3 visible chars). The
+                        # numeric cells beyond belong to that new label.
+                        def _looks_like_new_label(cell_val):
+                            if not isinstance(cell_val, str):
+                                return False
+                            s = cell_val.strip()
+                            if len(s) < 3:
+                                return False
+                            num, _h = _parse_with_hint(s)
+                            return num is None
+                        # Annotation blacklist (Fix E): refuse to extract
+                        # any numeric whose own cell text contains words
+                        # that mark it as a BENCHMARK / TARGET / ESTIMATE,
+                        # not the actual realised value. These appear
+                        # universally across PE fund Excel files in
+                        # benchmark columns. The label "Blended Portfolio
+                        # MOIC" at FUND_MASTER!R37 was paired with the
+                        # IVCA benchmark column ("2.0x target"), so MOIC
+                        # came out as the FUND'S TARGET, not its actual.
+                        ANNOTATION_BLACKLIST_TOKENS = (
+                            'target', 'benchmark', 'estimated',
+                            'estimate', 'budgeted', 'forecast',
+                            'projected', 'goal', 'aspiration',
+                        )
+                        def _is_annotation_cell(cell_val):
+                            if not isinstance(cell_val, str):
+                                return False
+                            cs = cell_val.lower()
+                            return any(
+                                t in cs for t in ANNOTATION_BLACKLIST_TOKENS
+                            )
+                        for idx, v in enumerate(row_cells, start=1):
+                            if idx <= label_col_idx:
+                                continue
+                            if _looks_like_new_label(v):
+                                # Reached a new label scope; stop attributing
+                                # cells beyond this column to the matched label.
+                                break
+                            if _is_annotation_cell(v):
+                                # "2.0x target" / "20% benchmark" — not a
+                                # realised value. Skip but keep scanning.
+                                continue
+                            if not _is_numeric(v):
+                                continue
+                            num = _to_number(v)
+                            if num is None:
+                                continue
+                            col_header = _column_header_for(sname, r, idx)
+                            col_role = _column_role_for(sname, r, idx)
+                            # Also drop candidates whose COLUMN HEADER is an
+                            # annotation column (header text contains
+                            # benchmark/target/etc.) — catches the case where
+                            # the cell value is just "2.0" but the column
+                            # header says "IVCA Benchmark".
+                            if _is_annotation_cell(col_header):
+                                continue
+                            unit_hint = _unit_hint_for(v)
+                            label_occurrences.setdefault(label, []).append(
+                                (num, f'{sname}!row{r}col{idx}', col_header, col_role, unit_hint)
+                            )
+                    else:
+                        # Free-form row (Cover/Summary 2-column layout etc.).
+                        # ROW-LOCALITY: the value must be in one of the
+                        # immediate next two columns after the label.
+                        # Without this guard, "Fund Corpus" → "₹3,800 Cr"
+                        # (col+1) was unparseable, so the scanner kept
+                        # walking and grabbed "4.52" (col+5) from the
+                        # adjacent two-column block ("Portfolio MOIC (x)").
+                        # The new _parse_amount() now reads "₹3,800 Cr"
+                        # cleanly, but we still enforce locality so a
+                        # genuinely-blank label can't slurp a distant cell.
+                        LOCALITY_WINDOW = 2
+                        numeric_val = None
+                        numeric_hint = 'unknown'
+                        for idx, v in enumerate(row_cells, start=1):
+                            if idx <= label_col_idx:
+                                continue
+                            if idx > label_col_idx + LOCALITY_WINDOW:
+                                break
+                            if _is_numeric(v):
+                                numeric_val = _to_number(v)
+                                numeric_hint = _unit_hint_for(v)
+                                break
+                        if numeric_val is not None:
+                            label_occurrences.setdefault(label, []).append(
+                                (numeric_val, f'{sname}!row{r}', '', None, numeric_hint)
+                            )
         finally:
             try:
                 wb.close()
             except Exception:
                 pass
 
-        if not label_to_value:
+        if not label_occurrences:
             logger.info('Pass 3.5: no label-value pairs found')
             return
 
-        labels = list(label_to_value.keys())
+        labels = list(label_occurrences.keys())
         logger.info(
             f'Pass 3.5: harvested {len(labels)} unique label-value pairs '
             f'across {len(wb.sheetnames) if hasattr(wb, "sheetnames") else "?"} sheets'
@@ -5561,29 +7005,330 @@ class FundImportService:
             logger.warning(f'Pass 3.5 classify_labels failed: {e}')
             return
 
-        # Persist matches as DerivedMetric rows with imported_direct provenance.
-        from decimal import Decimal as _D
-        written = 0
-        per_metric = {}
+        # Group ALL candidates per canonical metric (one label may produce
+        # multiple occurrences across the workbook AND multiple per-column
+        # candidates within a single tabular row; many distinct labels may
+        # also map to the same canonical metric).
+        # Each candidate carries column_header + column_role so the
+        # role-compatibility filter below can drop semantically-wrong
+        # column picks before Gemini disambiguates.
+        # metric_to_candidates: canonical_key -> list[{label, value, source_cell, column_header, column_role}]
+        metric_to_candidates = {}
         for label, canonical in (label_map or {}).items():
             if not canonical:
                 continue
-            value = label_to_value.get(label)
-            source = label_to_source.get(label, '')
-            if value is None:
-                continue
-            # Only keep the FIRST value we see per metric_key (in case the
-            # workbook has multiple sheets restating the same metric).
-            if canonical in per_metric:
-                continue
-            per_metric[canonical] = (value, label, source)
+            for occ in label_occurrences.get(label, []):
+                # Backward-compat for older occurrence tuples:
+                #   2/3/4-tuples = before unit_hint was tracked
+                #   5-tuple: (value, source, column_header, column_role, unit_hint)
+                column_role = None
+                column_header = ''
+                unit_hint = 'unknown'
+                if len(occ) == 5:
+                    value, source, column_header, column_role, unit_hint = occ
+                elif len(occ) == 4:
+                    value, source, column_header, column_role = occ
+                elif len(occ) == 3:
+                    value, source, column_header = occ
+                else:
+                    value, source = occ
+                if value is None:
+                    continue
+                metric_to_candidates.setdefault(canonical, []).append({
+                    'label': label,
+                    'value': value,
+                    'source_cell': source,
+                    'column_header': column_header,
+                    'column_role': column_role,
+                    'unit_hint': unit_hint,
+                })
 
-        for canonical, (value, label, source) in per_metric.items():
+        if not metric_to_candidates:
+            logger.info('Pass 3.5: no candidates matched canonical metrics')
+            return
+
+        # Role-compatibility filter — drop candidates whose column_role is
+        # incompatible with the canonical metric's value_type. This is
+        # what prevents "per_step_amount" metrics like preferred_return
+        # from being extracted from cumulative-total columns.
+        from .canonical_schema import is_role_compatible
+        metric_catalogue = CANONICAL_VALUE_CATEGORIES['fund_performance_metrics']
+        filtered_metric_to_candidates = {}
+        role_filter_stats = []
+        for canonical, cands in metric_to_candidates.items():
+            meta = metric_catalogue.get(canonical) or {}
+            value_type = (
+                meta.get('value_type') if isinstance(meta, dict) else None
+            )
+            if not value_type:
+                # No value_type declared — accept all (backward-compat).
+                filtered_metric_to_candidates[canonical] = cands
+                continue
+            compatible = [
+                c for c in cands
+                if is_role_compatible(value_type, c.get('column_role'))
+            ]
+            dropped = len(cands) - len(compatible)
+            if dropped > 0:
+                role_filter_stats.append((canonical, len(cands), len(compatible), dropped))
+            if compatible:
+                filtered_metric_to_candidates[canonical] = compatible
+            else:
+                # All candidates were filtered out — log so audit log can
+                # show that this metric will be left for Pass 4 derivation.
+                logger.info(
+                    f'Pass 3.5: ALL {len(cands)} candidates for {canonical} '
+                    f'(value_type={value_type}) had incompatible column_role; '
+                    f'leaving metric for Pass 4 derivation.'
+                )
+        if role_filter_stats:
+            logger.info(
+                f'[Pass3.5 role-filter] dropped role-incompatible candidates: '
+                f'{role_filter_stats}'
+            )
+        metric_to_candidates = filtered_metric_to_candidates
+
+        # Unit-hint compatibility filter — drop candidates whose detected
+        # numeric format disagrees with the metric's expected value_type.
+        # This is what stops "Carried Interest" → "20% (above hurdle)"
+        # being interpreted as a ₹-amount, and "Fund Corpus" → "Portfolio
+        # MOIC (x)=4.52" from being interpreted as a committed-capital
+        # amount. Compatibility:
+        #   amount-typed metrics  (aggregate_total, aggregate_cumulative,
+        #                          per_step_amount, per_unit_amount)
+        #       → reject 'percent' and 'multiple' hints
+        #   ratio-typed metrics   ('ratio')
+        #       → reject 'amount' hint
+        #   'unknown' hint always passes (don't penalise plain numbers).
+        AMOUNT_TYPES = {
+            'aggregate_total', 'aggregate_cumulative',
+            'per_step_amount', 'per_unit_amount',
+        }
+        RATIO_TYPES = {'ratio'}
+        unit_filter_stats = []
+        unit_filtered = {}
+        for canonical, cands in metric_to_candidates.items():
+            meta = metric_catalogue.get(canonical) or {}
+            vtype = meta.get('value_type') if isinstance(meta, dict) else None
+            if not vtype:
+                unit_filtered[canonical] = cands
+                continue
+            if vtype in AMOUNT_TYPES:
+                bad = {'percent', 'multiple'}
+            elif vtype in RATIO_TYPES:
+                bad = {'amount'}
+            else:
+                unit_filtered[canonical] = cands
+                continue
+            compatible = [
+                c for c in cands if c.get('unit_hint', 'unknown') not in bad
+            ]
+            dropped = len(cands) - len(compatible)
+            if dropped > 0:
+                unit_filter_stats.append(
+                    (canonical, len(cands), len(compatible), dropped)
+                )
+            if compatible:
+                unit_filtered[canonical] = compatible
+            else:
+                logger.info(
+                    f'Pass 3.5: ALL {len(cands)} candidates for {canonical} '
+                    f'(value_type={vtype}) had incompatible unit_hint; '
+                    f'leaving metric for Pass 4 derivation.'
+                )
+        if unit_filter_stats:
+            logger.info(
+                f'[Pass3.5 unit-filter] dropped unit-incompatible candidates: '
+                f'{unit_filter_stats}'
+            )
+        metric_to_candidates = unit_filtered
+
+        # For each metric, if there are multiple candidates with differing
+        # values, ask Gemini to pick the most authoritative source. No
+        # code-level filtering on values — Gemini reasons over labels, sheet
+        # names, and surrounding context.
+        from .gemini_column_mapper import select_authoritative_source
+
+        # For metrics that come in multiple semantic variants (gross/net,
+        # pre-fee/post-fee, ...), invoke the variant classifier ONCE per
+        # such metric to tag every candidate's variant tag before
+        # disambiguation.
+        from .gemini_column_mapper import classify_metric_variant
+        for canonical, cands in list(metric_to_candidates.items()):
+            meta = metric_catalogue.get(canonical) or {}
+            variant_options = (
+                meta.get('requires_variant') if isinstance(meta, dict) else None
+            )
+            if not variant_options:
+                continue
+            if len(cands) < 2:
+                # Single candidate — variant doesn't help disambiguate; just
+                # persist the variant_default as a tag.
+                for c in cands:
+                    c.setdefault('variant', meta.get('variant_default'))
+                continue
+            try:
+                tagged = classify_metric_variant(
+                    metric_key=canonical,
+                    metric_label=meta.get('label', canonical),
+                    metric_description=meta.get('description', ''),
+                    variant_options=list(variant_options),
+                    candidates=cands,
+                )
+                metric_to_candidates[canonical] = tagged
+            except Exception as e:
+                logger.warning(
+                    f'Pass 3.5 variant classifier failed for {canonical}: '
+                    f'{type(e).__name__}: {e} — falling back to variant_default.'
+                )
+                for c in cands:
+                    c.setdefault('variant', meta.get('variant_default'))
+
+        chosen_per_metric = {}  # canonical_key -> (value, label, source_cell, reasoning, variant)
+        for canonical, cands in metric_to_candidates.items():
+            meta = metric_catalogue.get(canonical) or {}
+            variant_default = (
+                meta.get('variant_default') if isinstance(meta, dict) else None
+            )
+
+            # If this metric requires a variant AND we have a default,
+            # prefer candidates tagged with the default variant before
+            # disambiguation. Other variants are kept around — they may be
+            # the only ones left if no candidate matches the default.
+            if variant_default:
+                primary = [c for c in cands if c.get('variant') == variant_default]
+                if primary:
+                    cands = primary
+
+            # Deduplicate identical (value, source) pairs to keep prompts tight
+            seen = set()
+            unique_cands = []
+            for c in cands:
+                key = (round(c['value'], 8) if isinstance(c['value'], (int, float)) else c['value'],
+                       c['source_cell'])
+                if key in seen:
+                    continue
+                seen.add(key)
+                unique_cands.append(c)
+
+            distinct_values = {
+                round(c['value'], 8) if isinstance(c['value'], (int, float)) else c['value']
+                for c in unique_cands
+            }
+
+            if len(unique_cands) == 1:
+                chosen = unique_cands[0]
+                chosen_per_metric[canonical] = (
+                    chosen['value'], chosen['label'], chosen['source_cell'],
+                    f'Single candidate cell across the workbook.',
+                    chosen.get('variant'),
+                )
+                continue
+
+            # Multiple candidates → if they all agree on the same value, pick
+            # the first deterministically (no Gemini call needed). Otherwise
+            # delegate disambiguation to Gemini.
+            if len(distinct_values) == 1:
+                chosen = unique_cands[0]
+                chosen_per_metric[canonical] = (
+                    chosen['value'], chosen['label'], chosen['source_cell'],
+                    f'All {len(unique_cands)} candidate cells agreed on value '
+                    f'{chosen["value"]}; picked first occurrence as canonical source.',
+                    chosen.get('variant'),
+                )
+                continue
+
+            try:
+                pick = select_authoritative_source(
+                    metric_key=canonical,
+                    metric_label=meta.get('label', canonical) if isinstance(meta, dict) else canonical,
+                    metric_description=(
+                        meta.get('description', '') if isinstance(meta, dict) else str(meta)
+                    ),
+                    candidates=unique_cands,
+                )
+            except Exception as e:
+                logger.warning(
+                    f'Pass 3.5 disambiguation API failed for {canonical}: '
+                    f'{type(e).__name__}: {e} — skipping this metric so Pass 4 '
+                    f'derives it from first principles.'
+                )
+                continue
+
+            idx = pick.get('chosen_index') if isinstance(pick, dict) else None
+            if idx is None:
+                logger.info(
+                    f'Pass 3.5: Gemini declined to pick an authoritative source '
+                    f'for {canonical} from {len(unique_cands)} candidates with '
+                    f'differing values — leaving for Pass 4 derivation.'
+                )
+                continue
+            chosen = unique_cands[idx]
+            chosen_per_metric[canonical] = (
+                chosen['value'], chosen['label'], chosen['source_cell'],
+                pick.get('reasoning', ''),
+                chosen.get('variant'),
+            )
+
+        # Fix D — semantic label guard. Even after role + unit filters and
+        # Gemini's disambiguation, refuse to persist a candidate whose RAW
+        # label shares no semantic token with the canonical metric's
+        # description. This is the final defence against the silent
+        # neighbour-cell fallback pattern: if "Carried Interest" passed
+        # all filters but the chosen cell's label is "LP Count", drop it.
+        #
+        # We use a lightweight, language-agnostic check: tokenise both
+        # strings to alphabetic words ≥3 chars, lowercase, and require at
+        # least ONE shared token. This is intentionally weak — Gemini's
+        # classify_labels already did the heavy semantic work; this only
+        # catches the obvious "label and chosen cell are unrelated" case.
+        def _semantic_tokens(text):
+            return {
+                t for t in re.findall(r'[A-Za-z]{3,}', str(text or '').lower())
+                if t not in {
+                    'the', 'and', 'for', 'per', 'cur', 'fcr', 'value', 'total',
+                    'amount', 'fund', 'all', 'net', 'gross', 'sum',
+                }
+            }
+
+        def _label_matches_metric(label, canonical, meta):
+            metric_text = ' '.join(filter(None, [
+                canonical.replace('_', ' '),
+                meta.get('label', '') if isinstance(meta, dict) else '',
+                meta.get('description', '') if isinstance(meta, dict) else '',
+            ]))
+            mt = _semantic_tokens(metric_text)
+            lt = _semantic_tokens(label)
+            if not mt or not lt:
+                return True  # not enough material to judge — don't block
+            return bool(mt & lt)
+
+        rejected_semantic = []
+        for canonical, (value, label, source, reasoning, variant) in list(
+            chosen_per_metric.items()
+        ):
+            meta = metric_catalogue.get(canonical) or {}
+            if not _label_matches_metric(label, canonical, meta):
+                rejected_semantic.append((canonical, label, source))
+                chosen_per_metric.pop(canonical, None)
+        if rejected_semantic:
+            logger.info(
+                f'[Pass3.5 semantic-guard] dropped {len(rejected_semantic)} '
+                f'metric picks whose chosen label shared no semantic token '
+                f'with the canonical metric: {rejected_semantic}'
+            )
+
+        # Persist chosen winners as DerivedMetric rows with imported_direct
+        # provenance.
+        from decimal import Decimal as _D
+        written = 0
+        for canonical, (value, label, source, reasoning, variant) in chosen_per_metric.items():
             try:
                 for sch in schemes:
                     DerivedMetric.objects.update_or_create(
                         scheme=sch,
                         metric_key=canonical,
+                        variant=variant,
                         defaults={
                             'organization': self.org,
                             'value': _D(str(value)),
@@ -5592,17 +7337,48 @@ class FundImportService:
                                 'source_cell': source,
                                 'source_label': label,
                                 'source_value': value,
+                                'candidate_count': len(
+                                    metric_to_candidates.get(canonical, [])
+                                ),
+                                'variant': variant,
                             },
                             'confidence': 1.0,
                             'gemini_reasoning': (
-                                f'Label "{label}" at {source} was matched to '
-                                f'canonical metric "{canonical}" via Pass 3.5 '
-                                f'semantic classification against the '
-                                f'fund_performance_metrics catalogue.'
+                                f'Label "{label}" at {source} chosen as '
+                                f'authoritative source for canonical metric '
+                                f'"{canonical}" (variant={variant}). {reasoning}'.strip()
                             ),
                             'candidate_formulas': [],
                             'source_import_file': import_file_record,
                         },
+                    )
+                    # Record candidate for the Arbiter. The Arbiter
+                    # demotes annotated labels (estimated/target/...)
+                    # to Tier D so Pass 9/Pass 4 derived values win
+                    # when present, while non-annotated direct cell
+                    # reads stay at Tier A.
+                    from .metric_arbiter import record_metric_candidate
+                    record_metric_candidate(
+                        scheme=sch,
+                        organization=self.org,
+                        metric_key=canonical,
+                        variant=variant,
+                        pass_id='P35',
+                        value=value,
+                        formula_expression='direct value imported',
+                        confidence=1.0,
+                        inputs_used={
+                            'source_cell': source,
+                            'source_label': label,
+                            'source_value': value,
+                            'variant': variant,
+                        },
+                        source_cells=[source] if source else [],
+                        gemini_reasoning=(
+                            f'Label "{label}" at {source} '
+                            f'(variant={variant}). {reasoning}'.strip()
+                        ),
+                        source_import_file=import_file_record,
                     )
                     written += 1
             except Exception as e:
@@ -5612,7 +7388,7 @@ class FundImportService:
 
         logger.info(
             f'[Pass3.5] persisted {written} DerivedMetric imported_direct rows '
-            f'covering metrics: {sorted(per_metric.keys())}'
+            f'covering metrics: {sorted(chosen_per_metric.keys())}'
         )
 
     def _enrich_nav_records_post_import(self, wb, scheme, domain_map=None):
