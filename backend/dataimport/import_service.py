@@ -1383,6 +1383,12 @@ class FundImportService:
           1. Exact match on the raw section name
           2. Exact match on uppercase-stripped version
           3. Substring match (section_map key is contained in sec_name or vice versa)
+          4. Single-section fallback: when Pass 1.5 mapped only
+             `__default__` for this sheet (one-table sheet), any section
+             name returned by Pass 2.5 (which may have used the sheet's
+             banner row as the section name) is treated as that default.
+             Universal — handles every file where Pass 1.5 and Pass 2.5
+             disagree on the section name for a single-table sheet.
 
         Returns the sub-domain string (e.g. 'portfolio_companies') or 'unknown'.
         """
@@ -1405,6 +1411,16 @@ class FundImportService:
             mu = mapped_name.upper().strip()
             if mu in sec_upper or sec_upper in mu:
                 return subdomain
+
+        # Single-section fallback: when Pass 1.5 declared a single
+        # `__default__` entry for this sheet, attribute any incoming
+        # section name to that default. Pass 2.5 occasionally returns
+        # the banner-row text as section_name while Pass 1.5 always
+        # uses `__default__` for a one-table sheet; without this
+        # fallback the bucket-router (AD multi-sheet portfolio walk)
+        # silently drops the section.
+        if len(sheet_secs) == 1 and '__default__' in sheet_secs:
+            return sheet_secs['__default__']
 
         return 'unknown'
 
@@ -2591,10 +2607,24 @@ class FundImportService:
         if not collected:
             return
 
+        # Only persist keys that map to concrete Scheme columns.
+        # Some extracted fields (e.g. mgmt_fee_pct_post_ip, mgmt_fee_basis_post_ip,
+        # investment_period_years) live in fund_data only and are consumed by the
+        # anchor pipeline's runtime IP/post-IP fee switch — they must not be saved here.
+        from funds.models import Scheme as _SchemeModel
+        scheme_field_names = {
+            f.name for f in _SchemeModel._meta.get_fields()
+            if getattr(f, 'concrete', False) and not getattr(f, 'many_to_many', False)
+        }
+        persistable = {k: v for k, v in collected.items() if k in scheme_field_names}
+        skipped = [k for k in collected if k not in scheme_field_names]
+        if skipped:
+            logger.info(f'  Lifecycle: skipped non-Scheme fields (consumed by anchor pipeline): {skipped}')
+
         # Apply collected values to ALL schemes (lifecycle params are fund-level)
         for scheme in schemes.values():
             update_fields = []
-            for field_name, value in collected.items():
+            for field_name, value in persistable.items():
                 current = getattr(scheme, field_name, None)
                 if not current:  # Only fill if currently empty/None
                     setattr(scheme, field_name, value)
@@ -2620,7 +2650,8 @@ class FundImportService:
         # Pass 3: Collect all unique investor types and classify via Gemini
         raw_inv_types = set()
         for row in rows:
-            t = _find_col_str(row, 'Investor Type', 'LP Type', 'Type', 'Category')
+            t = _find_col_str(row, 'Investor Type', 'LP Type', 'Type',
+                              'Category', 'investor_type')
             if t:
                 raw_inv_types.add(t.strip())
         inv_type_map = self._classify_labels(raw_inv_types, 'investor_types',
@@ -2628,26 +2659,30 @@ class FundImportService:
 
         for row in rows:
             inv_name = _find_col_str(
-                row, 'Investor Name', 'LP Name', 'Name', 'Investor')
+                row, 'Investor Name', 'LP Name', 'Name', 'Investor',
+                'investor_name')
             if not inv_name:
                 continue
 
             inv_type_raw = _find_col_str(
-                row, 'Investor Type', 'LP Type', 'Type', 'Category')
+                row, 'Investor Type', 'LP Type', 'Type', 'Category',
+                'investor_type')
             inv_type = inv_type_map.get(inv_type_raw, 'other') if inv_type_raw else 'other'
 
             country = _find_col_str(row, 'Country', 'Domicile', default='India')
             commitment_amt = _find_col_decimal(
                 row, 'Commitment(Cr)', 'Commitment', 'Committed Amount',
-                'Commitment Amount', 'Total Commitment')
+                'Commitment Amount', 'Total Commitment', 'commitment_amount')
             pct_fund = _find_col_decimal(
                 row, '% Fund', 'Fund %', 'Allocation %', 'Share %')
             drawdown = _find_col_decimal(
                 row, 'Drawdown(Cr)', 'Drawdown', 'Called Amount',
-                'Amount Called', 'Drawn')
+                'Amount Called', 'Drawn', 'capital_called_amount',
+                'called_amount')
             distributions = _find_col_decimal(
                 row, 'Distributions', 'Distribution', 'Returned',
-                'Amount Returned')
+                'Amount Returned', 'total_distributions_received',
+                'distribution_amount', 'gross_amount', 'net_amount')
             status = _find_col_str(row, 'Status', 'LP Status', default='Active')
 
             investor, created = Investor.objects.get_or_create(
@@ -2691,9 +2726,21 @@ class FundImportService:
             ws = wb[commit_sheet]
             _, rows = read_table_from_sheet(ws, alias_map=self._get_alias(ws))
             if rows:
+                # ── Batching pre-pass: close_type ─────────────────────
+                _close_type_raws = set()
+                for _r in rows:
+                    _ct = _find_col_str(
+                        _r, 'close_type', default='first_close')
+                    if _ct:
+                        _close_type_raws.add(_ct)
+                close_type_map = self._classify_enum(
+                    list(_close_type_raws), 'close_type',
+                    context='Fund close type for investor commitment',
+                ) if _close_type_raws else {}
                 for row in rows:
                     inv_name = _find_col_str(
-                        row, 'Investor Name', 'LP Name', 'Name', 'Investor')
+                        row, 'Investor Name', 'LP Name', 'Name', 'Investor',
+                        'investor_name')
                     if not inv_name or inv_name not in investors:
                         continue
 
@@ -2701,7 +2748,7 @@ class FundImportService:
                     commitment_amt = _find_col_decimal(
                         row, 'Commitment Amount (Cr)', 'Commitment Amount',
                         'Commitment(Cr)', 'Commitment', 'Committed Amount',
-                        'Total Commitment')
+                        'Total Commitment', 'commitment_amount')
                     if not commitment_amt or commitment_amt <= 0:
                         continue
 
@@ -2716,10 +2763,7 @@ class FundImportService:
                         row, 'Commitment Date', 'Date', 'Close Date')
                     close_type_raw = _find_col_str(
                         row, 'close_type', default='first_close')
-                    close_type_result = self._classify_enum(
-                        [close_type_raw], 'close_type',
-                        context='Fund close type for investor commitment')
-                    close_type = close_type_result.get(close_type_raw, 'first_close')
+                    close_type = close_type_map.get(close_type_raw, 'first_close')
 
                     units = _find_col_decimal(
                         row, 'Units Allocated', 'Units', 'Allotted Units')
@@ -2759,14 +2803,15 @@ class FundImportService:
 
         for row in rows:
             inv_name = _find_col_str(
-                row, 'Investor Name', 'LP Name', 'Name', 'Investor')
+                row, 'Investor Name', 'LP Name', 'Name', 'Investor',
+                'investor_name')
             if not inv_name or inv_name not in investors:
                 continue
 
             investor = investors[inv_name]
             commitment_amt = _find_col_decimal(
                 row, 'Commitment(Cr)', 'Commitment', 'Committed Amount',
-                'Commitment Amount', 'Total Commitment')
+                'Commitment Amount', 'Total Commitment', 'commitment_amount')
             if not commitment_amt or commitment_amt <= 0:
                 continue
 
@@ -2832,6 +2877,22 @@ class FundImportService:
                     cc_rows = sec_rows
 
             if cc_rows:
+                # ── Batching pre-pass: capital_call_status ──────────
+                # Collect every unique status raw value across all
+                # cc_rows so Gemini classifies once instead of per row.
+                _cc_status_raws = set()
+                for _r in cc_rows:
+                    _cs = _find_col_str(
+                        _r, 'Status', 'Call Status', 'LP Notified?',
+                        default='Paid',
+                    )
+                    if _cs:
+                        _cc_status_raws.add(_cs)
+                cc_status_map = self._classify_enum(
+                    list(_cc_status_raws), 'capital_call_status',
+                    context='Capital call funding status',
+                ) if _cc_status_raws else {}
+
                 call_count = 0
                 for row in cc_rows:
                     scheme_name_raw = _find_col_str(
@@ -2884,10 +2945,7 @@ class FundImportService:
 
                     status_raw = _find_col_str(
                         row, 'Status', 'Call Status', 'LP Notified?', default='Paid')
-                    call_status_result = self._classify_enum(
-                        [status_raw], 'capital_call_status',
-                        context='Capital call funding status')
-                    status = call_status_result.get(status_raw, 'paid')
+                    status = cc_status_map.get(status_raw, 'paid')
 
                     if not total_amt or total_amt <= 0:
                         continue
@@ -2939,6 +2997,18 @@ class FundImportService:
                     if not parent_call:
                         continue
 
+                    # ── Batching pre-pass: payment_status for line items ──
+                    _pay_status_raws = set()
+                    for _r in sec_rows:
+                        _ps = _find_col_str(
+                            _r, 'Payment Status', 'Status', default='Paid')
+                        if _ps:
+                            _pay_status_raws.add(_ps)
+                    pay_status_map = self._classify_enum(
+                        list(_pay_status_raws), 'payment_status',
+                        context='Capital call payment status',
+                    ) if _pay_status_raws else {}
+
                     for row in sec_rows:
                         inv_name = _find_col_str(
                             row, 'Investor Name', 'LP Name', 'Name',
@@ -2978,9 +3048,8 @@ class FundImportService:
                             defaults={
                                 'called_amount': called_amt,
                                 'cumulative_called_pct': cum_pct,
-                                'payment_status': self._classify_enum(
-                                    [pay_status_raw], 'payment_status',
-                                    context='Capital call payment status').get(pay_status_raw, 'pending'),
+                                'payment_status': pay_status_map.get(
+                                    pay_status_raw, 'pending'),
                                 'amount_received': received or called_amt,
                                 'payment_date': pay_date or parent_call.call_date,
                             },
@@ -3133,20 +3202,25 @@ class FundImportService:
     def _import_portfolio(self, wb, org, schemes, domain_map, progress_cb=None):
         """Import portfolio companies and investments.
 
-        Handles two formats:
-        1. Multi-section sheet: PORTFOLIO COMPANIES section (master data) +
-           INVESTMENTS section (financial data) on the same sheet (Format B)
-        2. Flat table: One row per company with both master and investment
-           data combined (Format A)
+        Handles three layouts, on any single sheet OR spread across
+        multiple sheets within the portfolio_investments domain:
+        1. Master + transactions on SAME sheet (multi-section Format B)
+        2. Master on ONE sheet + transactions on ANOTHER (multi-sheet
+           Format B — e.g. Portfolio_Companies + Investment_Register)
+        3. Flat combined table — one row = company + investment (Format A)
+
+        The bucket aggregation below works for all three layouts. Sub-domain
+        tags from Pass 1.5 (portfolio_companies / investments / __default__)
+        decide which bucket each section belongs to.
         """
         def _cb(pct, msg):
             if progress_cb:
                 progress_cb(pct, msg)
-        sheet_name = _dm_first(domain_map, 'portfolio_investments')
-        if not sheet_name or sheet_name not in wb.sheetnames:
+        sheet_names = [s for s in _dm_sheets(domain_map, 'portfolio_investments')
+                       if s in wb.sheetnames]
+        if not sheet_names:
             return {}, {}
 
-        ws = wb[sheet_name]
         default_scheme = list(schemes.values())[0] if schemes else None
         if not default_scheme:
             return {}, {}
@@ -3154,49 +3228,86 @@ class FundImportService:
         companies = {}
         investments = {}
 
-        # Try reading as multi-section sheet first
-        sections = self._read_sheet_via_layout(ws, alias_map=self._get_alias(ws))
+        # ── AD: bucket aggregation across every sheet in this domain ──
+        # We accumulate three buckets (master-only, combined, transactions-
+        # only) by walking every sheet's sections and tagging them by
+        # Pass-1.5 sub-domain plus a column-shape heuristic. The heuristic
+        # is universal: it looks at canonical aliases produced by Pass 2,
+        # not at fund-specific column names.
+        company_rows = []     # master only — no per-row Amount
+        investment_rows = []  # pure transactions — no company-identity column
+        combined_rows = []    # rows that carry BOTH identity AND Amount
 
-        # Look for separate PORTFOLIO COMPANIES and INVESTMENTS sections.
-        #
-        # Section name taxonomy:
-        #   "PORTFOLIO COMPANIES"      → master data only (company names/sectors)
-        #   "INVESTMENTS"              → financial investment data only
-        #   "PORTFOLIO INVESTMENTS"    → combined (both company + investment per row)
-        #   "__default__"              → entire sheet is one flat table
-        company_rows = None
-        investment_rows = None
-        combined_rows = None   # "PORTFOLIO INVESTMENTS" — company+investment merged
+        amount_tokens = {
+            'cost', 'invested', 'amount', 'investment_amount',
+            'amount_invested', 'tranche_amount', 'cost_of_investment',
+            'total_invested',
+        }
 
-        for sec_name, (sec_headers, sec_rows) in sections.items():
-            subdomain = self._get_section_subdomain(sheet_name, sec_name)
-            if subdomain == 'investment_tranches':
-                continue  # Handled by _import_tranches
-            elif subdomain == 'temporary_investments':
-                continue  # Liquid MFs, overnight funds — skip
-            elif subdomain == 'portfolio_companies':
-                company_rows = sec_rows
-            elif subdomain == 'investments':
-                # Gemini classifies combined company+investment tables as
-                # 'investments' — check if rows also have company identity
-                # columns to decide if this is combined or pure investment.
-                # Check if rows have company identity columns via alias map
-                _sec_norm = {k.lower().replace(' ', '_').replace('-', '_')
-                             for k in sec_headers}
-                if sec_rows and ('company_name' in _sec_norm
-                                or 'company_name' in set(
-                                    self._get_alias(ws).get(k, '')
-                                    for k in sec_headers)):
-                    combined_rows = sec_rows
-                else:
-                    investment_rows = sec_rows
-            elif sec_name == '__default__' and not company_rows and not combined_rows:
-                combined_rows = sec_rows
+        def _section_has_amount_column(sec_headers, alias_map):
+            for h in sec_headers:
+                if not h:
+                    continue
+                norm = (str(h).lower().replace(' ', '_')
+                                       .replace('-', '_').strip())
+                if any(tok in norm for tok in amount_tokens):
+                    return True
+                alias_norm = (alias_map.get(h) or '').lower()
+                if any(tok in alias_norm for tok in amount_tokens):
+                    return True
+            return False
 
-        # Promote combined_rows to company_rows if no separate sections found
+        # Pick a "primary" sheet for downstream Format-A fallback (uses
+        # the first sheet in the domain — preserves prior single-sheet
+        # behaviour when nothing aggregable is found).
+        primary_sheet_name = sheet_names[0]
+        ws = wb[primary_sheet_name]
+
+        for sheet_name in sheet_names:
+            sws = wb[sheet_name]
+            sections = self._read_sheet_via_layout(
+                sws, alias_map=self._get_alias(sws),
+            )
+            alias_map_ws = self._get_alias(sws)
+            for sec_name, (sec_headers, sec_rows) in sections.items():
+                subdomain = self._get_section_subdomain(sheet_name, sec_name)
+                if subdomain == 'investment_tranches':
+                    continue  # Handled by _import_tranches
+                elif subdomain == 'temporary_investments':
+                    continue  # Liquid MFs, overnight funds — skip
+                elif subdomain == 'portfolio_companies':
+                    company_rows.extend(sec_rows)
+                elif subdomain == 'investments':
+                    _sec_norm = {k.lower().replace(' ', '_').replace('-', '_')
+                                 for k in sec_headers}
+                    has_co_col = ('company_name' in _sec_norm or
+                                  'company_name' in {alias_map_ws.get(k, '')
+                                                      for k in sec_headers})
+                    if sec_rows and has_co_col:
+                        combined_rows.extend(sec_rows)
+                    else:
+                        investment_rows.extend(sec_rows)
+                elif sec_name == '__default__':
+                    if _section_has_amount_column(sec_headers, alias_map_ws):
+                        combined_rows.extend(sec_rows)
+                    else:
+                        company_rows.extend(sec_rows)
+
+        # When BOTH a dedicated master bucket AND a combined bucket exist,
+        # the combined bucket is really a transactions register (e.g.
+        # Portfolio_Companies + Investment_Register on AI_Trivesta). Route
+        # those rows to investment_rows so each transaction becomes its own
+        # Investment/Tranche row instead of collapsing into Format A.
+        if company_rows and combined_rows:
+            investment_rows.extend(combined_rows)
+            combined_rows = []
+
+        # Single-sheet promotion: when only the combined bucket exists,
+        # treat it as the Format-A flat table (preserves legacy behaviour
+        # for files that pack everything into one sheet).
         if combined_rows and not company_rows:
             company_rows = combined_rows
-            combined_rows = None
+            combined_rows = []
 
         # If we have separate company + investment rows, it's Format B
         if company_rows and investment_rows:
@@ -3239,10 +3350,34 @@ class FundImportService:
                 )
                 companies[name] = company
 
+            # ── Batching pre-pass for investment_rows ─────────────────
+            # Collect every unique instrument-type and investment-status
+            # value across all rows, then classify each set with ONE
+            # Gemini call instead of one call per row. Universal — works
+            # for any number of rows, any language, any file format.
+            _instrument_raws = set()
+            _status_raws = set()
+            for _r in investment_rows:
+                _it = _find_col_str(_r, 'instrument_type', default='')
+                if _it:
+                    _instrument_raws.add(_it)
+                _st = _find_col_str(_r, 'Status', 'Investment Status', default='')
+                if _st:
+                    _status_raws.add(_st)
+            instrument_map = self._classify_enum(
+                list(_instrument_raws), 'instrument_type',
+                context='Investment instrument or security type',
+            ) if _instrument_raws else {}
+            status_map = self._classify_enum(
+                list(_status_raws), 'investment_status',
+                context='Investment/portfolio company status',
+            ) if _status_raws else {}
+
             # Import investment data from the INVESTMENTS section
             for row in investment_rows:
                 name = _find_col_str(
-                    row, 'Company Name', 'Company', 'Name', 'Portfolio Company')
+                    row, 'Company Name', 'Company', 'Name', 'Portfolio Company',
+                    'company_name')
                 if _is_junk_row(name):
                     continue  # skip subtotal/total/header rows
 
@@ -3266,12 +3401,10 @@ class FundImportService:
 
                 instrument_raw = _find_col_str(
                     row, 'instrument_type', default='Equity')
-                instrument_result = self._classify_enum(
-                    [instrument_raw], 'instrument_type',
-                    context='Investment instrument or security type')
-                instrument = instrument_result.get(instrument_raw, 'equity')
+                instrument = instrument_map.get(instrument_raw, 'equity')
 
-                stage = _find_col_str(row, 'Round', 'Stage', 'Funding Round', 'Round Name')
+                stage = _find_col_str(row, 'Round', 'Stage', 'Funding Round',
+                                       'Round Name', 'stage')
                 irr_raw = _find_col_decimal(
                     row, 'IRR%(Gross)', 'IRR%', 'Gross IRR', 'IRR', 'irr_pct')
                 hold_pct = _find_col_decimal(
@@ -3283,10 +3416,11 @@ class FundImportService:
                     row, 'Total Invested (Cr)', 'Total Invested',
                     'Cost (Cr)', 'Cost(Cr)', 'Cost(₹Cr)',
                     'Cost', 'Invested', 'Investment Amount', 'Amount',
-                    'total_invested')
+                    'total_invested', 'tranche_amount', 'amount_invested',
+                    'investment_amount', 'cost_of_investment')
                 inv_date = _find_col_date(
                     row, 'Investment Date', 'Inv.Date', 'Date',
-                    'investment_date')
+                    'investment_date', 'tranche_date')
                 status_raw = _find_col_str(
                     row, 'Status', 'Investment Status', default='Active')
                 board_seat = _find_col_bool(
@@ -3294,10 +3428,7 @@ class FundImportService:
                 is_lead = _find_col_bool(
                     row, 'Lead Investor', 'Is Lead', 'Lead')
 
-                status_result = self._classify_enum(
-                    [status_raw], 'investment_status',
-                    context='Investment/portfolio company status')
-                status = status_result.get(status_raw, 'active')
+                status = status_map.get(status_raw, 'active')
 
                 inv_defaults = {
                     'company_name': name,
@@ -3343,6 +3474,31 @@ class FundImportService:
             _, rows = read_table_from_sheet(ws, alias_map=self._get_alias(ws))
 
         total_rows = len(rows)
+
+        # ── Batching pre-pass for Format-A rows ───────────────────────
+        # Collect unique quoted-status and investment-status values
+        # before the loop so each category hits Gemini ONCE per
+        # category instead of once per row. Universal pattern.
+        _listing_raws = set()
+        _status_raws_a = set()
+        for _r in rows:
+            _ls = _find_col_str(
+                _r, 'Listed', 'Listing Status', 'Quoted', 'Listed/Unlisted',
+                'Quoted/Unquoted', 'Public/Private', 'is_quoted')
+            if _ls:
+                _listing_raws.add(_ls)
+            _ss = _find_col_str(_r, 'Status', 'Investment Status', default='')
+            if _ss:
+                _status_raws_a.add(_ss)
+        quoted_map = self._classify_enum(
+            list(_listing_raws), 'quoted_status',
+            context='Listing status of portfolio company',
+        ) if _listing_raws else {}
+        status_map_a = self._classify_enum(
+            list(_status_raws_a), 'investment_status',
+            context='Investment/portfolio company status',
+        ) if _status_raws_a else {}
+
         row_idx = 0
         for row in rows:
             row_idx += 1
@@ -3353,7 +3509,8 @@ class FundImportService:
                 pct = int(47 + frac * 5)   # interpolate 47→52
                 _cb(pct, f'Importing company {row_idx} of {total_rows}...')
             name = _find_col_str(
-                row, 'Company Name', 'Company', 'Name', 'Portfolio Company')
+                row, 'Company Name', 'Company', 'Name', 'Portfolio Company',
+                'company_name')
             if _is_junk_row(name):
                 continue  # skip subtotal/total/header rows
 
@@ -3382,9 +3539,7 @@ class FundImportService:
             if country:
                 pc_update['headquarters_country'] = country
             if listing_raw:
-                qs = self._classify_enum([listing_raw], 'quoted_status',
-                                          context='Listing status of portfolio company')
-                pc_update['is_quoted'] = (qs.get(listing_raw) == 'quoted')
+                pc_update['is_quoted'] = (quoted_map.get(listing_raw) == 'quoted')
             if listing_exchange:
                 pc_update['listing_exchange'] = listing_exchange.upper()
 
@@ -3396,30 +3551,30 @@ class FundImportService:
             companies[name] = company
 
             round_name = _find_col_str(
-                row, 'Round', 'Funding Round', 'Stage', 'round_name')
+                row, 'Round', 'Funding Round', 'Stage', 'round_name', 'stage')
             irr_raw_a = _find_col_decimal(
                 row, 'IRR%(Gross)', 'IRR%', 'Gross IRR', 'IRR', 'irr_pct',
                 'Net IRR', 'IRR (Gross)')
             invested = _find_col_decimal(
                 row, 'Cost (Cr)', 'Cost(Cr)', 'Cost(₹Cr)',
                 'Cost', 'Invested', 'Total Invested',
-                'Investment Amount', 'Amount', 'total_invested')
+                'Investment Amount', 'Amount', 'total_invested',
+                'tranche_amount', 'amount_invested', 'investment_amount',
+                'cost_of_investment')
             hold_pct = _find_col_decimal(
                 row, 'Hold%', 'Holding %', 'Ownership', 'Ownership %',
                 'ownership_pct')
             fd_pct = _find_col_decimal(
                 row, 'FD%', 'Fully Diluted %', 'FD', 'Diluted %')
             inv_date = _find_col_date(
-                row, 'Inv.Date', 'Investment Date', 'Date', 'investment_date')
+                row, 'Inv.Date', 'Investment Date', 'Date', 'investment_date',
+                'tranche_date')
             status_raw = _find_col_str(row, 'Status', 'Investment Status',
                                        default='Active')
             board_seat = _find_col_bool(row, 'Board', 'Board Seat',
                                          'Has Board Seat')
 
-            status_result = self._classify_enum(
-                [status_raw], 'investment_status',
-                context='Investment/portfolio company status')
-            status = status_result.get(status_raw, 'active')
+            status = status_map_a.get(status_raw, 'active')
 
             inv_a_defaults = {
                 'portfolio_company': company,
@@ -3491,13 +3646,18 @@ class FundImportService:
     def _import_tranches(self, wb, investments, domain_map):
         """Create InvestmentTranche records.
 
-        Handles two formats:
-        1. Dedicated INVESTMENT TRANCHES section within a multi-section sheet
-           with explicit tranche #, amount, date, shares, PPS etc. (Format B)
-        2. Flat table where each company row doubles as a single tranche (Format A)
+        Handles two formats across ANY/ALL sheets in the
+        portfolio_investments domain (master + dedicated tranches often
+        live on separate sheets):
+        1. Dedicated INVESTMENT TRANCHES section
+        2. Flat table where each company row doubles as a single tranche
+        Most files are now fully covered by _import_portfolio (Format B
+        multi-sheet aggregation) — this importer is the legacy fallback
+        for files that explicitly tag a section as `investment_tranches`.
         """
-        sheet_name = _dm_first(domain_map, 'portfolio_investments')
-        if not sheet_name or sheet_name not in wb.sheetnames:
+        sheet_names = [s for s in _dm_sheets(domain_map, 'portfolio_investments')
+                       if s in wb.sheetnames]
+        if not sheet_names:
             return
 
         if investments and all(
@@ -3506,23 +3666,34 @@ class FundImportService:
         ):
             return
 
-        ws = wb[sheet_name]
-
-        sections = self._read_sheet_via_layout(ws, alias_map=self._get_alias(ws))
+        # Locate the first sheet that contains an `investment_tranches`
+        # sub-section. Walking ALL sheets keeps this importer in sync with
+        # the multi-sheet aggregation now performed by _import_portfolio.
         tranche_rows = None
-        for sec_name, (sec_headers, sec_rows) in sections.items():
-            subdomain = self._get_section_subdomain(sheet_name, sec_name)
-            if subdomain == 'investment_tranches':
-                tranche_rows = sec_rows
+        chosen_sheet = sheet_names[0]
+        for sheet_name in sheet_names:
+            sws = wb[sheet_name]
+            sections = self._read_sheet_via_layout(
+                sws, alias_map=self._get_alias(sws),
+            )
+            for sec_name, (sec_headers, sec_rows) in sections.items():
+                subdomain = self._get_section_subdomain(sheet_name, sec_name)
+                if subdomain == 'investment_tranches':
+                    tranche_rows = sec_rows
+                    chosen_sheet = sheet_name
+                    break
+            if tranche_rows:
                 break
 
+        ws = wb[chosen_sheet]
         count = 0
 
         if tranche_rows:
             # Format B: Dedicated tranche section
             for row in tranche_rows:
                 name = _find_col_str(
-                    row, 'Company Name', 'Company', 'Name', 'Portfolio Company')
+                    row, 'Company Name', 'Company', 'Name', 'Portfolio Company',
+                    'company_name')
                 if _is_junk_row(name):
                     continue
 
@@ -3540,10 +3711,12 @@ class FundImportService:
 
                 invested = _find_col_decimal(
                     row, 'Amount (Cr)', 'Amount', 'Cost(₹Cr)', 'Cost',
-                    'Invested', 'Total Invested', 'Investment Amount')
+                    'Invested', 'Total Invested', 'Investment Amount',
+                    'tranche_amount', 'amount_invested', 'investment_amount',
+                    'cost_of_investment')
                 inv_date = _find_col_date(
                     row, 'Date', 'Inv.Date', 'Investment Date',
-                    'Tranche Date')
+                    'Tranche Date', 'tranche_date', 'investment_date')
                 round_name = _find_col_str(
                     row, 'Round Name', 'Round', 'Funding Round', 'Stage')
                 shares = _find_col_decimal(
@@ -3590,7 +3763,8 @@ class FundImportService:
 
         for row in rows:
             name = _find_col_str(
-                row, 'Company Name', 'Company', 'Name', 'Portfolio Company')
+                row, 'Company Name', 'Company', 'Name', 'Portfolio Company',
+                'company_name')
             if _is_junk_row(name):
                 continue
 
@@ -3604,11 +3778,13 @@ class FundImportService:
 
             invested = _find_col_decimal(
                 row, 'Cost(₹Cr)', 'Cost', 'Invested', 'Total Invested',
-                'Investment Amount', 'Amount')
+                'Investment Amount', 'Amount', 'tranche_amount',
+                'amount_invested', 'investment_amount', 'cost_of_investment')
             inv_date = _find_col_date(
-                row, 'Inv.Date', 'Investment Date', 'Date')
+                row, 'Inv.Date', 'Investment Date', 'Date', 'tranche_date',
+                'investment_date')
             round_name = _find_col_str(
-                row, 'Round', 'Funding Round', 'Stage')
+                row, 'Round', 'Funding Round', 'Stage', 'stage')
             shares = _find_col_decimal(
                 row, 'Shares', 'Shares Acquired', 'No. of Shares')
             pps = _find_col_decimal(
@@ -3658,6 +3834,28 @@ class FundImportService:
         ws = wb[sheet_name]
         _, rows = read_table_from_sheet(ws, alias_map=self._get_alias(ws))
 
+        # ── Batching pre-pass: methodology + ipev_level ───────────────
+        _meth_raws = set()
+        _ipev_raws = set()
+        for _r in rows:
+            _m = _find_col_str(
+                _r, 'Methodology', 'Method', 'Valuation Method',
+                'Val Method', 'IPEV Technique', 'Technique',
+                'Val. Method', 'Valuation Basis')
+            if _m:
+                _meth_raws.add(_m)
+            _ip = _find_col_str(_r, 'ipev_level', 'ipev_technique')
+            if _ip:
+                _ipev_raws.add(_ip)
+        method_map = self._classify_enum(
+            list(_meth_raws), 'valuation_methodology',
+            context='Valuation methodology for portfolio company',
+        ) if _meth_raws else {}
+        ipev_map = self._classify_enum(
+            list(_ipev_raws), 'ipev_level',
+            context='IPEV fair value hierarchy level',
+        ) if _ipev_raws else {}
+
         count = 0
         for row in rows:
             name = _find_col_str(
@@ -3681,10 +3879,7 @@ class FundImportService:
                 'Val Method', 'IPEV Technique', 'Technique',
                 'Val. Method', 'Valuation Basis')
 
-            val_method_result = self._classify_enum(
-                [methodology_raw], 'valuation_methodology',
-                context='Valuation methodology for portfolio company')
-            methodology = val_method_result.get(methodology_raw, 'cost')
+            methodology = method_map.get(methodology_raw, 'cost')
 
             ev = _find_col_decimal(
                 row, 'EV(₹Cr)', 'Enterprise Value (Cr)',
@@ -3721,10 +3916,7 @@ class FundImportService:
             _ipev_technique_raw = _find_col_str(
                 row, 'ipev_level', 'ipev_technique')
             if _ipev_technique_raw:
-                _ipev_result = self._classify_enum(
-                    [_ipev_technique_raw], 'ipev_level',
-                    context='IPEV fair value hierarchy level')
-                _ipev_mapped = _ipev_result.get(_ipev_technique_raw, str(ipev_level))
+                _ipev_mapped = ipev_map.get(_ipev_technique_raw, str(ipev_level))
                 try:
                     ipev_level = int(_ipev_mapped)
                 except (ValueError, TypeError):
@@ -7589,6 +7781,20 @@ class FundImportService:
         """
         exit_count = 0
         default_scheme = list(investments.values())[0].scheme if investments else None
+
+        # ── Batching pre-pass: exit_type ───────────────────────────────
+        _exit_route_raws = set()
+        for _r in rows:
+            _er = _find_col_str(
+                _r, 'Exit Route', 'Exit Type', 'Route', 'Exit Method',
+                'exit_type')
+            if _er:
+                _exit_route_raws.add(_er)
+        exit_type_map = self._classify_enum(
+            list(_exit_route_raws), 'exit_type',
+            context='Exit route / exit type for portfolio investment',
+        ) if _exit_route_raws else {}
+
         for row in rows:
             name = _find_col_str(
                 row, 'Company Name', 'Company', 'Name', 'Portfolio Company')
@@ -7674,11 +7880,7 @@ class FundImportService:
             net_irr = (net_irr_raw * 100) if (net_irr_raw is not None and net_irr_raw < 2) else net_irr_raw
             is_actual_raw = _find_col_str(row, 'Is Actual', default='Yes')
 
-            # Classify exit type via Gemini
-            exit_type_result = self._classify_enum(
-                [exit_route], 'exit_type',
-                context='Exit route / exit type for portfolio investment')
-            exit_type = exit_type_result.get(exit_route, 'secondary_sale')
+            exit_type = exit_type_map.get(exit_route, 'secondary_sale')
 
             is_actual = is_actual_raw.lower() in ('yes', 'true', '1', 'y')
 
@@ -7792,6 +7994,24 @@ class FundImportService:
         if not default_scheme:
             return
 
+        # Distribution dedup — when the dedicated `exits_distributions`
+        # sheet already produced Distribution rows for this scheme via
+        # _import_exits_and_distributions / _process_distribution_rows
+        # (which runs before this importer), the LP-register column is
+        # a derived/secondary view of the same cash flows. Adding our
+        # consolidated record on top of that double-counts distributions
+        # (observed on AI_Trivesta: 215 from dedicated sheet + 160.74 from
+        # LP register = 375.74 phantom total). Skip when authoritative
+        # records already exist. Universal — applies to every fund.
+        from lp.models import Distribution as _DistModel
+        if _DistModel.objects.filter(scheme=default_scheme).exists():
+            logger.info(
+                '  Distributions: skipping LP-register fallback — '
+                'authoritative records already imported from the '
+                'distributions/exits sheet.'
+            )
+            return
+
         # Try investors_aml sheet for flat-format LP distribution data
         sheet_name = _dm_first(domain_map, 'investors_aml')
         if not sheet_name or sheet_name not in wb.sheetnames:
@@ -7802,14 +8022,22 @@ class FundImportService:
 
         # Check if this sheet actually has distribution columns
         # (Format B investor sheets don't have distribution amounts)
-        # Detect distribution columns via Gemini Pass 2 canonical field names
+        # Detect distribution columns via Gemini Pass 2 canonical field names.
+        # The canonical set must include every canonical key Pass 2 produces
+        # for distribution-shaped columns; otherwise an LP-register sheet
+        # that uses canonical names like "total_distributions_received" will
+        # be wrongly skipped.
         has_dist_col = False
         if rows:
             sample = rows[0]
             _keys_norm = {k.lower().replace(' ', '_').replace('-', '_')
                           for k in sample.keys()}
-            dist_fields = {'gross_amount', 'net_amount', 'tds_amount',
-                           'distribution_amount', 'distribution_type'}
+            dist_fields = {
+                'gross_amount', 'net_amount', 'tds_amount',
+                'distribution_amount', 'distribution_type',
+                'total_distributions_received',
+                'total_gross_amount', 'total_net_amount',
+            }
             has_dist_col = bool(dist_fields & _keys_norm)
         if not has_dist_col:
             return
@@ -7819,13 +8047,16 @@ class FundImportService:
         total_gross = Decimal('0')
         for row in rows:
             inv_name = _find_col_str(
-                row, 'Investor Name', 'LP Name', 'Name', 'Investor')
+                row, 'Investor Name', 'LP Name', 'Name', 'Investor',
+                'investor_name')
             if not inv_name or inv_name not in commitments:
                 continue
 
             dist_amt = _find_col_decimal(
                 row, 'Distributions', 'Distribution', 'Returned',
-                'Amount Returned', 'Total Distribution')
+                'Amount Returned', 'Total Distribution',
+                'total_distributions_received', 'distribution_amount',
+                'gross_amount', 'net_amount')
             if not dist_amt or dist_amt <= 0:
                 continue
 

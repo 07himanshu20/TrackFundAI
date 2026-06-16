@@ -730,6 +730,24 @@ CANONICAL_VALUE_CATEGORIES = {
         'pct_share':       '% Fund / Share % / Ownership % / LP Share — proportion of fund corpus held by this LP',
         'drawn_pct':       'Drawn % / % Drawn / Drawdown % — proportion of commitment actually called',
     },
+    # ── Valuation sheet column roles (Phase 8 — IPEV compliance) ──
+    # Used by valuation_python_sweep() to identify which column on a
+    # portfolio-valuation sheet is the canonical Net Fair Value (post
+    # DLOM/DLOC) versus an intermediate Gross FV. IPEV / Ind AS 113 require
+    # Net FV (after illiquidity + minority discounts) to be the value
+    # reported in NAV. Gemini's fund_analyst sometimes picks Gross FV
+    # because it appears first in the sheet — this category lets a
+    # deterministic Python sweep correct that universally.
+    'valuation_columns': {
+        'net_fv':         'Net Fair Value / Net FV / Adjusted FV / FV after DLOM/DLOC / Final FV / Carrying Value — the post-discount IPEV-compliant fair value that flows into NAV (canonical)',
+        'gross_fv':       'Gross Fair Value / Gross FV / FV before Discount / Pre-Discount FV / Indicative FV / Enterprise Equity Value — intermediate value BEFORE applying DLOM/DLOC discounts (not the NAV input)',
+        'cost_basis':     'Cost / Investment Cost / Acquisition Cost / Capital Invested / Cost of Investment — original capital deployed',
+        'equity_pct':     'Equity % / Ownership % / Holding % / FD % / Stake — fund\'s ownership stake in the investee',
+        'gain_loss':      'Unrealised Gain / Unrealised Loss / Mark-to-Market / FV minus Cost — unrealised appreciation/depreciation of the holding',
+        'valuation_date': 'Valuation Date / As-of Date / Reporting Date — date at which the valuation was performed',
+        'valuation_method': 'Valuation Method / Valuation Approach / Methodology — DCF / comparables / recent transaction / cost / etc.',
+        'company_name':   'Company / Portfolio Company / Investee Name — identifier of the investee being valued',
+    },
     # Per-portfolio-company compliance OBLIGATION TYPE (column header in a tracker grid).
     # Lives here (not in CANONICAL_ENUM_TYPES) because identity columns like
     # "Company Name" / "Sector" / "S.No" MUST be allowed to return None — only
@@ -1192,6 +1210,18 @@ CANONICAL_METADATA_FIELDS = {
         'management_fee_basis': {'desc': 'Fee basis: committed, called, or nav', 'type': 'enum'},
         'sponsor_commitment_pct': {'desc': 'Sponsor/GP commitment as percentage of scheme size', 'type': 'pct'},
         'vintage_year': {'desc': 'Vintage year or inception year of the scheme', 'type': 'int'},
+        # Phase 9 — time-dependent fee structure.
+        # Indian AIFs commonly charge a higher mgmt fee during the
+        # Investment Period (typically on Committed Capital) and a lower
+        # fee post-IP (typically on NAV). The single management_fee_pct /
+        # management_fee_basis fields capture whichever rate Gemini
+        # picked; these two additional fields capture the post-IP rate
+        # explicitly so the pipeline can switch to it once the fund is
+        # past its IP. Universal — when a file lists only one rate,
+        # these stay null and no switch happens.
+        'investment_period_years': {'desc': 'Investment Period length in years — the deployment window from final close, after which management fee terms typically change', 'type': 'int'},
+        'mgmt_fee_pct_post_ip': {'desc': 'Post-Investment-Period management fee rate (when the file lists a separate rate for after the IP ends)', 'type': 'pct'},
+        'mgmt_fee_basis_post_ip': {'desc': 'Post-Investment-Period fee basis (typically "nav" once active deployment ends). One of: committed, called, nav', 'type': 'enum'},
     },
     'fund_identity': {
         'fund_name': {'desc': 'Name of the AIF fund or scheme', 'type': 'str'},

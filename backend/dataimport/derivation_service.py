@@ -30,6 +30,7 @@ and Gemini does the semantic mapping.
 
 import ast
 import logging
+import math
 import operator
 import os
 import traceback
@@ -1515,6 +1516,38 @@ class MetricDerivationService:
                 inputs_used if passthrough_inputs
                 else self._serialise_inputs(inputs_used, ctx_inputs)
             )
+
+            # ── Pass 4 unviable guard ─────────────────────────────────
+            # When Gemini returns no viable formula or evaluation fails,
+            # `value` is None. In that case we MUST NOT overwrite the
+            # existing DerivedMetric row that persist_fund wrote at
+            # Stage 4a (which carries the Stage-1B Python fallback value
+            # or the Gemini-extracted Stage-1 value). Overwriting with
+            # None blanks the dashboard for any metric Pass 4 couldn't
+            # derive (Net IRR, GP Carry Net, Clawback Provision were the
+            # symptoms in the AI_Trivesta import).
+            # Instead we update only the audit fields (formula, reasoning,
+            # candidates) so the Pass-4 attempt is recorded, while the
+            # numeric value field is preserved.
+            # Universal — applies to every metric, every fund.
+            if value is None:
+                existing = DerivedMetric.objects.filter(
+                    scheme=self.scheme, metric_key=metric_key,
+                ).first()
+                if existing is not None:
+                    existing.formula_expression = (formula or existing.formula_expression or '')[:2000]
+                    existing.gemini_reasoning = (
+                        reasoning or existing.gemini_reasoning or ''
+                    )[:4000]
+                    existing.candidate_formulas = candidates or existing.candidate_formulas or []
+                    existing.save(update_fields=[
+                        'formula_expression', 'gemini_reasoning',
+                        'candidate_formulas',
+                    ])
+                    return
+                # No existing row to preserve — write a NULL row so the
+                # audit trail still shows Pass 4 attempted this metric.
+
             DerivedMetric.objects.update_or_create(
                 scheme=self.scheme,
                 metric_key=metric_key,
@@ -1529,6 +1562,32 @@ class MetricDerivationService:
                     'source_import_file': self.source_import_file,
                 },
             )
+
+            # AF — When Gemini's rank-1 formula validates and evaluates to
+            # a real value, the FundMetric (which the dashboard reads
+            # directly) must also reflect Gemini's value + formula text.
+            # Otherwise the dashboard shows Python's Stage-1B fallback
+            # value alongside Gemini's formula text — value and formula
+            # disagree. We mirror Pass 4's choice into FundMetric only for
+            # existing rows (persist_fund created them at Stage 4a) so we
+            # never duplicate or invent FundMetric rows.
+            # Universal — applies to every metric in every fund. No
+            # per-file gating.
+            if value is not None and not passthrough_inputs:
+                try:
+                    self._mirror_to_fund_metric(
+                        metric_key=metric_key,
+                        value=value,
+                        formula=formula,
+                        serialised_inputs=serialised_inputs,
+                        confidence=confidence,
+                        reasoning=reasoning,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        'Pass4 FundMetric mirror failed for %s: %s',
+                        metric_key, e,
+                    )
             # Record candidate for the Arbiter. Pass 4 candidates are
             # always classified into Tier C (catalogue derivation) by
             # the Arbiter, so a Pass 9 / Pass 8 / Pass 3.5 value will
@@ -1558,6 +1617,64 @@ class MetricDerivationService:
             logger.error(
                 'Pass4 PERSIST failed scheme=%s metric=%s: %s',
                 _safe_get(self.scheme, 'id', '?'), metric_key, e,
+            )
+
+    def _mirror_to_fund_metric(self, metric_key, value, formula,
+                                serialised_inputs, confidence, reasoning):
+        """AF — Mirror Pass 4's Gemini-derived value+formula back into
+        FundMetric so the dashboard's headline number and the formula
+        text it displays come from the same evaluation.
+
+        The FundMetric key namespace (anchor_pipeline.FUND_METRIC_KEYS)
+        differs from the DerivedMetric/Pass-4 namespace for a small set
+        of historical mappings (e.g. DerivedMetric 'nav' ↔ FundMetric
+        'fund_nav'). We invert LEGACY_DERIVED_MAP to translate. Metric
+        keys without a mapping pass through unchanged.
+
+        We only UPDATE existing FundMetric rows; we never create new
+        ones. persist_fund (Stage 4a) is the sole creator. This keeps
+        the row set bounded to the FUND_METRIC_KEYS list and avoids
+        accumulating Pass-4-only synthetic rows.
+
+        Sanity gate: only mirror when value is finite. NaN/Inf would
+        poison downstream display.
+        """
+        try:
+            fv = float(value)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(fv):
+            return
+        try:
+            from .models import FundMetric
+            from .anchor_pipeline import LEGACY_DERIVED_MAP
+        except Exception:
+            return
+        inverse_legacy = {v: k for k, v in LEGACY_DERIVED_MAP.items()}
+        fund_metric_key = inverse_legacy.get(metric_key, metric_key)
+        # Use .update() so we touch only an existing row. Returns rows
+        # affected; 0 means no FundMetric exists for this scheme/key
+        # (waterfall component not in FUND_METRIC_KEYS, etc.) — skip
+        # silently rather than create a row.
+        affected = FundMetric.objects.filter(
+            scheme=self.scheme, metric_key=fund_metric_key,
+        ).update(
+            value=Decimal(str(fv)),
+            formula_expression=(formula or '')[:2000],
+            inputs_used=serialised_inputs or {},
+            provenance={
+                'source': 'computed',
+                'reasoning': (reasoning or '')[:4000],
+                'pass4_override': True,
+                'pass4_confidence': max(0.0, min(1.0, float(confidence or 0))),
+                'inputs_used': serialised_inputs or {},
+            },
+            source='computed',
+        )
+        if affected:
+            logger.info(
+                '[Pass4 FundMetric override] %s ← Gemini value=%s formula="%s"',
+                fund_metric_key, fv, (formula or '')[:80],
             )
 
     def _serialise_inputs(self, inputs_used, ctx_inputs):

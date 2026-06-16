@@ -195,8 +195,22 @@ not derivable from the file):
   hurdle_rate            : decimal (0.08 = 8%)
   carry_pct              : decimal (0.20 = 20%)
   catchup_pct            : decimal (1.0 = 100%)
-  mgmt_fee_pct           : decimal (0.02 = 2%)
-  mgmt_fee_basis         : "committed" | "called" | "nav" | null
+  mgmt_fee_pct           : decimal (0.02 = 2%) — the rate currently in
+                            effect (use post-IP rate when the as_of_date
+                            is past the Investment Period; otherwise use
+                            the Investment-Period rate)
+  mgmt_fee_basis         : "committed" | "called" | "nav" | null — the
+                            basis currently in effect
+  mgmt_fee_pct_post_ip   : decimal (0.015 = 1.5%) — the SEPARATE post-
+                            Investment-Period rate when the file lists
+                            BOTH IP and post-IP rates. NULL when only
+                            one rate exists
+  mgmt_fee_basis_post_ip : "committed" | "called" | "nav" | null — the
+                            post-IP basis (typically "nav"). NULL when
+                            only one basis exists
+  investment_period_years: int (5 = 5 years) — Investment Period length,
+                            usually stated as "Investment Period" or
+                            "Deployment Window" in the PPM/Cover sheet
   fund_start_date        : YYYY-MM-DD (first close / inception)
 
 ──── PERFORMANCE RATIOS (prefer stated, compute if missing) ────
@@ -377,6 +391,323 @@ def _find_header_row(ws, max_rows_to_scan=20):
     return (best[0], best[1])
 
 
+_PERIOD_TOKENS_RE = None
+
+
+def _is_long_format_period_sheet(ws, header_row, max_check=25):
+    """Decide if a sheet is laid out as one ROW per reporting period
+    (a long-format time series) vs one ROW per investment.
+
+    Universal — no fund-specific keywords. We look at the first data
+    column for cells that parse as a date OR match a period-label
+    pattern (Sep-21, Mar-26, Q1 FY24, FY 2023-24, Jun 2024, 2025-Q3,
+    etc.). When most non-empty cells in column 1 look like periods,
+    the sheet is treating ROWS as time slices — so the canonical
+    portfolio value at the as-of date is the LATEST row, not a sum.
+    """
+    import re
+    global _PERIOD_TOKENS_RE
+    if _PERIOD_TOKENS_RE is None:
+        # Compile once. Patterns cover the common period notations across
+        # AIF/PE workbooks worldwide. None are fund-specific.
+        _PERIOD_TOKENS_RE = re.compile(
+            r'^('
+            # MMM-YY  e.g. Sep-21, Mar-26
+            r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[ \-/]?\d{2,4}'
+            # FY YYYY or FY YYYY-YY  e.g. FY 2023-24, FY24, FY 24
+            r'|fy[ \-]?\d{2,4}(?:[\-/]\d{2,4})?'
+            # Q1 FY24 / FY24Q1 / Q1 2024 / 2024Q1
+            r'|q[1-4][ \-]?(?:fy[ \-]?\d{2,4}|\d{4})'
+            r'|(?:fy[ \-]?\d{2,4}|\d{4})[ \-]?q[1-4]'
+            # YYYY-MM / YYYY/MM
+            r'|\d{4}[\-/](?:0?[1-9]|1[0-2])'
+            # MM/YYYY / MM-YYYY
+            r'|(?:0?[1-9]|1[0-2])[\-/]\d{4}'
+            # Year alone — 4 digits, 1990..2099
+            r'|(?:19|20)\d{2}'
+            r')$',
+            re.IGNORECASE,
+        )
+    n_period = 0
+    n_filled = 0
+    for r in range(header_row + 1,
+                   min(ws.max_row + 1, header_row + 1 + max_check)):
+        if _is_total_row(ws, r):
+            continue
+        v = ws.cell(row=r, column=1).value
+        if v is None or v == '':
+            continue
+        n_filled += 1
+        # Native datetime → definitely a period.
+        if isinstance(v, (date, datetime)):
+            n_period += 1
+            continue
+        # Numeric → not a period (would be IDs/codes).
+        if isinstance(v, (int, float)):
+            continue
+        s = str(v).strip().lower()
+        if not s:
+            continue
+        if _PERIOD_TOKENS_RE.match(s):
+            n_period += 1
+    if n_filled < 3:
+        return False
+    return (n_period / n_filled) >= 0.6
+
+
+def valuation_python_sweep(filepath, fund_data):
+    """Phase 8 (Bug V) — universal IPEV-compliant Net FV extraction.
+
+    Gemini's fund_analyst occasionally picks the Gross FV column on a
+    portfolio valuation sheet (the column that appears BEFORE DLOM and
+    DLOC discounts), even when the file explicitly states that the Net
+    FV column is the canonical NAV input. This silently over-states the
+    fund's active fair value.
+
+    Universal fix:
+      1. For each sheet, find the header row, classify column headers
+         via Pass 3 classify_labels → valuation_columns category.
+      2. Identify the best sheet: the one with the MOST role-tagged
+         columns and at least a `cost_basis` + (`net_fv` or `gross_fv`).
+      3. If both net_fv and gross_fv columns exist, IPEV says use net_fv.
+      4. Sum the chosen column across data rows (skip TOTAL/SUBTOTAL).
+      5. Override fund_data['active_fair_value'] when the Python sum
+         disagrees with Gemini's existing value by >5%.
+
+    No keywords. Same semantic flow for every fund. For a fund whose
+    portfolio sheet has only one FV column, the classifier returns that
+    role and the sum matches Gemini — no override fires.
+    """
+    try:
+        import openpyxl
+    except Exception:
+        return fund_data
+
+    try:
+        from .gemini_column_mapper import classify_labels
+        from .canonical_schema import CANONICAL_VALUE_CATEGORIES
+    except Exception:
+        return fund_data
+    canonical = CANONICAL_VALUE_CATEGORIES.get('valuation_columns')
+    if not canonical:
+        return fund_data
+
+    try:
+        wb = openpyxl.load_workbook(filepath, data_only=True)
+    except Exception as e:
+        logger.warning(f'workbook open failed in valuation sweep: {e}')
+        return fund_data
+
+    best = None  # (score, sum_value, role_used, sheet_name, col_letter, header, row_range, n_rows)
+    NUMERIC_ROLES = {'net_fv', 'gross_fv', 'cost_basis', 'gain_loss', 'equity_pct'}
+
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        if ws.max_row < 4 or ws.max_column < 3:
+            continue
+        header_row, headers = _find_header_row(ws)
+        if not headers:
+            continue
+        header_strs = [str(h).strip() for h in headers
+                       if h is not None and str(h).strip()]
+        if len(header_strs) < 4:
+            continue
+
+        try:
+            mapping = classify_labels(
+                header_strs, 'valuation_columns', canonical,
+                context='Portfolio valuation sheet — per-investment fair value computation chain'
+            )
+        except Exception:
+            continue
+        if not mapping:
+            continue
+
+        # Index columns by role (first occurrence wins per role)
+        role_to_col = {}
+        for col_idx, original in enumerate(headers, start=1):
+            if original is None:
+                continue
+            h = str(original).strip()
+            role = mapping.get(h)
+            if role and role not in role_to_col:
+                role_to_col[role] = (col_idx, h)
+
+        # Sheet must look like a valuation sheet: needs cost_basis AND
+        # at least one of (net_fv, gross_fv). This is the stable signal
+        # vs. an LP register or NAV ledger which won't have cost_basis.
+        if 'cost_basis' not in role_to_col:
+            continue
+        if 'net_fv' not in role_to_col and 'gross_fv' not in role_to_col:
+            continue
+
+        # IPEV-compliant pick: net_fv when present, else gross_fv.
+        chosen_role = 'net_fv' if 'net_fv' in role_to_col else 'gross_fv'
+        col_idx, col_header = role_to_col[chosen_role]
+        col_letter = openpyxl.utils.get_column_letter(col_idx)
+
+        # AE — Long-format time-series detection.
+        # When the first data column carries dates/periods (Sep-21, Mar-26,
+        # Q1 FY24, etc.), the sheet's rows are PERIODS, not investments.
+        # In that case the canonical portfolio value at the as-of date is
+        # the LATEST non-empty row's value — not the sum across periods.
+        # When the first column carries identifiers (Inv_ID, Co_ID, names)
+        # the sheet's rows ARE investments and summation is correct.
+        is_period_layout = _is_long_format_period_sheet(ws, header_row)
+
+        total = 0.0
+        latest_val = None
+        first_row = None
+        last_row = None
+        n_rows = 0
+        for r in range(header_row + 1, ws.max_row + 1):
+            if _is_total_row(ws, r):
+                continue
+            v = ws.cell(row=r, column=col_idx).value
+            if isinstance(v, (int, float)):
+                total += float(v)
+                latest_val = float(v)  # last non-empty wins (sheet is
+                                        # chronologically ordered if periodic)
+                if first_row is None:
+                    first_row = r
+                last_row = r
+                n_rows += 1
+        if n_rows < 3:
+            continue
+
+        if is_period_layout:
+            # In a long-format time series we trust the LATEST row only.
+            # Skip if the latest period had no value (amber/blank).
+            if latest_val is None or latest_val <= 0:
+                continue
+            total = latest_val
+            # Tighten the source-cell range to the single picked row.
+            first_row = last_row
+        else:
+            if total <= 0:
+                continue
+
+        # Score: more numeric roles + presence of both net & gross + more
+        # rows = stronger signal. Used to pick the BEST valuation sheet
+        # across the whole workbook if multiple candidates exist.
+        score = (
+            len(set(role_to_col) & NUMERIC_ROLES) * 100
+            + (200 if ('net_fv' in role_to_col and 'gross_fv' in role_to_col) else 0)
+            + n_rows
+        )
+        candidate = (score, total, chosen_role, sheet_name, col_letter,
+                     col_header, f'{col_letter}{first_row}:{col_letter}{last_row}',
+                     n_rows)
+        if best is None or candidate[0] > best[0]:
+            best = candidate
+
+    if best is None:
+        return fund_data
+
+    score, py_val, chosen_role, sheet, col, header, rng, n_rows = best
+
+    existing = fund_data.get('active_fair_value') or {}
+    try:
+        existing_num = float(existing.get('value')) if existing.get('value') is not None else None
+    except (TypeError, ValueError):
+        existing_num = None
+    denom = max(abs(existing_num or 0), abs(py_val), 1.0)
+    delta_ratio = (abs(existing_num - py_val) / denom) if existing_num is not None else 1.0
+
+    # ── IPEV safety gate (universal, no per-file logic) ─────────
+    # IPEV / Ind AS 113 caps the gap between Gross FV and Net FV at
+    # DLOM (15%) + DLOC (10%) + ancillary discounts ≈ 30% max.
+    # When the Python sum differs from the existing value by more than
+    # this, we are NOT looking at a Gross→Net swap — we are summing a
+    # different concept (per-LP allocation, sub-class breakdown, etc).
+    # In that case the existing extraction (often a Cover-sheet stated
+    # total) is more trustworthy than our per-row sum, so we DEFER.
+    #
+    # The gate is bypassed only when the existing extraction targeted
+    # the SAME sheet our sweep chose AND we found a Net FV column on
+    # that sheet — that's the canonical "Gemini picked Gross, we found
+    # Net" scenario, where even a larger delta is acceptable because
+    # both values reference the same row set.
+    IPEV_MAX_DISCOUNT = 0.30
+    same_sheet_swap = (
+        chosen_role == 'net_fv'
+        and existing.get('source_sheet') == sheet
+    )
+    within_ipev_range = (delta_ratio <= IPEV_MAX_DISCOUNT)
+
+    should_override = (
+        existing_num is None
+        or same_sheet_swap
+        or (delta_ratio > 0.05 and within_ipev_range)
+    )
+
+    if existing_num is not None and not should_override:
+        logger.info(
+            f'[valuation_sweep skipped] active_fair_value: existing='
+            f'{existing_num} (sheet={existing.get("source_sheet")}) vs '
+            f'sweep={py_val:.4f} ({sheet}!{rng} role={chosen_role}); '
+            f'delta={delta_ratio*100:.1f}% exceeds IPEV ceiling '
+            f'{IPEV_MAX_DISCOUNT*100:.0f}% — treating sweep as a different '
+            f'concept, preserving existing.'
+        )
+        # Record the rejected sweep as a candidate so the conflict can
+        # be inspected on the dashboard if needed.
+        alts = list(existing.get('candidate_formulas') or [])
+        alts.append({
+            'label': 'valuation_sweep_rejected',
+            'value': py_val,
+            'source_sheet': sheet,
+            'source_cells': [rng],
+            'note': f'Rejected: {delta_ratio*100:.1f}% delta exceeds IPEV ceiling',
+        })
+        existing['candidate_formulas'] = alts
+        fund_data['active_fair_value'] = existing
+        return fund_data
+
+    if should_override:
+        # Preserve the displaced value as a candidate so the dashboard
+        # can render a conflict badge if the two materially disagree.
+        alts = list(existing.get('candidate_formulas') or [])
+        if existing_num is not None and abs(existing_num - py_val) > 1.0:
+            alts.append({
+                'label': 'gemini_extracted_displaced',
+                'value': existing_num,
+                'source_sheet': existing.get('source_sheet'),
+                'note': 'Replaced by IPEV Net FV sum',
+            })
+        fund_data['active_fair_value'] = {
+            'value': py_val,
+            'source': 'extracted',
+            'source_sheet': sheet,
+            'source_cells': [rng],
+            'formula': f'SUM({col} column "{header}" on sheet "{sheet}")',
+            'inputs_used': {
+                'rows_summed': n_rows,
+                'chosen_role': chosen_role,
+                'column_header': header,
+            },
+            'reasoning': (
+                f'Python deterministic sum over {n_rows} rows of column '
+                f'{col} ("{header}") classified as "{chosen_role}" on '
+                f'sheet "{sheet}". IPEV / Ind AS 113 — Net FV (post '
+                f'DLOM/DLOC) is the canonical NAV input.'
+                if chosen_role == 'net_fv' else
+                f'Python deterministic sum over {n_rows} rows of column '
+                f'{col} ("{header}") on sheet "{sheet}". This sheet did '
+                f'not contain a Net FV column; using Gross FV.'
+            ),
+            'extraction_method': 'valuation_python_sweep',
+            'candidate_formulas': alts,
+        }
+        logger.info(
+            f'[valuation_sweep override] active_fair_value: '
+            f'existing={existing_num} → {py_val:.4f} '
+            f'from {sheet}!{rng} (role={chosen_role})'
+        )
+
+    return fund_data
+
+
 def fund_nav_component_sweep(filepath, fund_data):
     """Phase 4 — universal NAV fallback when the NAV column is a formula
     that openpyxl could not pre-evaluate.
@@ -488,12 +819,22 @@ def fund_nav_component_sweep(filepath, fund_data):
             if role and role not in role_to_col:
                 role_to_col[role] = (col_idx, h_str)
 
-        # Must look like a NAV ledger: at least 3 numeric components OR
-        # have an explicit total_nav column that is formula-only.
-        numeric_roles_present = set(role_to_col) & set(SIGN_MAP)
-        has_nav_col = 'total_nav' in role_to_col
-        if len(numeric_roles_present) < 3 and not has_nav_col:
+        # Phase 4 universality gate (Bug U fix):
+        # REQUIRE an explicit `total_nav` column on the sheet. This is
+        # the only reliable signal that we are looking at a NAV ledger
+        # vs. an adjacent sheet (fee schedule, capital-call register,
+        # waterfall worksheet) whose columns may incidentally classify
+        # as a few NAV-component roles. A real NAV sheet always has a
+        # column whose semantic role is "total_nav" — even when that
+        # column's cell holds an unevaluated formula. Falsely treating
+        # a fee schedule as a NAV ledger (as happened on a re-import
+        # where "FEES!FY2029" overrode the correct fund_nav) is far
+        # worse than missing one rare NAV sheet that omits a total
+        # column. Universal — no sheet-name keywords; the decision is
+        # entirely semantic via Pass 3 classify_labels.
+        if 'total_nav' not in role_to_col:
             continue
+        numeric_roles_present = set(role_to_col) & set(SIGN_MAP)
 
         # Scan rows: find the latest row where component values are
         # populated, and compute NAV deterministically.
@@ -1045,12 +1386,68 @@ def fill_computed_metrics(fund_data, lp_data=None, scheme=None):
             ),
         }
 
+    def _is_stated_from_sheet(entry):
+        """A value is 'stated' when it was extracted (not computed) from a
+        named source sheet AND is non-zero. Zero values, formula-derived
+        values, and sourceless values are treated as 'unstated' and lose
+        to a populated LP-register column.
+
+        Universal — no sheet-name keywords, just the presence of
+        source metadata + a non-zero value. Same rule for every fund.
+        """
+        if not isinstance(entry, dict):
+            return False
+        val = entry.get('value')
+        if val is None:
+            return False
+        try:
+            if float(val) == 0:
+                return False
+        except (TypeError, ValueError):
+            return False
+        if (entry.get('source') or '').lower() != 'extracted':
+            return False
+        if not (entry.get('source_sheet') or ''):
+            return False
+        return True
+
     def _set_from_lp(key, lp_key, formula_label):
+        """Phase 10 (Bug X) — LP-register sum is the source of truth
+        unless an EXISTING value is a STATED, non-zero value from a
+        named sheet (e.g. a dedicated waterfall sheet).
+
+        Old behaviour: any non-None existing value (including zero)
+        blocked the LP-register override. That allowed a derived-zero
+        to silently overwrite the real LP-register Carry Provision sum
+        on funds with no waterfall sheet (Avendus regression).
+
+        New behaviour: STATED values (extracted + sourced + non-zero)
+        win; everything else (None / 0 / computed / no source) loses to
+        the deterministic LP-register sum.
+        """
         v, src = _lp(lp_key)
         if v is None:
             return False
         existing = fund_data.get(key) or {}
-        if existing.get('value') is not None:
+        if _is_stated_from_sheet(existing):
+            # Stated value wins; record the LP-register sum as an
+            # alternative candidate so the dashboard can surface a
+            # conflict badge if the two disagree by >5%.
+            try:
+                lp_num = float(v)
+                stated_num = float(existing.get('value'))
+                if abs(lp_num - stated_num) / max(abs(stated_num), 1) > 0.05:
+                    alts = list(existing.get('candidate_formulas') or [])
+                    alts.append({
+                        'label': 'lp_register_sum',
+                        'value': lp_num,
+                        'source_sheet': (src or {}).get('source_sheet'),
+                        'source_cells': (src or {}).get('source_cells') or [],
+                    })
+                    existing['candidate_formulas'] = alts
+                    fund_data[key] = existing
+            except (TypeError, ValueError):
+                pass
             return False
         fund_data[key] = {
             'value': float(v),
@@ -1294,6 +1691,46 @@ def fill_computed_metrics(fund_data, lp_data=None, scheme=None):
              inputs={'carry_amount_gross': float(cg)})
         cn = cg
 
+    # Phase 10 (Bug Y) — when LP register set Net Carry but no STATED
+    # Gross Carry exists, the LP register IS the canonical carry value
+    # for both gross and net. The textbook formula gross (carry_pct ×
+    # carry_base) does NOT apply here: on a fund whose only carry record
+    # is the LP register Carry Provision column, the GP has accrued
+    # exactly that amount — by definition gross == net and clawback == 0.
+    # Keeping the formula gross would produce a phantom Clawback
+    # (e.g. 101.85 − 29.96 = 71.89 on Avendus).
+    #
+    # Universal — no sheet-name keywords. The trigger is purely
+    # "net was set from LP register AND gross is not a stated value".
+    net_entry = fund_data.get('carry_amount_net') or {}
+    gross_entry = fund_data.get('carry_amount_gross') or {}
+    net_from_lp_register = (
+        isinstance(net_entry.get('inputs_used'), dict)
+        and 'sum_of' in (net_entry.get('inputs_used') or {})
+    )
+    if net_from_lp_register and not _is_stated_from_sheet(gross_entry):
+        cn_val = _to_decimal(net_entry.get('value'))
+        if cn_val is not None:
+            fund_data['carry_amount_gross'] = {
+                'value': float(cn_val),
+                'source': 'extracted',
+                'source_sheet': net_entry.get('source_sheet'),
+                'source_cells': net_entry.get('source_cells'),
+                'formula': 'carry_amount_net (LP register is canonical; no separate gross stated)',
+                'inputs_used': {'carry_amount_net': float(cn_val)},
+                'reasoning': (
+                    'Set equal to Net Carry because the file has no '
+                    'separate Gross Carry sheet; the LP-register Carry '
+                    'Provision column is the only stated carry value '
+                    'and represents both gross and net.'
+                ),
+            }
+            cg = cn_val
+            logger.info(
+                f'[phase10] gross synced to LP-register net: {cn_val:.4f} '
+                f'(prior formula-derived gross discarded as non-stated)'
+            )
+
     if cg is not None and cn is not None:
         clawback = cg - cn
         if clawback < 0:
@@ -1333,6 +1770,130 @@ def fill_computed_metrics(fund_data, lp_data=None, scheme=None):
                 },
                 'reasoning': 'Sponsor LP commitment divided by total committed capital.',
             }
+
+    # Phase 9 (Bug W) — time-dependent mgmt fee structure.
+    # AIFs commonly charge a different rate + basis during Investment
+    # Period (typically % on Committed) vs. post-IP (typically % on NAV).
+    # Gemini's fund_analyst pulls the "current" rate but sometimes mixes
+    # the post-IP rate with the IP basis (or vice-versa). This block
+    # consults the explicit post-IP fields when present and applies them
+    # when the fund's as_of_date is past its Investment Period.
+    #
+    # Universal — no per-file logic. Behaviour matrix:
+    #   • file has post-IP fields + fund IS post-IP → switch to post-IP
+    #   • file has post-IP fields + fund still in IP → keep IP values
+    #   • file has NO post-IP fields                 → no-op (preserve)
+    #   • fund_start_date / investment_period missing → no-op (safe)
+    try:
+        ip_years_entry = fund_data.get('investment_period_years') or {}
+        ip_years_raw = ip_years_entry.get('value')
+        post_ip_rate_entry = fund_data.get('mgmt_fee_pct_post_ip') or {}
+        post_ip_basis_entry = fund_data.get('mgmt_fee_basis_post_ip') or {}
+        post_ip_rate = post_ip_rate_entry.get('value')
+        post_ip_basis = (post_ip_basis_entry.get('value') or '').lower().strip()
+
+        # Only run when the file gave us SOMETHING post-IP-specific.
+        has_post_ip_data = (post_ip_rate is not None) or (post_ip_basis != '')
+
+        if has_post_ip_data and ip_years_raw is not None:
+            from datetime import date as _dt_date
+            from datetime import datetime as _dt_datetime
+
+            def _parse_date_p9(raw):
+                if raw is None:
+                    return None
+                if isinstance(raw, _dt_date):
+                    return raw
+                s = str(raw).strip()
+                if not s:
+                    return None
+                for fmt in ('%Y-%m-%d', '%d-%b-%Y', '%d-%B-%Y',
+                            '%d/%m/%Y', '%d-%m-%Y'):
+                    try:
+                        return _dt_datetime.strptime(s, fmt).date()
+                    except (ValueError, TypeError):
+                        continue
+                return None
+
+            # Resolve fund_start_date via the same fallback chain as Phase 7.
+            fs_entry = fund_data.get('fund_start_date') or {}
+            fund_start = _parse_date_p9(fs_entry.get('value'))
+            if fund_start is None and scheme is not None:
+                fund_start = (getattr(scheme, 'first_close_date', None)
+                              or getattr(scheme, 'final_close_date', None))
+                if fund_start is None:
+                    vy = getattr(scheme, 'vintage_year', None)
+                    if vy:
+                        fund_start = _dt_date(int(vy), 1, 1)
+
+            # Resolve as_of_date — from file when stated, else today.
+            ao_entry = fund_data.get('as_of_date') or {}
+            as_of = _parse_date_p9(ao_entry.get('value')) or _dt_date.today()
+
+            try:
+                ip_years_num = float(ip_years_raw)
+            except (TypeError, ValueError):
+                ip_years_num = None
+
+            if fund_start is not None and ip_years_num is not None and ip_years_num > 0:
+                years_elapsed = (as_of - fund_start).days / 365.25
+                is_post_ip = years_elapsed > ip_years_num
+
+                # Apply post-IP rate override only when stated.
+                if is_post_ip and post_ip_rate is not None:
+                    existing_mgmt = fund_data.get('mgmt_fee_pct') or {}
+                    fund_data['mgmt_fee_pct'] = {
+                        'value': float(post_ip_rate),
+                        'source': 'extracted',
+                        'source_sheet': post_ip_rate_entry.get('source_sheet')
+                                       or existing_mgmt.get('source_sheet'),
+                        'source_cells': post_ip_rate_entry.get('source_cells')
+                                       or existing_mgmt.get('source_cells') or [],
+                        'formula': 'mgmt_fee_pct_post_ip (post-Investment-Period rate applied)',
+                        'inputs_used': {
+                            'mgmt_fee_pct_post_ip': float(post_ip_rate),
+                            'years_elapsed_since_fund_start': round(years_elapsed, 4),
+                            'investment_period_years': float(ip_years_num),
+                            'fund_start_date': fund_start.isoformat(),
+                            'as_of_date': as_of.isoformat(),
+                        },
+                        'reasoning': (
+                            f'Fund is post-Investment-Period ({years_elapsed:.2f}y > '
+                            f'{ip_years_num:.0f}y); applied post-IP rate '
+                            f'{float(post_ip_rate)*100:.2f}% instead of '
+                            f'{float((existing_mgmt.get("value") or 0))*100:.2f}% IP rate.'
+                        ),
+                    }
+                    logger.info(
+                        f'[phase9] mgmt_fee_pct switched to post-IP rate '
+                        f'{float(post_ip_rate):.4f} (was '
+                        f'{(existing_mgmt.get("value") or "—")}); '
+                        f'years_elapsed={years_elapsed:.2f} > ip_years={ip_years_num}'
+                    )
+
+                # Apply post-IP basis override only when stated and valid.
+                VALID_BASES = {'committed', 'called', 'nav'}
+                if is_post_ip and post_ip_basis in VALID_BASES:
+                    existing_basis = fund_data.get('mgmt_fee_basis') or {}
+                    fund_data['mgmt_fee_basis'] = {
+                        'value': post_ip_basis,
+                        'source': 'extracted',
+                        'source_sheet': post_ip_basis_entry.get('source_sheet')
+                                       or existing_basis.get('source_sheet'),
+                        'source_cells': post_ip_basis_entry.get('source_cells')
+                                       or existing_basis.get('source_cells') or [],
+                        'reasoning': (
+                            f'Fund is post-Investment-Period; applied post-IP basis '
+                            f'"{post_ip_basis}" (typically NAV-based after deployment '
+                            f'ends).'
+                        ),
+                    }
+                    logger.info(
+                        f'[phase9] mgmt_fee_basis switched to post-IP basis '
+                        f'"{post_ip_basis}" (was "{existing_basis.get("value") or "—"}")'
+                    )
+    except Exception as e:
+        logger.warning(f'Phase 9 fee time-dependency failed (non-fatal): {e}')
 
     return fund_data
 
@@ -1412,6 +1973,12 @@ FUND_METRIC_KEYS = [
     'carry_amount_net', 'gp_clawback_provision',
     'lp_total_return', 'gp_total_distribution',
     'sponsor_commitment_pct',
+    # Phase 9 — post-IP fee structure (kept alongside the current-effect
+    # mgmt_fee_pct so a CFO can audit which rate was applied and when).
+    # Only numeric fields persist to FundMetric (which has Decimal value);
+    # the basis enum is mirrored directly to Scheme.management_fee_basis
+    # via persist_fund's Phase 5 sync, not stored as a FundMetric row.
+    'investment_period_years', 'mgmt_fee_pct_post_ip',
 ]
 
 # DerivedMetric keys the legacy frontend/chatbot read. Map analyst keys
@@ -1439,16 +2006,30 @@ LEGACY_DERIVED_MAP = {
 # Universal: applies to every fund the same way; no per-file branching.
 # Adding a new mirror here automatically updates BOTH consumers.
 SCHEME_MIRROR_FIELDS = [
-    # (FundMetric key, Scheme attr, is_pct_field stored as 0-100 on scheme)
+    # (fund_data key, Scheme attr, is_pct_field stored as 0-100 on scheme)
     ('sponsor_commitment_pct', 'sponsor_commitment_pct', True),
     ('mgmt_fee_pct',           'management_fee_pct',     True),
     ('hurdle_rate',            'hurdle_rate_pct',        True),
     ('carry_pct',              'carry_pct',              True),
 ]
 
-# Quick-lookup set of Scheme attribute names mirrored from FundMetric.
-# Pass 6 uses this to skip auto-derivation on these fields.
-SCHEME_MIRROR_ATTRS = frozenset(attr for _, attr, _ in SCHEME_MIRROR_FIELDS)
+# Phase 9 — string-valued mirror fields. Stored as text on Scheme
+# (enum CharField); pct conversion does not apply. The fund_data entry
+# holds the string in its 'value' key. Same Pass 6 exclusion discipline.
+SCHEME_MIRROR_STRING_FIELDS = [
+    # (fund_data key, Scheme attr)
+    ('mgmt_fee_basis', 'management_fee_basis'),
+]
+
+# Quick-lookup set of Scheme attribute names mirrored from fund_data.
+# Pass 6 uses this to skip auto-derivation on these fields. Includes
+# BOTH the numeric pct mirrors and the string-valued mirrors so that
+# Pass 6 can never re-introduce Bug F / Bug T artefacts on any
+# canonical Scheme field.
+SCHEME_MIRROR_ATTRS = frozenset(
+    [attr for _, attr, _ in SCHEME_MIRROR_FIELDS]
+    + [attr for _, attr in SCHEME_MIRROR_STRING_FIELDS]
+)
 
 
 def persist_fund(scheme, organization, fund_data, audits,
@@ -1543,6 +2124,29 @@ def persist_fund(scheme, organization, fund_data, audits,
             if current != new_val:
                 setattr(scheme, scheme_attr, new_val)
                 scheme_dirty.append(scheme_attr)
+
+        # Phase 9 — sync string-valued mirror fields (currently just
+        # mgmt_fee_basis). Unlike pct fields these are not multiplied
+        # by 100 and may carry enum values like 'committed' / 'nav'.
+        # If fund_data has no entry for this key OR the value is empty,
+        # we PRESERVE the existing Scheme value (do not clobber to None
+        # — basis defaults like 'committed' on the model are intentional
+        # placeholders, not facts we want to erase).
+        for fd_key, scheme_attr in SCHEME_MIRROR_STRING_FIELDS:
+            if not hasattr(scheme, scheme_attr):
+                continue
+            entry = fund_data.get(fd_key) or {}
+            raw_val = entry.get('value')
+            if raw_val is None:
+                continue
+            new_val = str(raw_val).strip().lower()
+            if not new_val:
+                continue
+            current = getattr(scheme, scheme_attr)
+            if current != new_val:
+                setattr(scheme, scheme_attr, new_val)
+                scheme_dirty.append(scheme_attr)
+
         if scheme_dirty:
             scheme.save(update_fields=scheme_dirty)
             logger.info(
@@ -1719,6 +2323,16 @@ def run_anchor_pipeline(filepath, scheme, organization,
         logger.error(f'LP analyst call failed: {type(e).__name__}: {e}')
         lp_data = {}
 
+    # Phase 8 (Bug V): IPEV-compliant Net FV correction. Runs BEFORE
+    # the LP / NAV sweeps and Stage 1B so the corrected active_fair_value
+    # cascades into Phase 3 carry_base and TVPI fallback. Universal —
+    # uses Pass 3 semantic header classification, no per-file logic.
+    _p(69, 'Stage 1A.3: Valuation column sweep (Python — IPEV Net FV)…')
+    try:
+        fund_data = valuation_python_sweep(filepath, fund_data)
+    except Exception as e:
+        logger.error(f'Valuation sweep failed (non-fatal): {type(e).__name__}: {e}')
+
     # Phase 2: deterministic Python sweep over LP register sheets.
     # Closes Bug O (LP-analyst extraction silently non-deterministic),
     # Bug C-regression (Net Carry sometimes computed not extracted), and
@@ -1757,6 +2371,37 @@ def run_anchor_pipeline(filepath, scheme, organization,
 
     _p(93, 'Stage 4a: Persist fund metrics…')
     persist_fund(scheme, organization, fund_data, audits, source_import_file)
+
+    # ── AF + AG ──────────────────────────────────────────────────────
+    # Stage 4a.1 — Pass 4: Gemini re-derives every fund-level metric
+    # using the FRESH post-sweep + post-Stage-1B catalogue (built by
+    # DerivationContext directly from the DB). When Gemini returns a
+    # rank-1 formula whose inputs are all available and whose
+    # arithmetic evaluates to a finite real number, that value AND
+    # formula text replace the Stage-1B Python fallback in FundMetric
+    # (via _mirror_to_fund_metric inside Pass 4's _persist).
+    #
+    # Effect: the dashboard's displayed value and the displayed
+    # formula text are guaranteed to come from the SAME evaluation —
+    # no more "Python value paired with Gemini formula label" drift.
+    #
+    # Universal — runs the same way for every fund regardless of
+    # workbook shape. Non-fatal: failures fall back to the Stage-1B
+    # value already in FundMetric.
+    _p(94, 'Stage 4a.1: Pass 4 Gemini formula override…')
+    try:
+        from .derivation_service import MetricDerivationService
+        pass4 = MetricDerivationService(
+            organization=organization,
+            scheme=scheme,
+            source_import_file=source_import_file,
+        )
+        pass4.derive_all()
+    except Exception as e:
+        logger.warning(
+            f'Pass 4 Gemini re-derivation failed (non-fatal): '
+            f'{type(e).__name__}: {e}'
+        )
 
     _p(96, 'Stage 4b: Persist per-company KPIs…')
     company_summary = persist_companies(
