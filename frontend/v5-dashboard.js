@@ -711,6 +711,85 @@ function wireProvenance(elId, metricKey, displayed) {
   el.onclick = () => openProvenancePanel(metricKey);
 }
 
+// Plain-English copy for each metric — used by the provenance side panel so
+// non-technical users (clients) can read what the number actually means and
+// how it was calculated.
+const _METRIC_COPY = {
+  moic: {
+    label: 'MOIC — Multiple on Invested Capital',
+    meaning: 'How many times the fund has grown its invested money. 2.0x means every ₹1 invested is now worth ₹2.',
+    formula: 'Total Fair Value of holdings ÷ Total amount invested',
+  },
+  tvpi: {
+    label: 'TVPI — Total Value to Paid-In',
+    meaning: 'Total value created (cash returned to LPs + current fair value) per rupee called from LPs.',
+    formula: '(Distributions to LPs + Current NAV) ÷ Capital called from LPs',
+  },
+  dpi: {
+    label: 'DPI — Distributions to Paid-In',
+    meaning: 'How much capital has actually been returned to LPs for every rupee they called. ILPA-aligned: counts capital distributions only (return of capital, STCG, LTCG); excludes interim dividends and interest.',
+    formula: 'Sum of capital distributions to LPs ÷ Capital called from LPs',
+  },
+  rvpi: {
+    label: 'RVPI — Residual Value to Paid-In',
+    meaning: 'The unrealised value still sitting in the fund per rupee LPs called. RVPI + DPI = TVPI.',
+    formula: 'Current NAV ÷ Capital called from LPs',
+  },
+  net_irr: {
+    label: 'Net IRR — Net Internal Rate of Return',
+    meaning: 'The annualised return LPs are earning, after fees and carry. Time-weighted so early returns count more.',
+    formula: 'XIRR over LP cashflows: capital calls (out) + distributions (in) + ending NAV',
+  },
+  active_fair_value: {
+    label: 'Total Fair Value of Holdings',
+    meaning: "Today's mark-to-market value of every portfolio company the fund still owns, summed up.",
+    formula: 'Sum of fair_value_of_holding across every active investment',
+  },
+  carry_amount_gross: {
+    label: 'Gross Carry',
+    meaning: 'GP performance fee earned before any clawback adjustment.',
+    formula: 'GP catch-up amount + GP share of the residual (after LP gets back capital + preferred return)',
+  },
+  carry_amount_net: {
+    label: 'Net Carry',
+    meaning: "GP's actual performance fee after subtracting the clawback provision.",
+    formula: 'Gross Carry − Clawback provision',
+  },
+  carry_base: {
+    label: 'Carry Base',
+    meaning: 'The amount remaining for carry after LPs receive their capital back and preferred return. Must be positive for carry to be earned.',
+    formula: '(Distributions + NAV) − Called Capital − Preferred Return',
+  },
+  preferred_return_amount: {
+    label: 'Preferred Return (Hurdle)',
+    meaning: "The minimum return LPs must receive before the GP earns any carry — usually 8% annually, compounded.",
+    formula: 'LP Called Capital × ((1 + hurdle rate)^years − 1)',
+  },
+  gp_clawback_provision: {
+    label: 'GP Clawback Provision',
+    meaning: 'Amount reserved from gross carry to cover potential repayment to LPs if the fund underperforms later.',
+    formula: 'Typically 20% of gross carry',
+  },
+  committed_capital: {
+    label: 'Committed Capital',
+    meaning: 'Total amount LPs have legally committed to invest in the fund.',
+    formula: 'Sum of all LP commitments',
+  },
+  called_capital: {
+    label: 'Called Capital',
+    meaning: 'How much of the committed capital has actually been drawn down so far.',
+    formula: 'Sum of all capital calls issued',
+  },
+};
+
+function _fmtMetricValue(v, unit) {
+  if (v == null) return '—';
+  if (unit === 'percent')  return parseFloat(v).toFixed(2) + '%';
+  if (unit === 'multiple') return parseFloat(v).toFixed(2) + 'x';
+  if (unit === 'currency') return '₹' + parseFloat(v).toLocaleString('en-IN', { maximumFractionDigits: 2 }) + ' Cr';
+  return parseFloat(v).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+}
+
 function openProvenancePanel(metricKey) {
   const ov = document.getElementById('prov-overlay');
   const titleEl = document.getElementById('prov-title');
@@ -719,231 +798,224 @@ function openProvenancePanel(metricKey) {
   if (!ov || !bodyEl) return;
 
   const rec = _derivedMetrics[metricKey];
-  // What the TILE is showing right now (may differ from rec.value when the
-  // frontend overrode the DerivedMetric with an on-the-fly compute).
   const tile = (_tileDisplayRegistry[metricKey] || [])[0] || null;
+  const copy = _METRIC_COPY[metricKey] || {
+    label: (rec && rec.metric_label) || metricKey.toUpperCase().replace(/_/g,' '),
+    meaning: (rec && rec.metric_description) || '',
+    formula: '',
+  };
 
   if (!rec && !tile) {
-    titleEl.textContent = metricKey.toUpperCase();
-    subEl.textContent = 'No provenance available';
-    bodyEl.innerHTML = '<div style="color:var(--text3);">No record or tile registered for this metric.</div>';
+    titleEl.textContent = copy.label;
+    subEl.textContent = '';
+    bodyEl.innerHTML = `
+      <div class="prov-section">
+        <div style="color:var(--text3);font-size:13px;line-height:1.5;">
+          No data for this metric yet. This usually means the value was either
+          not present in the imported file, or hasn't been earned yet (e.g.
+          carry before the fund crosses its hurdle). Re-import the workbook
+          to refresh.
+        </div>
+      </div>`;
     ov.classList.add('open');
     return;
   }
 
-  titleEl.textContent = (rec && rec.metric_label) || metricKey;
-  subEl.textContent = (rec && rec.metric_description) || '';
+  const unit = (rec && rec.metric_unit) || (
+    metricKey.endsWith('_pct') || metricKey === 'net_irr' ? 'percent'
+    : ['moic','tvpi','dpi','rvpi'].includes(metricKey) ? 'multiple'
+    : 'currency'
+  );
+  const value = tile ? tile.value : (rec ? rec.value : null);
+  const asOf = (rec && rec.derived_at ? rec.derived_at.split('T')[0] : new Date().toISOString().split('T')[0]);
 
-  const isImported = rec && rec.source === 'imported_direct';
-  const unit = rec && rec.metric_unit;
-  const fmt = (v) => {
-    if (v == null) return '—';
-    if (unit === 'percent')  return parseFloat(v).toFixed(2) + '%';
-    if (unit === 'multiple') return parseFloat(v).toFixed(2) + 'x';
-    if (unit === 'currency') return '₹' + parseFloat(v).toLocaleString('en-IN');
-    return parseFloat(v).toLocaleString();
-  };
-
-  // PANEL ALWAYS SHOWS THE TILE VALUE FIRST. If the DerivedMetric value
-  // differs, render BOTH as candidates so the user sees the disagreement.
-  const tileValue = tile ? tile.value : (rec ? rec.value : null);
-  const derivedValue = rec ? rec.value : null;
-  const tileFormula  = tile && tile.formula;
-  const tileSource   = tile && tile.source;  // 'on_the_fly' | 'derived' | 'imported_direct'
-  const valuesDisagree =
-    tileValue != null && derivedValue != null &&
-    Math.abs(parseFloat(tileValue) - parseFloat(derivedValue)) > 0.005;
-
-  let html = '';
-  html += `<div class="prov-section">
-    <h4>Displayed on dashboard</h4>
-    <span class="prov-source-pill ${isImported ? 'imported' : 'derived'}">
-      ${tileSource === 'on_the_fly'
-          ? 'Computed live from model rows'
-          : (isImported ? 'Imported direct from Excel' : 'Gemini-derived (Pass 4)')}
-    </span>
-    <div class="prov-value-big" style="margin-top:10px">${fmt(tileValue)}</div>
-    <div class="prov-value-meta">${unit ? unit + ' · ' : ''}as of ${rec && rec.derived_at ? rec.derived_at.split('T')[0] : new Date().toISOString().split('T')[0]}</div>
-  </div>`;
-
-  if (tileFormula) {
-    html += `<div class="prov-section">
-      <h4>Formula used to compute the displayed value</h4>
-      <div class="prov-formula">${esc(tileFormula)}</div>
-    </div>`;
-  }
-
-  const prov = (rec && rec.provenance) || null;
-  if (prov && (prov.source_sheet || (prov.source_cells && prov.source_cells.length) || prov.source || prov.reasoning)) {
-    const pSource = (prov.source || '').toString();
-    const pSheet  = prov.source_sheet || '—';
-    const pCells  = Array.isArray(prov.source_cells) ? prov.source_cells : [];
-    const cellsTxt = pCells.length ? pCells.join(', ') : '—';
-    const pillColor = pSource === 'extracted' || pSource === 'stated'
-        ? '#0e7a5f' : (pSource === 'computed' ? '#2563eb' : '#6b7280');
-    const sourceLabel = pSource === 'extracted' ? 'Extracted from file'
-        : pSource === 'stated'   ? 'Stated in file'
-        : pSource === 'computed' ? 'Calculated by Python'
-        : (pSource || 'Unknown');
-    html += `<div class="prov-section">
-      <h4>Where this came from</h4>
-      <div style="display:inline-block;background:${pillColor};color:#fff;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600;letter-spacing:.3px;text-transform:uppercase;margin-bottom:10px">${esc(sourceLabel)}</div>
-      <table class="prov-inputs-table">
-        <tbody>
-          <tr><td class="k" style="width:35%">Source sheet</td><td class="v">${esc(pSheet)}</td></tr>
-          <tr><td class="k">Source cells</td><td class="v" style="font-family:ui-monospace,Menlo,monospace">${esc(cellsTxt)}</td></tr>
-        </tbody>
-      </table>
-      ${prov.reasoning ? `<div style="margin-top:10px;font-size:12px;color:var(--text2);line-height:1.5">${esc(prov.reasoning)}</div>` : ''}
-    </div>`;
-
-    const inp = prov.inputs_used || {};
-    if (inp && typeof inp === 'object' && Object.keys(inp).length) {
-      let irows = '';
-      Object.entries(inp).forEach(([k, v]) => {
-        let display;
-        if (v && typeof v === 'object') {
-          display = v.value != null ? String(v.value) : JSON.stringify(v);
-        } else {
-          display = String(v);
-        }
-        irows += `<tr><td class="k">${esc(k)}</td><td class="v" style="font-family:ui-monospace,Menlo,monospace">${esc(display)}</td></tr>`;
-      });
-      html += `<div class="prov-section">
-        <h4>Inputs that went into the formula</h4>
-        <table class="prov-inputs-table">
-          <thead><tr><th>Variable</th><th>Value</th></tr></thead>
-          <tbody>${irows}</tbody>
-        </table>
-      </div>`;
-    }
-  }
-
-  // Disagreement banner — explicit candidate-vs-candidate comparison.
-  if (valuesDisagree) {
-    html += `<div class="prov-section" style="background:#fef3c7;border:1px solid #fcd34d;border-radius:6px;padding:10px;">
-      <h4 style="color:#92400e;margin-top:0">Two candidate values exist for this metric</h4>
-      <table class="prov-inputs-table" style="margin-top:6px">
-        <thead><tr><th>Candidate</th><th>Value</th><th>Note</th></tr></thead>
-        <tbody>
-          <tr><td class="k">Displayed (tile)</td><td class="v">${fmt(tileValue)}</td>
-              <td class="s">${tileSource === 'on_the_fly' ? 'Computed from current model rows' : 'From DerivedMetric'}</td></tr>
-          <tr><td class="k">Stored DerivedMetric</td><td class="v">${fmt(derivedValue)}</td>
-              <td class="s">${isImported ? 'Imported from Excel' : 'Pass 4 / Pass 8 derivation'}</td></tr>
-        </tbody>
-      </table>
-      <div style="font-size:12px;color:#78350f;margin-top:8px;">
-        The dashboard shows the tile value. The DerivedMetric below documents the
-        formula Gemini chose; if that disagrees with the displayed number, it usually
-        means the DerivedMetric used a stale / wrong-shape input variable.
+  // ── Section 1: The Number — big value, one-line plain English ────────
+  let html = `
+    <div class="prov-section">
+      <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600;">The Number</div>
+      <div style="font-size:28px;font-weight:800;color:#0f172a;margin-bottom:2px;">${_fmtMetricValue(value, unit)}</div>
+      <div style="font-size:13px;color:#334155;line-height:1.5;margin-top:8px;">
+        ${esc(copy.meaning)}
       </div>
+      <div style="font-size:11px;color:#94a3b8;margin-top:6px;">as of ${esc(asOf)}</div>
     </div>`;
-  }
 
-  if (!isImported && rec.formula_expression) {
-    html += `<div class="prov-section">
-      <h4>Formula chosen by Gemini</h4>
-      <div class="prov-formula">${esc(rec.formula_expression)}</div>
-    </div>`;
-  } else if (isImported) {
-    // For values extracted directly from an Excel cell, render the cell
-    // location (sheet + coordinates + label) instead of the misleading
-    // "no formula" gap. The workbook computed this number with its own
-    // formula, which Excel does not expose to our importer — be explicit
-    // about that so the user knows we're not hiding anything.
-    const inputs = rec.inputs_used || {};
-    const cell   = inputs.source_cell || inputs.source_cells ||
-                   (inputs.cells || '');
-    const sheet  = inputs.source_sheet || inputs.sheet_used || '';
-    const label  = inputs.source_label || '';
-    const cellsStr = Array.isArray(cell) ? cell.join(', ') : String(cell || '');
-    let cellLines = [];
-    if (sheet)   cellLines.push(`Sheet: ${sheet}`);
-    if (label)   cellLines.push(`Label: ${label}`);
-    if (cellsStr) cellLines.push(`Cell${cellsStr.includes(',') ? 's' : ''}: ${cellsStr}`);
-    html += `<div class="prov-section">
-      <h4>How this value was obtained</h4>
-      <div class="prov-formula">
-        Pre-computed Excel cell value — the workbook calculated this number
-        with its own internal formula. Excel does not expose that formula to
-        the importer, so what you see is the resulting number as-stored in
-        the workbook.${cellLines.length ? '<br/><br/>' + cellLines.map(esc).join('<br/>') : ''}
-      </div>
-    </div>`;
-  }
+  // ── Pull Gemini's per-key provenance (written by Phase 2 persister) ─
+  // For FundMetric rows: inputs_used holds { gemini_key, gemini_block,
+  //   gemini_value, source_sheet, source_cells, formula_expression,
+  //   provenance_kind, contributing_companies? }
+  // Phase 3 additionally writes: priority_rule_applied, priority_rule_reason,
+  //   principles_meaning, picked_source, skipped_higher_priority_sources,
+  //   alternatives, disagreements, quality_flag.
+  const rawInputs = (rec && rec.inputs_used && typeof rec.inputs_used === 'object') ? rec.inputs_used : {};
+  const provKind  = rawInputs.provenance_kind || '';
+  const formulaExpr = rawInputs.formula_expression || '';
+  const sourceSheet = rawInputs.source_sheet || '';
+  const sourceCells = rawInputs.source_cells || '';
+  const contribs    = Array.isArray(rawInputs.contributing_companies) ? rawInputs.contributing_companies : null;
+  const priorityRule       = rawInputs.priority_rule_applied || '';
+  const priorityReason     = rawInputs.priority_rule_reason || '';
+  const principlesMeaning  = (rawInputs.principles_meaning && typeof rawInputs.principles_meaning === 'object')
+                              ? rawInputs.principles_meaning : null;
+  const pickedSource       = rawInputs.picked_source || '';
+  const skippedHigher      = Array.isArray(rawInputs.skipped_higher_priority_sources) ? rawInputs.skipped_higher_priority_sources : [];
+  const alternatives       = Array.isArray(rawInputs.alternatives) ? rawInputs.alternatives : [];
+  const disagreements      = Array.isArray(rawInputs.disagreements) ? rawInputs.disagreements : [];
+  const qualityFlag        = rawInputs.quality_flag || '';
 
-  // The inputs_used table only makes sense for Gemini-derived values where
-  // each entry is a variable → {value, source}. For imported_direct rows,
-  // inputs_used holds cell metadata (source_cell, source_label) which we
-  // already rendered above — skip the table in that case.
-  if (!isImported && rec.inputs_used && Object.keys(rec.inputs_used).length) {
-    let rows = '';
-    Object.entries(rec.inputs_used).forEach(([k, info]) => {
-      const v    = (info && typeof info === 'object') ? info.value       : info;
-      const src  = (info && typeof info === 'object') ? (info.source||'') : '';
-      const desc = (info && typeof info === 'object') ? (info.description||'') : '';
-      rows += `<tr>
-        <td class="k">${esc(k)}</td>
-        <td class="v">${esc(String(v))}</td>
-        <td class="s">${esc(src)}${desc ? '<br/>' + esc(desc) : ''}</td>
-      </tr>`;
-    });
-    html += `<div class="prov-section">
-      <h4>Inputs used</h4>
-      <table class="prov-inputs-table">
-        <thead><tr><th>Input</th><th>Value</th><th>Source</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>`;
-  }
+  // ── Section 1.5 (Phase 3): Priority Rule Applied ─────────────────────
+  // Only render when the reconciler wrote a rule (i.e. metric is in the
+  // priority matrix and Phase 3 produced this value).
+  if (priorityRule) {
+    const flagBadge = disagreements.length
+      ? `<span style="display:inline-block;background:#fef3c7;color:#92400e;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;margin-left:8px;">⚠️ reconciled</span>`
+      : `<span style="display:inline-block;background:#dcfce7;color:#166534;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;margin-left:8px;">✓ clean</span>`;
 
-  if (rec.confidence != null) {
-    const pct = Math.round((rec.confidence || 0) * 100);
-    html += `<div class="prov-section">
-      <h4>Confidence</h4>
-      <div style="font-weight:700;">${pct}%</div>
-      <div class="prov-confidence-bar"><div class="prov-confidence-fill" style="width:${pct}%"></div></div>
-    </div>`;
-  }
-
-  if (rec.gemini_reasoning) {
-    // The legacy boilerplate ("Direct value imported from Excel — no
-    // derivation needed.") carries no information; hide it. Anything else
-    // is real Gemini reasoning and worth showing. The section heading
-    // changes depending on whether the value was extracted or derived.
-    const reasoning = String(rec.gemini_reasoning).trim();
-    const isBoilerplate = reasoning ===
-      'Direct value imported from Excel — no derivation needed.';
-    if (!isBoilerplate) {
-      const heading = isImported ? 'Why this source was chosen' : 'Why this formula';
-      html += `<div class="prov-section">
-        <h4>${heading}</h4>
-        <div style="line-height:1.5;">${esc(reasoning)}</div>
-      </div>`;
+    let principlesList = '';
+    if (principlesMeaning) {
+      principlesList = '<ul style="margin:6px 0 0 18px;padding:0;font-size:12px;color:#475569;line-height:1.5;">'
+        + Object.entries(principlesMeaning).map(([code, meaning]) =>
+            `<li><b>${esc(code)}</b> — ${esc(meaning)}</li>`).join('')
+        + '</ul>';
     }
-  }
 
-  if (rec.candidate_formulas && rec.candidate_formulas.length) {
-    let cards = '';
-    rec.candidate_formulas.forEach(c => {
-      const okInputs = c.all_inputs_available;
-      cards += `<div class="prov-candidate">
-        <div class="prov-candidate-head">
-          <span>${esc(c.formula || '—')}</span>
-          <span style="color:${okInputs ? '#15803d' : '#dc2626'};font-size:11px;">
-            ${okInputs ? 'inputs available' : 'inputs missing'}
-          </span>
+    let skippedBlock = '';
+    if (skippedHigher.length) {
+      skippedBlock = `
+        <div style="margin-top:10px;padding:8px 10px;background:#f1f5f9;border-radius:4px;font-size:12px;color:#475569;">
+          <b style="color:#334155;">Higher-priority sources unavailable:</b>
+          <ul style="margin:4px 0 0 18px;padding:0;">
+            ${skippedHigher.map(s => `<li>${esc(s)}</li>`).join('')}
+          </ul>
+        </div>`;
+    }
+
+    let disagreeBlock = '';
+    if (disagreements.length) {
+      disagreeBlock = `
+        <div style="margin-top:10px;padding:8px 10px;background:#fef3c7;border-left:3px solid #f59e0b;border-radius:4px;font-size:12px;color:#78350f;">
+          <b>Other sources disagree (outside tolerance):</b>
+          <ul style="margin:4px 0 0 18px;padding:0;">
+            ${disagreements.map(d => `<li>${esc(d.description || '')} → ${esc(d.value || '')}</li>`).join('')}
+          </ul>
+          <div style="margin-top:6px;color:#92400e;">We picked the value above per the priority rule. The disagreement is preserved here for audit.</div>
+        </div>`;
+    } else if (alternatives.length) {
+      disagreeBlock = `
+        <div style="margin-top:10px;padding:8px 10px;background:#f0fdf4;border-left:3px solid #16a34a;border-radius:4px;font-size:12px;color:#166534;">
+          <b>Lower-priority sources agree (within tolerance):</b>
+          <ul style="margin:4px 0 0 18px;padding:0;">
+            ${alternatives.map(a => `<li>${esc(a.description || '')} → ${esc(a.value || '')}</li>`).join('')}
+          </ul>
+        </div>`;
+    }
+
+    html += `
+      <div class="prov-section">
+        <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600;">
+          Priority Rule Applied${flagBadge}
         </div>
-        ${c.inputs_required ? `<div style="font-size:11px;color:var(--text3);margin-top:4px;">requires: ${esc((c.inputs_required||[]).join(', '))}</div>` : ''}
-        ${c.reason_rejected ? `<div class="prov-candidate-reason">${esc(c.reason_rejected)}</div>` : ''}
+        <div style="font-size:14px;color:#0f172a;font-weight:700;">
+          ${esc(priorityRule)}
+        </div>
+        ${pickedSource ? `<div style="font-size:12px;color:#475569;margin-top:4px;">Source picked: ${esc(pickedSource)}</div>` : ''}
+        ${priorityReason ? `<div style="font-size:12px;color:#475569;margin-top:6px;font-style:italic;">${esc(priorityReason)}</div>` : ''}
+        ${principlesList}
+        ${skippedBlock}
+        ${disagreeBlock}
       </div>`;
-    });
-    html += `<div class="prov-section">
-      <h4>Alternate formulas Gemini considered</h4>
-      ${cards}
-    </div>`;
   }
 
+  // ── Section 2: How we got it — equation form (Formula = Values = Result) ─
+  html += `
+    <div class="prov-section">
+      <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600;">How we got it</div>
+      <div style="font-size:13px;color:#334155;line-height:1.6;margin-bottom:10px;">
+        ${copy.formula ? esc(copy.formula) + '.' : 'Computed directly from extracted source data.'}
+      </div>`;
+
+  // Render the math box. The content depends strictly on provenance_kind so
+  // we never tell the user a derived value was "read directly from workbook".
+  //   extracted              → don't show a math box at all (it's not derived)
+  //   computed_by_gemini     → show the formula Gemini emitted, with values
+  //   computed_from_canonical_formula → show the canonical waterfall formula + substitution
+  //   computed_from_db       → show the per-company sum breakdown
+  //   anything else with a formulaExpr present → show that formula
+  const boxStyle = 'background:#ffffff;border:1px solid #e2e8f0;border-radius:6px;padding:12px;color:#0f172a;';
+  const monoBoxStyle = boxStyle + 'font-family:ui-monospace,Menlo,monospace;font-size:12px;line-height:1.7;overflow-x:auto;';
+  if (provKind === 'extracted') {
+    // No derivation. Skip the math box — Source section below will state the cell.
+    html += `
+      <div style="${boxStyle}font-size:13px;">
+        This number was read directly from a cell in the workbook — there is no
+        derivation step. See <b>Source</b> below for the exact sheet and cell.
+      </div>`;
+  } else if (provKind === 'computed_from_db' && contribs && contribs.length) {
+    // active_fair_value: show per-company sum breakdown
+    const sumStr = contribs.map(c => '₹' + parseFloat(c.fair_value_of_holding).toLocaleString('en-IN', {maximumFractionDigits: 2}) + ' Cr').join(' + ');
+    html += `
+      <div style="${monoBoxStyle}">
+        <div style="color:#64748b;">sum of fund's share across all companies:</div>
+        <div style="margin-top:4px;color:#0f172a;">${esc(sumStr)}</div>
+        <div style="margin-top:6px;color:#64748b;">= <b style="color:#0f172a;">${_fmtMetricValue(value, unit)}</b></div>
+      </div>`;
+  } else if (formulaExpr) {
+    // For canonical_formula entries the formulaExpr already contains
+    // "template  =  substituted-with-values  =  result" so render it as-is.
+    // For Gemini's own formulas, prepend "computed:" header.
+    const isCanonical = provKind === 'computed_from_canonical_formula';
+    html += `<div style="${monoBoxStyle}">`;
+    if (isCanonical) {
+      const parts = String(formulaExpr).split('  =  ');
+      if (parts.length === 3) {
+        html += `
+          <div><span style="color:#64748b;">Formula:</span> <span style="color:#0f172a;">${esc(parts[0])}</span></div>
+          <div style="margin-top:4px;"><span style="color:#64748b;">With values:</span> <span style="color:#0f172a;">${esc(parts[1])}</span></div>
+          <div style="margin-top:6px;color:#64748b;">= <b style="color:#0f172a;">${_fmtMetricValue(value, unit)}</b></div>`;
+      } else {
+        html += `<div style="color:#0f172a;">${esc(formulaExpr)}</div>`;
+      }
+    } else {
+      html += `
+        <div><span style="color:#64748b;">computed:</span> <span style="color:#0f172a;">${esc(formulaExpr)}</span></div>
+        <div style="color:#64748b;margin-top:4px;">= <b style="color:#0f172a;">${_fmtMetricValue(value, unit)}</b></div>`;
+    }
+    html += `</div>`;
+  } else {
+    // No formula AND not explicitly extracted — honest fallback (not a lie).
+    html += `
+      <div style="${boxStyle}font-size:12px;color:#64748b;font-style:italic;">
+        We don't have a stored formula or source-cell record for this value.
+        Re-import the workbook to refresh the provenance metadata.
+      </div>`;
+  }
+  html += `
+    </div>`;
+
+  // ── Section 3: Source — one row, sheet + cells in plain English ──────
+  let sourcePhrase;
+  if (provKind === 'extracted') {
+    sourcePhrase = `Extracted directly from the Excel file — sheet <b>${esc(sourceSheet || '—')}</b>` +
+                   (sourceCells ? `, cell <span style="font-family:ui-monospace,Menlo,monospace;font-size:12px;">${esc(sourceCells)}</span>` : '') + '.';
+  } else if (provKind === 'computed_by_gemini') {
+    sourcePhrase = 'Calculated by Gemini (AI) using the formula above, with input values pulled from the workbook.';
+  } else if (provKind === 'computed_from_canonical_formula') {
+    sourcePhrase = 'Calculated by our backend using the standard European-waterfall formula above. Inputs (NAV, called capital, hurdle, preferred return) were extracted from the workbook by Gemini.';
+  } else if (provKind === 'computed_from_db') {
+    sourcePhrase = 'Calculated by our backend by summing the per-company valuations imported from the workbook (shown above).';
+  } else if (provKind === 'gemini_provided') {
+    sourcePhrase = 'Provided by Gemini (AI) from the workbook.';
+  } else {
+    sourcePhrase = 'Imported from the workbook (exact source not recorded).';
+  }
+  html += `
+    <div class="prov-section">
+      <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600;">Source</div>
+      <div style="font-size:13px;color:#334155;line-height:1.6;">${sourcePhrase}</div>
+    </div>`;
+
+  titleEl.textContent = copy.label;
+  subEl.textContent = '';
   bodyEl.innerHTML = html;
   ov.classList.add('open');
 }
@@ -992,127 +1064,37 @@ async function loadOverview() {
     const dists = (distsData.value?.results  || distsData.value  || []);
     const invs  = Array.isArray(invData.value) ? invData.value : [];
 
-    // ── KPI computation from actual investments ──
+    // ── Counts from DB rows (companies / investments) ──
     const active   = cos.filter(c => c.is_active).length;
     const inactive = cos.length - active;
     const totalCos = cos.length;
 
-    // Cost = sum of total_invested from investments (in Cr already)
-    let totalCost = 0;
-    invs.forEach(inv => { totalCost += parseFloat(inv.total_invested || 0); });
-
-    // FV = sum of latest_valuation from investments
-    let totalFV = 0;
-    invs.forEach(inv => { totalFV += parseFloat(inv.latest_valuation || 0); });
-
-    // PHASE 1 SSoT: prefer FundMetric.active_fair_value (the labelled
-    // portfolio-aggregate FV extracted from the workbook's Cover/Summary
-    // section by the anchor pipeline) over the per-row valuation sum.
-    // The per-row sum can be 0 when Valuation.fair_value rows are blank
-    // even though the workbook's headline FV is populated. Fund NAV
-    // (a different quantity) is NOT used here — that distinction is
-    // enforced in Phase 3.
-    const _activeFV = fmValue('active_fair_value');
-    if (_activeFV != null && _activeFV > 0) {
-      totalFV = _activeFV;
-    } else if (!totalFV && navs.length) {
-      // Last-resort fallback: NAV sum (only when neither FundMetric nor
-      // per-row valuations have data). This represents fund NAV not
-      // portfolio FV — Phase 3 will surface that distinction.
-      const latestByScheme = {};
-      navs.forEach(n => {
-        const sid = n.scheme;
-        if (!latestByScheme[sid] || n.nav_date > latestByScheme[sid].nav_date) {
-          latestByScheme[sid] = n;
-        }
-      });
-      Object.values(latestByScheme).forEach(n => { totalFV += parseFloat(n.total_nav || 0); });
-    }
-
-    // Fall back to capital calls for cost if no investment data
-    if (!totalCost && calls.length) {
-      calls.forEach(c => { totalCost += parseFloat(c.total_call_amount || 0); });
-    }
-
-    let moic = totalCost > 0 ? totalFV / totalCost : 0;
-
-    // Total distributions
-    let totalDist = 0;
-    dists.forEach(d => { totalDist += parseFloat(d.total_net_amount || 0); });
-    let dpi  = totalCost > 0 ? totalDist / totalCost : 0;
-    let tvpi = totalCost > 0 ? (totalFV + totalDist) / totalCost : 0;
-
-    // totalCost and totalFV from investments are already in Cr
+    // ───────────────────────────────────────────────────────────────────
+    //  DB IS THE SINGLE SOURCE OF TRUTH FOR EVERY FUND-LEVEL METRIC.
+    //
+    //  Every value below is read directly from FundMetric (loaded into
+    //  _derivedMetrics above by loadDerivedMetricsForFund). The dashboard
+    //  NEVER recomputes, averages, or interpolates these. If a metric is
+    //  missing the helper returns null and fmtCr/fmtX render "—".
+    //
+    //  If a value is wrong, the fix lives in the Phase 2 persister or
+    //  Pro's prompt — NOT here. Frontend math was removed deliberately
+    //  to eliminate the DB-vs-dashboard drift problem.
+    // ───────────────────────────────────────────────────────────────────
+    const totalFV   = fmValue('active_fair_value');   // ₹ Cr or null
+    const totalCost = fmValue('invested_cost');       // ₹ Cr or null
+    const moic      = fmValue('moic');                // multiple or null
+    const tvpi      = fmValue('tvpi');                // multiple or null
+    const dpi       = fmValue('dpi');                 // multiple or null
+    const rvpi      = fmValue('rvpi');                // multiple or null
+    let   netIrr    = fmValue('net_irr');             // percent or fraction
+    // Storage convention drifts between Pro outputs: some funds store
+    // Net IRR as a decimal fraction (0.158 = 15.8%), others as a percent
+    // value (15.8). Auto-detect: any value with |v| <= 1.5 is a fraction.
+    // Same rule as fmPct() — kept inline here so the display normalises.
+    if (netIrr != null && Math.abs(netIrr) <= 1.5) netIrr = netIrr * 100;
     const costCr = totalCost;
     const fvCr   = totalFV;
-
-    // Cost-weighted average IRR from per-investment irr_pct values
-    let irrNum = 0, irrDen = 0;
-    invs.forEach(inv => {
-      if (inv.irr_pct != null) {
-        const w = parseFloat(inv.total_invested || 0);
-        irrNum += parseFloat(inv.irr_pct) * w;
-        irrDen += w;
-      }
-    });
-    let netIrr = irrDen > 0 ? irrNum / irrDen : null;
-
-    // If no per-investment IRR data, fall back to fund-level Net IRR from BvA ConsolidatedMIS.
-    // This value is extracted from the "Net IRR" row in the Budget vs Actual sheet during import.
-    if (netIrr === null && _ctx.fundId) {
-      try {
-        const misIrr = await Auth.apiGet(`/mis/consolidated/?fund=${_ctx.fundId}&line_item=net_irr`);
-        const irrRec = Array.isArray(misIrr)
-          ? misIrr.find(r => r.line_item === 'net_irr')
-          : (misIrr.results || []).find(r => r.line_item === 'net_irr');
-        if (irrRec && irrRec.total_actual_inr != null) {
-          netIrr = parseFloat(irrRec.total_actual_inr);
-        }
-      } catch (e) { /* silent — no IRR data available */ }
-    }
-
-    // PRODUCTION PRECEDENCE — authoritative Excel values always win.
-    // Order (highest priority first):
-    //   1. imported_direct (Pass 3.5 — extracted from a labelled Excel cell)
-    //   2. derived (Pass 4 — Gemini-computed formula)
-    //   3. on-the-fly DB aggregate (the moic/tvpi/dpi/netIrr we computed above)
-    // Previously the on-the-fly compute was preferred, which caused the
-    // dashboard to display "0" even when Pass 3.5 had extracted the real
-    // value, because the on-the-fly aggregate returned 0 due to missing
-    // Investment/CapitalCall rows.
-    // Precedence rule rewritten so Pass-9-authoritative values always win.
-    // Pass 9 sends the raw fund-level sheets to Gemini and stores
-    // formula_expression='(Pass 9 unified) ...'. Pass 9 values are the
-    // most trustworthy signal because they came from a single prompt
-    // against the actual workbook (no catalogue indirection). Pass 4
-    // catalogue derivations come second. Live on-the-fly compute (which
-    // sums potentially-bad per-row data) is the LAST resort.
-    const _applyDerived = (currentValue, metricKey) => {
-      const rec = _derivedMetrics[metricKey];
-      if (!rec || rec.value == null) return currentValue;
-      const formula = String(rec.formula_expression || '');
-      const isPass9 = formula.startsWith('(Pass 9 unified)');
-      const isPass8 = formula.startsWith('(Pass 8 direct waterfall)');
-      const isImported = rec.source === 'imported_direct';
-      const isHighConfidence = (rec.confidence || 0) >= 0.6;
-      // Tier 1: Pass 9 / Pass 8 / imported_direct ALWAYS win — these are
-      // the sources we engineered to be authoritative.
-      if (isPass9 || isPass8 || isImported) return rec.value;
-      // Tier 2: derived with high confidence wins over live compute.
-      if (isHighConfidence) return rec.value;
-      // Tier 3: live compute wins ONLY when it is non-zero AND we have
-      // any reason to doubt the DerivedMetric (low confidence).
-      if (currentValue == null || currentValue === 0) return rec.value;
-      return currentValue;
-    };
-    moic   = _applyDerived(moic,   'moic');
-    tvpi   = _applyDerived(tvpi,   'tvpi');
-    dpi    = _applyDerived(dpi,    'dpi');
-    netIrr = _applyDerived(netIrr, 'net_irr');
-    // Net IRR from Pass 3.5 comes as a fraction (0.1612); some pipelines
-    // store it as a percentage (16.12). Normalise to percentage for display.
-    if (netIrr != null && Math.abs(netIrr) < 1) netIrr = netIrr * 100;
-    // MOIC / TVPI / DPI from Pass 3.5 are pure multiples (no normalisation).
 
     const totalInvestments = invs.reduce(
         (s, inv) => s + parseInt(inv.tranche_count || 1, 10), 0);
@@ -1169,15 +1151,16 @@ async function loadOverview() {
       'totalFV / totalCost',
       { totalFV: fvCr, totalCost: costCr }
     ));
+    const lpDist = fmValue('lp_distributions');
     wireProvenance('kv-tvpi', 'tvpi', _tileDisplayFor(
       'tvpi', tvpi,
-      '(totalFV + totalDist) / totalCost',
-      { totalFV: fvCr, totalDist: totalDist, totalCost: costCr }
+      '(distributions + NAV) / called  [from FundMetric.tvpi]',
+      { lp_distributions: lpDist, fund_nav: fmValue('fund_nav'), called_capital: fmValue('called_capital') }
     ));
     wireProvenance('kv-irr', 'net_irr', _tileDisplayFor(
       'net_irr', netIrr,
-      'cost-weighted average of per-investment irr_pct',
-      { irr_count: invs.filter(i => i.irr_pct != null).length }
+      'XIRR over LP cashflows  [from FundMetric.net_irr]',
+      { net_irr_source: 'FundMetric (single source of truth)' }
     ));
     // Net IRR card subtitle — real hurdle % from funds_scheme, not hardcoded "8%"
     const _irrSub = $('ks-irr');
@@ -1268,9 +1251,10 @@ async function loadOverview() {
     // Top portfolio — use investments for cost/FV, mapped by company
     renderTopPortfolio(cos, invs);
 
-    // Stage / geo bars
-    renderStageBars(cos, 'stage-bars');
+    // Stage / geo / co-investor bars — universal renderers, work for any fund
+    renderStageBars(cos, invs, 'stage-bars');
     renderGeoBars(cos, 'geo-bars');
+    renderCoInvestBars(cos, 'coinvest-bars');
 
     // Capital calls timeline
     loadCapitalCallsTimeline();
@@ -1530,20 +1514,41 @@ function renderTopPortfolio(cos, invs) {
     return `<tr>
       <td class="td-bold">${esc(c.name || '—')}</td>
       <td>${esc(c.sector || '—')}</td>
-      <td class="td-right">${cost > 0 ? fmtCr(cost) : '—'}</td>
-      <td class="td-right">${fv   > 0 ? fmtCr(fv)   : '—'}</td>
+      <td class="td-right">${cost != null ? fmtCr(cost) : '—'}</td>
+      <td class="td-right">${fv   != null ? fmtCr(fv)   : '—'}</td>
       <td class="td-right v5-text-green">${moic}</td>
       <td class="td-center"><span class="v5-status ${statusClass}">${statusLabel}</span></td>
     </tr>`;
   }).join('') || '<tr><td colspan="6" class="table-empty">No data</td></tr>';
 }
 
-function renderStageBars(cos, targetId) {
-  const el = $(targetId);
+function renderStageBars(cos, invsOrTargetId, targetId) {
+  // Backwards-compatible signature: callers may pass (cos, targetId) OR
+  // (cos, invs, targetId). When investments are provided, group by
+  // Investment.stage/round_name (the correct field); otherwise fall back
+  // to the company-level stage if any future model exposes it.
+  let invs, el;
+  if (typeof invsOrTargetId === 'string') {
+    invs = null;
+    el = $(invsOrTargetId);
+  } else {
+    invs = Array.isArray(invsOrTargetId) ? invsOrTargetId : null;
+    el = $(targetId);
+  }
   if (!el) return;
-  const stages = {};
-  cos.forEach(c => { const s = c.sector || 'Unknown'; stages[s] = (stages[s]||0)+1; });
-  renderBarList(el, stages, '#8b5cf6');
+  const buckets = {};
+  if (invs && invs.length) {
+    invs.forEach(i => {
+      const s = (i.stage || i.round_name || 'Unknown').toString().trim() || 'Unknown';
+      buckets[s] = (buckets[s] || 0) + 1;
+    });
+  } else {
+    cos.forEach(c => {
+      const s = (c.stage || c.sub_sector || 'Unknown').toString().trim() || 'Unknown';
+      buckets[s] = (buckets[s] || 0) + 1;
+    });
+  }
+  renderBarList(el, buckets, '#8b5cf6');
 }
 
 function renderGeoBars(cos, targetId) {
@@ -1552,6 +1557,28 @@ function renderGeoBars(cos, targetId) {
   const geos = {};
   cos.forEach(c => { const g = c.headquarters_city || c.headquarters_country || 'Unknown'; geos[g] = (geos[g]||0)+1; });
   renderBarList(el, geos, '#06b6d4');
+}
+
+function renderCoInvestBars(cos, targetId) {
+  // Universal aggregator: flatten co_investors[] arrays across every
+  // company, count occurrences, render top-N. Works regardless of how
+  // many co-investors any single company has.
+  const el = $(targetId);
+  if (!el) return;
+  const counts = {};
+  cos.forEach(c => {
+    const list = Array.isArray(c.co_investors) ? c.co_investors : [];
+    list.forEach(name => {
+      const k = String(name || '').trim();
+      if (!k) return;
+      counts[k] = (counts[k] || 0) + 1;
+    });
+  });
+  if (Object.keys(counts).length === 0) {
+    el.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:8px">No co-investor data extracted for this fund yet. (Source workbook may not list syndicate members per company.)</div>';
+    return;
+  }
+  renderBarList(el, counts, '#ec4899');
 }
 
 function renderBarList(el, obj, color) {
@@ -1671,7 +1698,7 @@ async function loadPortfolioOverview() {
     });
 
     const elCost = $('pt-cost');
-    if (elCost) elCost.textContent = totalCost > 0 ? fmtCr(totalCost) : '—';
+    if (elCost) elCost.textContent = totalCost != null ? fmtCr(totalCost) : '—';
     const elCos = $('pt-cos');
     if (elCos) elCos.textContent = `${filteredCos.length} companies`;
     const elAvg = $('pt-avg-ticket');
@@ -1688,21 +1715,26 @@ async function loadPortfolioOverview() {
       .catch(() => { if (elHold) elHold.textContent = '—'; });
 
     renderSectorBars(filteredCos, invs, 'pt-sec-bars', 'fv');
-    renderStageBars(filteredCos, 'pt-stage-bars');
+    renderStageBars(filteredCos, invs, 'pt-stage-bars');
 
     // Store for sub renders
     window._pt_cos     = filteredCos;
     window._pt_invs    = invs;
-    window._pt_costMap  = {};
-    window._pt_fvMap    = {};
-    window._pt_stageMap = {};
-    window._pt_irrMap   = {};
+    window._pt_costMap   = {};
+    window._pt_fvMap     = {};
+    window._pt_stageMap  = {};
+    window._pt_irrMap    = {};
+    window._pt_firstDate = {};   // earliest investment_date per company (for MOIC-from-IRR fallback)
     invs.forEach(inv => {
       const n = inv.company_name || inv.portfolio_company_name || '';
       window._pt_costMap[n] = (window._pt_costMap[n] || 0) + parseFloat(inv.total_invested   || 0);
       window._pt_fvMap[n]   = (window._pt_fvMap[n]   || 0) + parseFloat(inv.latest_valuation || 0);
       if (inv.stage && !window._pt_stageMap[n]) window._pt_stageMap[n] = inv.stage;
       if (inv.irr_pct != null && window._pt_irrMap[n] == null) window._pt_irrMap[n] = parseFloat(inv.irr_pct);
+      if (inv.investment_date) {
+        const d = String(inv.investment_date).slice(0, 10);
+        if (!window._pt_firstDate[n] || d < window._pt_firstDate[n]) window._pt_firstDate[n] = d;
+      }
     });
   } catch(e) {
     console.error('Portfolio overview error:', e);
@@ -1739,11 +1771,30 @@ async function loadFullPortfolio() {
     }
 
     // Render rows — store exact sector/stage in data-attrs for precise filtering
+    const firstDateMap = window._pt_firstDate || {};
+    const todayMs = Date.now();
     tbody.innerHTML = cos.map((c, idx) => {
       const cost  = costMap[c.name] || 0;
       const fv    = fvMap[c.name]   || 0;
       const stage = stageMap[c.name] || '';
-      const moic  = cost > 0 ? (fv / cost).toFixed(2) + 'x' : '—';
+
+      // MOIC resolution (universal):
+      //   1. Primary:  FV / Cost (when both > 0)
+      //   2. Fallback: (1 + IRR/100)^years_held — when FV is unknown but IRR is.
+      //      This is the textbook relationship between MOIC and annualised
+      //      IRR over the holding period; lets us still show MOIC for very
+      //      recent or FV-less investments.
+      //   3. Otherwise: '—'
+      let moic = '—';
+      if (cost > 0 && fv > 0) {
+        moic = (fv / cost).toFixed(2) + 'x';
+      } else if (irrMap[c.name] != null && firstDateMap[c.name]) {
+        const yearsHeld = (todayMs - new Date(firstDateMap[c.name]).getTime()) / (365.25 * 24 * 3600 * 1000);
+        if (yearsHeld > 0.05) {
+          const m = Math.pow(1 + irrMap[c.name] / 100, yearsHeld);
+          if (isFinite(m) && m > 0) moic = m.toFixed(2) + 'x';
+        }
+      }
       const statusLabel = c.is_active ? 'Active' : 'Inactive';
       const statusClass = c.is_active ? 'active' : 'exited';
       return `<tr data-sector="${esc(c.sector || '')}" data-stage="${esc(stage)}">
@@ -1752,8 +1803,8 @@ async function loadFullPortfolio() {
         <td>${esc(c.sector || '—')}</td>
         <td>${esc(stage || '—')}</td>
         <td>${esc(c.headquarters_city || '—')}</td>
-        <td class="td-right">${cost > 0 ? fmtCr(cost) : '—'}</td>
-        <td class="td-right">${fv   > 0 ? fmtCr(fv)   : '—'}</td>
+        <td class="td-right">${cost != null ? fmtCr(cost) : '—'}</td>
+        <td class="td-right">${fv   != null ? fmtCr(fv)   : '—'}</td>
         <td class="td-right">${irrMap[c.name] != null ? irrMap[c.name].toFixed(1) + '%' : '—'}</td>
         <td class="td-right v5-text-green">${moic}</td>
         <td class="td-center"><span class="v5-status ${statusClass}">${statusLabel}</span></td>
@@ -3656,38 +3707,65 @@ async function loadFinancials() {
       if ($('fin-pl-count')) $('fin-pl-count').textContent = '';
       return;
     }
-    // Fetch BvA records and pivot to per-company P&L (latest period per company)
-    const plUrl = `/mis/bva/?fund=${_ctx.fundId}`;
-    const data = await Auth.apiGet(plUrl);
-    let arr  = data.results || data || [];
-
-    // Fallback: if no per-company BvA data, render fund-level ConsolidatedMIS P&L
-    if (!arr.length && _ctx.fundId) {
-      await _loadFinancialsFundLevel(tbody);
-      return;
-    }
-
-    if (!arr.length) {
-      tbody.innerHTML = '<tr><td colspan="7" class="table-empty">No financial data. Import financials first.</td></tr>';
-      return;
-    }
-
-    // Group by company, take latest period, collect key line items
-    const byCompany = {};
-    for (const r of arr) {
-      const cname = r.company_name || String(r.portfolio_company || '—');
-      if (!byCompany[cname]) byCompany[cname] = {};
-      const periodKey = `${r.period_year || 0}-${String(r.period_month || 0).padStart(2,'0')}`;
-      const existing  = byCompany[cname];
-      // Keep the record from the latest period
-      const existKey  = existing.__latestKey__ || '';
-      if (periodKey >= existKey) {
-        existing.__latestKey__ = periodKey;
-        existing.__period__    = r.period_month
-          ? `${['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][r.period_month]}-${r.period_year}`
-          : String(r.period_year || '—');
+    // Primary source: PortfolioKPI rows (written by Phase 2 single-call
+    // extractor with revenue/ebitda/pat/etc. per company per period).
+    // Fall back to legacy BvARecord if PortfolioKPI has nothing for this fund.
+    let byCompany = {};
+    try {
+      const kpiData = await Auth.apiGet(`/portfolio/kpis/?fund=${_ctx.fundId}`);
+      const kpiArr = kpiData.kpis || [];
+      const PL_SLUGS = new Set(['revenue', 'total_revenue', 'cogs', 'gross_profit',
+                                'ebitda', 'ebitda_margin_pct', 'ebit', 'pbt', 'pat',
+                                'gross_margin_pct']);
+      for (const k of kpiArr) {
+        if (!PL_SLUGS.has(k.kpi_slug)) continue;
+        const cname = k.company_name || '—';
+        if (!byCompany[cname]) byCompany[cname] = {};
+        const periodKey = String(k.period || '');     // ISO date string
+        const existing  = byCompany[cname];
+        const existKey  = existing.__latestKey__ || '';
+        if (periodKey >= existKey) {
+          existing.__latestKey__ = periodKey;
+          // Render the period nicely (YYYY-MM-DD → "Mon-YYYY")
+          const d = new Date(periodKey);
+          existing.__period__ = isNaN(d.getTime())
+            ? periodKey
+            : `${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()]}-${d.getFullYear()}`;
+        }
+        existing[k.kpi_slug] = parseFloat(k.value);
       }
-      if (r.actual_inr != null) existing[r.line_item] = parseFloat(r.actual_inr);
+    } catch (e) { /* swallow — fall through to BvA */ }
+
+    // Legacy fallback: BvARecord (pre-Phase-2 imports)
+    if (Object.keys(byCompany).length === 0) {
+      const plUrl = `/mis/bva/?fund=${_ctx.fundId}`;
+      const data = await Auth.apiGet(plUrl);
+      let arr  = data.results || data || [];
+
+      if (!arr.length && _ctx.fundId) {
+        await _loadFinancialsFundLevel(tbody);
+        return;
+      }
+
+      if (!arr.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="table-empty">No financial data. Import financials first.</td></tr>';
+        return;
+      }
+
+      for (const r of arr) {
+        const cname = r.company_name || String(r.portfolio_company || '—');
+        if (!byCompany[cname]) byCompany[cname] = {};
+        const periodKey = `${r.period_year || 0}-${String(r.period_month || 0).padStart(2,'0')}`;
+        const existing  = byCompany[cname];
+        const existKey  = existing.__latestKey__ || '';
+        if (periodKey >= existKey) {
+          existing.__latestKey__ = periodKey;
+          existing.__period__    = r.period_month
+            ? `${['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][r.period_month]}-${r.period_year}`
+            : String(r.period_year || '—');
+        }
+        if (r.actual_inr != null) existing[r.line_item] = parseFloat(r.actual_inr);
+      }
     }
 
     const companies = Object.entries(byCompany)
@@ -5728,31 +5806,22 @@ window.exportFullReportPDF = async function() {
     const exits = exitsData.exits || [];
     const exitSummary = exitsData.summary || {};
 
-    // Compute KPIs
+    // Counts from DB rows
     const active = cos.filter(c => c.is_active).length;
     const inactive = cos.length - active;
-    let totalCost = 0, totalFV = 0;
-    invs.forEach(inv => { totalCost += _numVal(inv.total_invested); totalFV += _numVal(inv.latest_valuation); });
-    if (!totalFV && navs.length) {
-      const latest = {}; navs.forEach(n => { if (!latest[n.scheme] || n.nav_date > latest[n.scheme].nav_date) latest[n.scheme] = n; });
-      Object.values(latest).forEach(n => { totalFV += _numVal(n.total_nav); });
-    }
-    if (!totalCost && calls.length) calls.forEach(c => { totalCost += _numVal(c.total_call_amount); });
-    const moic = totalCost > 0 ? totalFV / totalCost : 0;
-    let totalDist = 0; dists.forEach(d => { totalDist += _numVal(d.total_net_amount); });
-    const dpi  = totalCost > 0 ? totalDist / totalCost : 0;
-    const tvpi = totalCost > 0 ? (totalFV + totalDist) / totalCost : 0;
 
-    // IRR
-    let irrNum = 0, irrDen = 0;
-    invs.forEach(inv => { if (inv.irr_pct != null) { const w = _numVal(inv.total_invested); irrNum += parseFloat(inv.irr_pct) * w; irrDen += w; }});
-    let netIrr = irrDen > 0 ? irrNum / irrDen : null;
-    if (netIrr === null && _ctx.fundId) {
-      try { const misIrr = await Auth.apiGet(`/mis/consolidated/?fund=${_ctx.fundId}&line_item=net_irr`);
-        const r = (Array.isArray(misIrr) ? misIrr : (misIrr.results||[])).find(r => r.line_item === 'net_irr');
-        if (r?.total_actual_inr != null) netIrr = parseFloat(r.total_actual_inr);
-      } catch(e){}
-    }
+    // === DB SINGLE SOURCE OF TRUTH ===
+    // Fund-level metrics read directly from FundMetric (loaded above).
+    // No recomputation. If a value is missing, fmValue returns null and
+    // the PDF renderer shows "—". Fix the persister or prompt, not here.
+    await loadDerivedMetricsForFund(_ctx.fundId);
+    const totalFV   = fmValue('active_fair_value');
+    const totalCost = fmValue('invested_cost');
+    const moic      = fmValue('moic');
+    const tvpi      = fmValue('tvpi');
+    const dpi       = fmValue('dpi');
+    let   netIrr    = fmValue('net_irr');
+    if (netIrr != null && Math.abs(netIrr) <= 1.5) netIrr = netIrr * 100;
 
     // Sector data
     const sectorFV = {}, sectorCost = {}, sectorCount = {};

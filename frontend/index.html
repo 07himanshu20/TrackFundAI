@@ -1015,7 +1015,15 @@
 <script src="fund-selector.js"></script>
 <script src="theme-switcher.js"></script>
 <script src="notification-drawer.js"></script>
-<script src="v5-dashboard.js"></script>
+<script>
+  // Cache-buster: append a fresh ?v=<timestamp> so browsers always fetch
+  // the latest v5-dashboard.js instead of serving a stale cached copy.
+  (function () {
+    var s = document.createElement('script');
+    s.src = 'v5-dashboard.js?v=' + Date.now();
+    document.body.appendChild(s);
+  })();
+</script>
 <script src="chatbot-widget.js"></script>
 </body>
 </html>

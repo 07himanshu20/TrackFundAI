@@ -563,16 +563,9 @@ class ExitSignalEngine:
         return result
 
     def _get_ai_rationale(self, signals: Dict) -> str:
-        """Call Gemini to generate natural language exit rationale."""
+        """Call Gemini (Vertex AI) to generate natural language exit rationale."""
         try:
-            import google.generativeai as genai
-            from django.conf import settings
-
-            if not settings.GEMINI_API_KEY:
-                return self._rule_based_rationale(signals)
-
-            genai.configure(api_key=settings.GEMINI_API_KEY)
-            model = genai.GenerativeModel(settings.GEMINI_MODEL)
+            from api.gemini_service import generate_content
 
             prompt = f"""You are a senior investment professional with 25 years of PE/VC experience in Indian markets.
 
@@ -592,7 +585,7 @@ Provide a concise 3-4 sentence professional exit recommendation covering:
 
 Write in a professional tone suitable for an IC memo."""
 
-            response = model.generate_content(prompt)
+            response = generate_content(prompt)
             return response.text.strip()
         except Exception:
             return self._rule_based_rationale(signals)

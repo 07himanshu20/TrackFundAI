@@ -1,0 +1,1233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>TrackFundAI — System Architecture & Phase 3 Design</title>
+<style>
+  /* ── Reset + Type ─────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif;
+    font-size: 14.5px;
+    line-height: 1.6;
+    color: #0f172a;
+    background: #f8fafc;
+  }
+  /* ── Header ───────────────────────────────────────────────── */
+  header.doc-header {
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    color: #f1f5f9;
+    padding: 36px 56px 32px;
+    border-bottom: 4px solid #2563eb;
+  }
+  header.doc-header h1 {
+    margin: 0 0 8px;
+    font-size: 30px;
+    font-weight: 800;
+    letter-spacing: -0.5px;
+  }
+  header.doc-header .sub {
+    color: #94a3b8;
+    font-size: 14px;
+    margin-bottom: 6px;
+  }
+  header.doc-header .meta {
+    font-size: 12px;
+    color: #64748b;
+    margin-top: 12px;
+    display: flex;
+    gap: 24px;
+    flex-wrap: wrap;
+  }
+  header.doc-header .meta span b { color: #cbd5e1; }
+  /* ── Layout ───────────────────────────────────────────────── */
+  .doc-wrap { display: flex; max-width: 1500px; margin: 0 auto; }
+  nav.toc {
+    position: sticky;
+    top: 0;
+    width: 270px;
+    height: 100vh;
+    overflow-y: auto;
+    background: #0f172a;
+    color: #cbd5e1;
+    padding: 24px 18px;
+    font-size: 13px;
+  }
+  nav.toc h4 {
+    color: #f1f5f9;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    margin: 0 0 12px;
+    font-weight: 700;
+  }
+  nav.toc ol { list-style: none; padding: 0; margin: 0 0 22px; }
+  nav.toc li { margin: 0; }
+  nav.toc a {
+    display: block;
+    padding: 6px 10px;
+    color: #94a3b8;
+    text-decoration: none;
+    border-left: 2px solid transparent;
+    transition: all 0.15s;
+  }
+  nav.toc a:hover { background: #1e293b; color: #f1f5f9; border-left-color: #2563eb; }
+  nav.toc a.sub { padding-left: 24px; font-size: 12px; color: #64748b; }
+  main {
+    flex: 1;
+    padding: 36px 56px;
+    background: #ffffff;
+    min-width: 0;
+  }
+  /* ── Headings ─────────────────────────────────────────────── */
+  h2 {
+    font-size: 24px;
+    color: #0f172a;
+    border-bottom: 2px solid #2563eb;
+    padding-bottom: 10px;
+    margin: 48px 0 20px;
+    font-weight: 700;
+  }
+  h2:first-child { margin-top: 0; }
+  h3 {
+    font-size: 18px;
+    color: #1e293b;
+    margin: 32px 0 14px;
+    font-weight: 700;
+  }
+  h4 {
+    font-size: 14.5px;
+    color: #334155;
+    margin: 20px 0 8px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+  }
+  p { margin: 0 0 12px; color: #334155; }
+  /* ── Inline elements ──────────────────────────────────────── */
+  code {
+    background: #f1f5f9;
+    padding: 2px 6px;
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    border-radius: 3px;
+    font-size: 13px;
+    color: #be185d;
+  }
+  a { color: #2563eb; }
+  hr { border: none; border-top: 1px solid #e2e8f0; margin: 36px 0; }
+  /* ── Callout boxes ────────────────────────────────────────── */
+  .callout {
+    padding: 16px 20px;
+    border-left: 4px solid;
+    background: #f8fafc;
+    border-radius: 4px;
+    margin: 16px 0;
+    font-size: 14px;
+  }
+  .callout.info    { border-color: #2563eb; background: #eff6ff; }
+  .callout.success { border-color: #16a34a; background: #f0fdf4; }
+  .callout.warn    { border-color: #f59e0b; background: #fffbeb; }
+  .callout.danger  { border-color: #dc2626; background: #fef2f2; }
+  .callout.muted   { border-color: #64748b; background: #f1f5f9; }
+  .callout b { color: #0f172a; }
+  /* ── Tables ───────────────────────────────────────────────── */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 13.5px;
+    background: #fff;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+  }
+  th {
+    background: #f1f5f9;
+    color: #0f172a;
+    text-align: left;
+    padding: 10px 14px;
+    border-bottom: 2px solid #cbd5e1;
+    font-weight: 700;
+  }
+  td {
+    padding: 10px 14px;
+    border-bottom: 1px solid #e2e8f0;
+    color: #334155;
+    vertical-align: top;
+  }
+  td code { font-size: 12.5px; }
+  /* ── Diagram boxes ────────────────────────────────────────── */
+  .diagram {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 24px;
+    margin: 20px 0;
+    overflow-x: auto;
+    text-align: center;
+  }
+  .diagram-caption {
+    font-size: 12px;
+    color: #64748b;
+    text-align: center;
+    margin-top: 8px;
+    font-style: italic;
+  }
+  svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+  /* ── Stage cards ──────────────────────────────────────────── */
+  .stage-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 14px;
+    margin: 18px 0;
+  }
+  .stage-card {
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-left: 4px solid #2563eb;
+    border-radius: 6px;
+    padding: 16px 18px;
+  }
+  .stage-card.l1 { border-left-color: #2563eb; }
+  .stage-card.l2 { border-left-color: #16a34a; }
+  .stage-card.l3 { border-left-color: #f59e0b; }
+  .stage-card h5 {
+    margin: 0 0 6px;
+    font-size: 14px;
+    font-weight: 700;
+    color: #0f172a;
+  }
+  .stage-card .tag {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 12px;
+    background: #eff6ff;
+    color: #2563eb;
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+  .stage-card.l2 .tag { background: #f0fdf4; color: #16a34a; }
+  .stage-card.l3 .tag { background: #fffbeb; color: #d97706; }
+  .stage-card p { font-size: 13px; color: #475569; margin: 0; }
+  /* ── Status badges ────────────────────────────────────────── */
+  .badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .badge.active   { background: #dcfce7; color: #166534; }
+  .badge.legacy   { background: #fee2e2; color: #991b1b; }
+  .badge.design   { background: #fef3c7; color: #92400e; }
+  .badge.future   { background: #ede9fe; color: #5b21b6; }
+  /* ── KV list ──────────────────────────────────────────────── */
+  .kv-list {
+    background: #f8fafc;
+    padding: 14px 18px;
+    border-radius: 6px;
+    border: 1px solid #e2e8f0;
+    margin: 12px 0;
+  }
+  .kv-list dt {
+    font-weight: 700;
+    color: #1e293b;
+    font-size: 13px;
+    margin-top: 6px;
+  }
+  .kv-list dt:first-child { margin-top: 0; }
+  .kv-list dd {
+    margin: 2px 0 0;
+    color: #475569;
+    font-size: 13px;
+    padding-left: 0;
+  }
+  /* ── Footer ───────────────────────────────────────────────── */
+  footer.doc-footer {
+    margin-top: 64px;
+    padding: 24px 56px;
+    background: #0f172a;
+    color: #94a3b8;
+    font-size: 12px;
+    text-align: center;
+  }
+  footer.doc-footer b { color: #f1f5f9; }
+  /* ── Print ────────────────────────────────────────────────── */
+  @media print {
+    nav.toc { display: none; }
+    main { padding: 20px; }
+    body { font-size: 12px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="doc-header">
+  <h1>TrackFundAI — System Architecture &amp; Phase 3 Design</h1>
+  <div class="sub">End-to-end data flow: from GP Excel upload through Gemini extraction, layer-based parallel processing, reconciliation, persistence, and dashboard render.</div>
+  <div class="meta">
+    <span><b>Version:</b> 1.0 (Phase 3 design baseline)</span>
+    <span><b>Generated:</b> 2026-06-22</span>
+    <span><b>Status:</b> Phase 3 = DRAFT (awaiting priority_matrix.md approval)</span>
+    <span><b>Stack:</b> Django 4 · Vanilla JS · PostgreSQL · Gemini 2.5 Pro on Vertex AI</span>
+  </div>
+</header>
+
+<div class="doc-wrap">
+
+<nav class="toc">
+  <h4>Contents</h4>
+  <ol>
+    <li><a href="#exec">1. Executive Summary</a></li>
+    <li><a href="#system">2. System Architecture</a></li>
+    <li><a href="#endflow">3. End-to-End Data Flow</a></li>
+    <li><a href="#phases">4. Pipeline Generations</a></li>
+    <li><a href="#flavorA">5. Flavor A — Semantic Layering</a>
+      <ol>
+        <li><a href="#layer1" class="sub">Layer 1 — Identity</a></li>
+        <li><a href="#layer2" class="sub">Layer 2 — Universe</a></li>
+        <li><a href="#layer3" class="sub">Layer 3 — Time-Series</a></li>
+        <li><a href="#layer-dyn" class="sub">Dynamic Layer Formation</a></li>
+      </ol>
+    </li>
+    <li><a href="#flavorB">6. Flavor B — Row Chunking (Fallback)</a></li>
+    <li><a href="#parallel">7. Parallel Execution Model</a></li>
+    <li><a href="#reconcile">8. Reconciliation &amp; Priority Matrix</a></li>
+    <li><a href="#validator">9. Cross-Layer Validator</a></li>
+    <li><a href="#dfds">10. Data Flow Diagrams</a></li>
+    <li><a href="#frontend">11. Frontend Render &amp; Provenance</a></li>
+    <li><a href="#retirement">12. Phase Retirement Plan</a></li>
+    <li><a href="#filemap">13. File Map</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2 id="exec">1. Executive Summary</h2>
+
+<p>
+  TrackFundAI ingests Indian AIF Excel workbooks of arbitrary GP/format/vintage and produces a multi-tenant
+  fund management dashboard. The platform has gone through three pipeline generations:
+</p>
+
+<table>
+  <thead>
+    <tr><th>Generation</th><th>Approach</th><th>Status</th><th>Tradeoffs</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><b>Phase 1</b><br><span class="badge legacy">Deleting</span></td>
+      <td>Multi-pass Gemini chain: classify sheets &rarr; classify sections &rarr; map columns &rarr; interpret values &rarr; derive metrics. ~9,400 lines in <code>import_service.py</code>.</td>
+      <td>Disabled — being permanently removed</td>
+      <td>Slow (6+ Gemini calls), fragile chain, hardcoded keywords for 20+ categories.</td>
+    </tr>
+    <tr>
+      <td><b>Single-call extractor</b><br><span class="badge active">Current</span></td>
+      <td>One Gemini Pro call ingests the entire workbook and returns a structured JSON.</td>
+      <td>Production default since 2026-05; gated by <code>USE_NEW_EXTRACTOR=true</code></td>
+      <td>Hits 65K output-token ceiling on large workbooks. No semantic layering — one prompt does everything.</td>
+    </tr>
+    <tr>
+      <td><b>Phase 3 (Flavor A + B)</b><br><span class="badge design">Design</span></td>
+      <td>Always 3 parallel Gemini calls (Layer 1 Identity + Layer 2 Universe + Layer 3 Time-series). Flavor B fires inside any layer that overflows — either pre-emptively (estimator predicts &gt; 35K output tokens) or reactively (Gemini's response is detected as truncated mid-call, then the chunk auto-splits into two and reruns).</td>
+      <td>Design approved; implementation gated on <code>priority_matrix.md</code> sign-off</td>
+      <td>Preserves single-call latency (wall time = MAX of parallel calls), bounded by output token ceiling, scales to 500+ company portfolios.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout info">
+  <b>Why semantic layering, not row chunking as default?</b> Row chunks break formula consistency
+  (e.g., per-LP IRR rows need fund-level NAV context). Semantic layering keeps related fields in the same
+  call so cross-references stay coherent. Row chunking is reserved for genuinely huge time-series sheets
+  where rows are independent observations.
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2 id="system">2. System Architecture</h2>
+
+<h3>Stack &amp; Multi-tenancy</h3>
+<dl class="kv-list">
+  <dt>Backend</dt>
+  <dd>Django 4.x + Django REST Framework. JWT auth (custom <code>Auth</code> wrapper on frontend).</dd>
+  <dt>Frontend</dt>
+  <dd>Vanilla JS SPA (no framework). Single <code>index.html</code> shell, all pages are <code>&lt;div class="v5-page"&gt;</code> sections, navigation via <code>showPage(name)</code>.</dd>
+  <dt>Database</dt>
+  <dd>PostgreSQL. Every fund-data model has <code>organization = FK(Organization)</code>; queries always scope by org.</dd>
+  <dt>AI</dt>
+  <dd>Gemini 2.5 Pro on Vertex AI. 1M input tokens, 65K output tokens. <code>temperature=0</code>, JSON response mode.</dd>
+  <dt>Auth scope</dt>
+  <dd>Organization &gt; FundAccess &gt; SchemeAccess. Audit log on every mutating action.</dd>
+</dl>
+
+<h3>Django Apps (8)</h3>
+<table>
+  <thead><tr><th>App</th><th>Purpose</th><th>Key Models</th></tr></thead>
+  <tbody>
+    <tr><td><code>accounts</code></td><td>Multi-tenancy + auth</td><td>Organization, User, FundAccess, SchemeAccess, AuditLog</td></tr>
+    <tr><td><code>funds</code></td><td>Fund &amp; scheme master</td><td>FundCategory, Entity, Fund, Scheme</td></tr>
+    <tr><td><code>lp</code></td><td>LP &amp; capital flows</td><td>Investor, BankAccount, Commitment, CapitalCall, CapitalCallLineItem, Distribution, DistributionLineItem, LPCapitalAccount</td></tr>
+    <tr><td><code>investments</code></td><td>Portfolio companies + valuations + KPIs</td><td>PortfolioCompany, Investment, InvestmentTranche, Valuation, KPIDefinition, PortfolioKPI, CompanyFinancials, ExitEvent, BoardMeeting</td></tr>
+    <tr><td><code>accounting</code></td><td>Fund accounting</td><td>ChartOfAccounts, NAVRecord, CarriedInterest, FundLedger, ManagementFeeSchedule</td></tr>
+    <tr><td><code>portfolio</code></td><td>Snapshot hierarchy for dashboard</td><td>PortfolioSnapshot, PortfolioNode</td></tr>
+    <tr><td><code>compliance</code></td><td>SEBI compliance + alerts</td><td>SEBIReport, AMLDueDiligence, ComplianceTestReport, EquityThresholdAlert, ComplianceCalendar, PPMAmendment, SEBICircular, FundComplianceScore</td></tr>
+    <tr><td><code>dataimport</code></td><td>Import orchestration + metric SSoT</td><td>ImportJob, ImportFile, DerivedMetric, MetricCandidate, <b>FundMetric</b> &larr; single source of truth for dashboard tiles</td></tr>
+  </tbody>
+</table>
+
+<div class="callout success">
+  <b>FundMetric is the dashboard's single source of truth.</b> Every metric tile on the frontend (Net IRR, TVPI, MOIC, Fund NAV, Carry Base, etc.) is read from <code>FundMetric</code> via <code>fmValue('metric_key')</code>. No frontend recomputation. No fallback computations on the client side.
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2 id="endflow">3. End-to-End Data Flow</h2>
+
+<p>From the moment a GP user drops an Excel file into the uploader, here is the complete journey of one cell value to becoming a number rendered on the dashboard:</p>
+
+<div class="diagram">
+  <svg viewBox="0 0 1200 760" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+      </marker>
+      <linearGradient id="gradL1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3b82f6"/><stop offset="1" stop-color="#2563eb"/></linearGradient>
+      <linearGradient id="gradL2" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#22c55e"/><stop offset="1" stop-color="#16a34a"/></linearGradient>
+      <linearGradient id="gradL3" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fbbf24"/><stop offset="1" stop-color="#f59e0b"/></linearGradient>
+    </defs>
+
+    <!-- STAGE 1: Upload -->
+    <rect x="40" y="20" width="200" height="70" rx="8" fill="#1e293b"/>
+    <text x="140" y="48" text-anchor="middle" fill="#f1f5f9" font-size="13" font-weight="700">1. GP UPLOAD</text>
+    <text x="140" y="68" text-anchor="middle" fill="#cbd5e1" font-size="11">POST /api/dataimport/jobs/</text>
+    <text x="140" y="82" text-anchor="middle" fill="#94a3b8" font-size="10">Excel → ImportFile + ImportJob</text>
+
+    <!-- STAGE 2: Router -->
+    <rect x="280" y="20" width="200" height="70" rx="8" fill="#0f172a"/>
+    <text x="380" y="42" text-anchor="middle" fill="#f1f5f9" font-size="13" font-weight="700">2. WORKBOOK ROUTER</text>
+    <text x="380" y="62" text-anchor="middle" fill="#cbd5e1" font-size="11">phase3_layers/workbook_router.py</text>
+    <text x="380" y="78" text-anchor="middle" fill="#94a3b8" font-size="10">Classify sheets → L1 / L2 / L3</text>
+
+    <!-- STAGE 3: Token estimator -->
+    <rect x="520" y="20" width="200" height="70" rx="8" fill="#0f172a"/>
+    <text x="620" y="42" text-anchor="middle" fill="#f1f5f9" font-size="13" font-weight="700">3. TOKEN ESTIMATOR</text>
+    <text x="620" y="62" text-anchor="middle" fill="#cbd5e1" font-size="11">token_estimator.py</text>
+    <text x="620" y="78" text-anchor="middle" fill="#94a3b8" font-size="10">Per-layer: chunk needed?</text>
+
+    <!-- STAGE 4: Parallel executor (split into L1/L2/L3) -->
+    <rect x="760" y="20" width="200" height="70" rx="8" fill="#0f172a"/>
+    <text x="860" y="42" text-anchor="middle" fill="#f1f5f9" font-size="13" font-weight="700">4. PARALLEL EXECUTOR</text>
+    <text x="860" y="62" text-anchor="middle" fill="#cbd5e1" font-size="11">ThreadPoolExecutor</text>
+    <text x="860" y="78" text-anchor="middle" fill="#94a3b8" font-size="10">3..N concurrent Gemini calls</text>
+
+    <!-- Arrows 1-2-3-4 -->
+    <line x1="240" y1="55" x2="278" y2="55" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+    <line x1="480" y1="55" x2="518" y2="55" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+    <line x1="720" y1="55" x2="758" y2="55" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- Bracket from Executor branching to 3 layers -->
+    <line x1="860" y1="90" x2="860" y2="140" stroke="#475569" stroke-width="2"/>
+    <line x1="200" y1="140" x2="1080" y2="140" stroke="#475569" stroke-width="2"/>
+    <line x1="200" y1="140" x2="200" y2="170" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+    <line x1="640" y1="140" x2="640" y2="170" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+    <line x1="1080" y1="140" x2="1080" y2="170" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- Layer 1 -->
+    <rect x="60" y="180" width="280" height="170" rx="10" fill="url(#gradL1)"/>
+    <text x="200" y="208" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">LAYER 1 — Identity</text>
+    <text x="200" y="230" text-anchor="middle" fill="#dbeafe" font-size="11">Cover / Fund Master / Investors</text>
+    <text x="200" y="246" text-anchor="middle" fill="#dbeafe" font-size="11">Capital Calls / Distributions</text>
+    <text x="200" y="262" text-anchor="middle" fill="#dbeafe" font-size="11">NAV walk / Waterfall / Fund Perf</text>
+    <line x1="100" y1="278" x2="300" y2="278" stroke="#dbeafe" stroke-opacity="0.4"/>
+    <text x="200" y="298" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">Output blocks:</text>
+    <text x="200" y="314" text-anchor="middle" fill="#dbeafe" font-size="10">fund_master, scheme_terms,</text>
+    <text x="200" y="328" text-anchor="middle" fill="#dbeafe" font-size="10">investors, capital_calls,</text>
+    <text x="200" y="342" text-anchor="middle" fill="#dbeafe" font-size="10">distributions, nav, waterfall</text>
+
+    <!-- Layer 2 -->
+    <rect x="500" y="180" width="280" height="170" rx="10" fill="url(#gradL2)"/>
+    <text x="640" y="208" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">LAYER 2 — Universe</text>
+    <text x="640" y="230" text-anchor="middle" fill="#dcfce7" font-size="11">Portfolio Companies + Investments</text>
+    <text x="640" y="246" text-anchor="middle" fill="#dcfce7" font-size="11">Tranches / Valuations</text>
+    <text x="640" y="262" text-anchor="middle" fill="#dcfce7" font-size="11">Exits / Quoted-Unquoted</text>
+    <line x1="540" y1="278" x2="740" y2="278" stroke="#dcfce7" stroke-opacity="0.4"/>
+    <text x="640" y="298" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">Output blocks:</text>
+    <text x="640" y="314" text-anchor="middle" fill="#dcfce7" font-size="10">portfolio_investments[],</text>
+    <text x="640" y="328" text-anchor="middle" fill="#dcfce7" font-size="10">valuations[], exits[],</text>
+    <text x="640" y="342" text-anchor="middle" fill="#dcfce7" font-size="10">tranches[]</text>
+
+    <!-- Layer 3 -->
+    <rect x="940" y="180" width="240" height="170" rx="10" fill="url(#gradL3)"/>
+    <text x="1060" y="208" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">LAYER 3 — Time-series</text>
+    <text x="1060" y="230" text-anchor="middle" fill="#fef3c7" font-size="11">Per-co monthly KPIs</text>
+    <text x="1060" y="246" text-anchor="middle" fill="#fef3c7" font-size="11">Monthly P&amp;L / BS / CF</text>
+    <text x="1060" y="262" text-anchor="middle" fill="#fef3c7" font-size="11">Burn / Runway / Headcount</text>
+    <line x1="970" y1="278" x2="1150" y2="278" stroke="#fef3c7" stroke-opacity="0.4"/>
+    <text x="1060" y="298" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">Output blocks:</text>
+    <text x="1060" y="314" text-anchor="middle" fill="#fef3c7" font-size="10">portfolio_kpis_periodic[],</text>
+    <text x="1060" y="328" text-anchor="middle" fill="#fef3c7" font-size="10">monthly_pl[], monthly_bs[],</text>
+    <text x="1060" y="342" text-anchor="middle" fill="#fef3c7" font-size="10">monthly_cf[]</text>
+
+    <!-- Flavor B box -->
+    <rect x="940" y="370" width="240" height="50" rx="6" fill="#fff" stroke="#f59e0b" stroke-width="2" stroke-dasharray="4 3"/>
+    <text x="1060" y="390" text-anchor="middle" fill="#92400e" font-size="11" font-weight="700">Flavor B (conditional)</text>
+    <text x="1060" y="406" text-anchor="middle" fill="#b45309" font-size="10">Activates if est. &gt; 35K OR truncation detected</text>
+    <line x1="1060" y1="350" x2="1060" y2="368" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="3 2"/>
+
+    <!-- Arrows L1/L2/L3 -> Merger -->
+    <line x1="200" y1="350" x2="200" y2="450" stroke="#475569" stroke-width="2"/>
+    <line x1="640" y1="350" x2="640" y2="450" stroke="#475569" stroke-width="2"/>
+    <line x1="1060" y1="420" x2="1060" y2="450" stroke="#475569" stroke-width="2"/>
+
+    <!-- Merger box -->
+    <rect x="120" y="450" width="960" height="60" rx="8" fill="#0f172a"/>
+    <text x="600" y="475" text-anchor="middle" fill="#f1f5f9" font-size="14" font-weight="700">5. MERGER + RECONCILER + CROSS-LAYER VALIDATOR</text>
+    <text x="600" y="495" text-anchor="middle" fill="#cbd5e1" font-size="11">Apply priority_matrix.md → produce ONE unified JSON, surface ⚠️ on tolerance breaches</text>
+    <line x1="200" y1="450" x2="1080" y2="450" stroke="#475569" stroke-width="2"/>
+
+    <!-- Persister -->
+    <line x1="600" y1="510" x2="600" y2="540" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="380" y="540" width="440" height="60" rx="8" fill="#1e3a8a"/>
+    <text x="600" y="565" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">6. PHASE 2 PERSISTER (re-used by Phase 3)</text>
+    <text x="600" y="585" text-anchor="middle" fill="#bfdbfe" font-size="11">phase2_persister.py — update_or_create across all DB models</text>
+
+    <!-- Anchor metric writer -->
+    <line x1="600" y1="600" x2="600" y2="630" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="380" y="630" width="440" height="50" rx="8" fill="#7c2d12"/>
+    <text x="600" y="652" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">7. FUND METRIC WRITER (with provenance + priority_rule)</text>
+    <text x="600" y="668" text-anchor="middle" fill="#fed7aa" font-size="10">Writes FundMetric rows: value + inputs_used + provenance + priority_rule_applied</text>
+
+    <!-- API + Frontend -->
+    <line x1="600" y1="680" x2="600" y2="710" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="380" y="710" width="440" height="40" rx="8" fill="#16a34a"/>
+    <text x="600" y="735" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">8. API → fmValue() → Dashboard tile → Provenance side panel</text>
+  </svg>
+  <div class="diagram-caption">Figure 1. End-to-end flow from GP upload to dashboard render.</div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2 id="phases">4. Pipeline Generations</h2>
+
+<table>
+  <thead><tr><th>Stage</th><th>Phase 1 (legacy)</th><th>Single-call (current)</th><th>Phase 3 / Flavor A+B (next)</th></tr></thead>
+  <tbody>
+    <tr><td>Sheet classification</td><td>Gemini Pass 1 call</td><td>Implicit inside single call</td><td>Python <code>workbook_router.py</code> (no Gemini)</td></tr>
+    <tr><td>Section detection</td><td>Gemini Pass 1.5 call</td><td>Implicit</td><td>Python (no Gemini)</td></tr>
+    <tr><td>Column mapping</td><td>Gemini Pass 2 call per sheet</td><td>Implicit</td><td>Implicit inside each layer call</td></tr>
+    <tr><td>Value interpretation</td><td>Hardcoded keyword dicts (~1100 keywords) + 20 Gemini sub-calls</td><td>Implicit (Pro reasons in JSON output)</td><td>Implicit inside each layer call</td></tr>
+    <tr><td>Metric derivation</td><td>Pass 4 anchor pipeline (separate Gemini calls per anchor)</td><td>Pro emits computed metrics with formula provenance</td><td>Layer 1 emits computed metrics with formula + priority_rule_applied</td></tr>
+    <tr><td>Number of Gemini calls</td><td>6+ sequential</td><td>1</td><td>3..N parallel (wall time = MAX, not SUM)</td></tr>
+    <tr><td>Output token risk</td><td>Distributed across calls — safe</td><td>HIT 65K ceiling on large workbooks</td><td>Per-layer ceiling — Flavor B sub-chunks if one layer overflows</td></tr>
+    <tr><td>Lines of code in <code>import_service.py</code></td><td>~9,400</td><td>~500 (orchestration only)</td><td>0 (replaced by <code>phase3_layers/</code> package)</td></tr>
+  </tbody>
+</table>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2 id="flavorA">5. Flavor A — Semantic Layering</h2>
+
+<p>
+  Flavor A always runs 3 parallel Gemini calls. Each call is given the <b>same identity context</b>
+  (Cover sheet + Fund Master extracted by a one-shot pre-pass, or replicated as a copy of the L1 prompt
+  preamble) so it has independent context — no layer depends on another layer's output.
+</p>
+
+<div class="stage-grid">
+  <div class="stage-card l1">
+    <span class="tag">LAYER 1</span>
+    <h5>Identity &amp; Fund-Level</h5>
+    <p>Cover, Fund Master, Investors, Capital Calls, Distributions, NAV Walk, Waterfall, Fund Performance. Emits scalar identity + fund-level metrics with provenance.</p>
+  </div>
+  <div class="stage-card l2">
+    <span class="tag">LAYER 2</span>
+    <h5>Investment Universe</h5>
+    <p>Portfolio Companies, Investments (per-scheme), Tranches, Valuations, Exits, Quoted/Unquoted. Emits per-investment data with tranche-level provenance.</p>
+  </div>
+  <div class="stage-card l3">
+    <span class="tag">LAYER 3</span>
+    <h5>Time-Series</h5>
+    <p>Per-company monthly KPIs (revenue, EBITDA, GMV, MRR, etc.), monthly P&amp;L / BS / CF, burn &amp; runway. Highest output-token risk → Flavor B activates here first.</p>
+  </div>
+</div>
+
+<h3 id="layer1">Layer 1 — Identity (deep dive)</h3>
+<dl class="kv-list">
+  <dt>Sheets routed here</dt>
+  <dd>Any sheet whose router-classification ∈ {<code>cover</code>, <code>fund_master</code>, <code>investors</code>, <code>capital_calls</code>, <code>distributions</code>, <code>nav_walk</code>, <code>waterfall</code>, <code>fund_performance</code>, <code>scheme_lifecycle</code>, <code>entities</code>}.</dd>
+  <dt>Prompt structure</dt>
+  <dd>Common rules (Rules 1–34) + Layer 1 instructions + identity context replication.</dd>
+  <dt>Expected output blocks</dt>
+  <dd><code>fund_master</code>, <code>scheme_terms</code>, <code>entities[]</code>, <code>investors[]</code>, <code>commitments[]</code>, <code>capital_calls[]</code>, <code>distributions[]</code>, <code>nav_records[]</code>, <code>fund_performance{...}</code>.</dd>
+  <dt>Cross-layer dependencies</dt>
+  <dd>None outbound (L1 is foundational). Cross-layer reconciliation may compare L1's fund-level aggregates against L2's row-sums (P3 principle).</dd>
+</dl>
+
+<h3 id="layer2">Layer 2 — Universe (deep dive)</h3>
+<dl class="kv-list">
+  <dt>Sheets routed here</dt>
+  <dd>Any sheet whose classification ∈ {<code>portfolio</code>, <code>valuations</code>, <code>tranches</code>, <code>exits</code>, <code>quoted_unquoted</code>}.</dd>
+  <dt>Output blocks</dt>
+  <dd><code>portfolio_investments[]</code>, <code>valuations[]</code>, <code>tranches[]</code>, <code>exits[]</code>.</dd>
+  <dt>Flavor B trigger</dt>
+  <dd>
+    <b>Pre-emptive:</b> token estimator (~8 tokens per source cell + 3K overhead)
+    &gt; 35K → pre-chunk into N parallel sub-calls.<br>
+    <b>Reactive:</b> if Gemini truncates a chunk mid-response
+    (<code>finish_reason = MAX_TOKENS</code>), <code>_run_chunk</code>
+    auto-splits that chunk in two and reruns each — recursively up to 4 levels.
+    Either path guarantees Layer 2 data lands.
+  </dd>
+</dl>
+
+<h3 id="layer3">Layer 3 — Time-series (deep dive)</h3>
+<dl class="kv-list">
+  <dt>Sheets routed here</dt>
+  <dd>Any sheet whose classification ∈ {<code>kpi_matrix</code>, <code>monthly_pl</code>, <code>monthly_bs</code>, <code>monthly_cf</code>, <code>budget_vs_actual</code>, <code>company_financials</code>, <code>burn_runway</code>}.</dd>
+  <dt>Output blocks</dt>
+  <dd><code>portfolio_kpis_periodic[]</code>, <code>monthly_pl[]</code>, <code>monthly_bs[]</code>, <code>monthly_cf[]</code>.</dd>
+  <dt>Flavor B trigger</dt>
+  <dd>
+    Highest output-volume layer. Pre-emptive split fires when est ≈
+    (# companies × # periods × # line-items × 8 tokens) &gt; 35K. Even when
+    pre-split fires correctly, any chunk that still truncates auto-splits
+    again — the recursive safety net is identical to L2's.
+  </dd>
+  <dt>Chunk dimension</dt>
+  <dd>Row-range chunking by <b>company group</b> (preferred — keeps a company's time series intact) OR by <b>period range</b> (only when one company has &gt;100 periods).</dd>
+</dl>
+
+<h3 id="layer-dyn">Dynamic Layer Formation — How Sheets Get Routed</h3>
+
+<p>
+  The router (<code>workbook_router.py</code>) classifies every sheet into L1/L2/L3 using a lightweight rules-only
+  classifier (no Gemini — runs in milliseconds). The classification cascade:
+</p>
+
+<ol>
+  <li><b>Header keyword scan</b> — first 5 rows of each sheet scanned against domain-specific anchor terms (e.g., "NAV", "Carried Interest", "Capital Account" → L1; "Portfolio", "Investment", "Valuation" → L2; "Monthly", "KPI Matrix", "P&amp;L", "Burn" → L3).</li>
+  <li><b>Column-count + row-count heuristic</b> — wide-many-row sheets (cols ≥ 8, rows ≥ 30) → L2 or L3; narrow tall (cols ≤ 4) → L1.</li>
+  <li><b>Period-detection</b> — if header row contains ≥ 3 date-pattern cells → L3 (time-series).</li>
+  <li><b>SHEET_DOMAINS lookup</b> — existing <code>canonical_schema.SHEET_DOMAINS</code> (kept from Phase 1) gives high-confidence overrides.</li>
+  <li><b>Fallback</b> — anything unclassified is added to L1 (safest layer; small marginal token cost).</li>
+</ol>
+
+<div class="callout info">
+  <b>No Gemini call for routing.</b> Classification is deterministic, fast, and fully auditable. If the router misclassifies a sheet, the layer prompt will still ignore it (because the prompt asks only for fields that belong in that layer), so the worst case is one wasted parse pass — never wrong data.
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2 id="flavorB">6. Flavor B — Row Chunking (Detect-and-React)</h2>
+
+<div class="callout danger">
+  <b>The honest truth about predicting Gemini's output size.</b> A pre-call
+  token estimator can never be 100% accurate. The output depends on what
+  Gemini actually decides to emit — how verbose its provenance text is,
+  which optional fields it includes, how the prompt's instructions are
+  interpreted. We can't know the output size until we have the response.
+  Anyone claiming "100% accurate prediction" is lying. Instead, Flavor B
+  guarantees <b>100% safe extraction</b> via a detect-and-react architecture
+  where prediction is just the first guess and three independent safety
+  nets catch every overflow.
+</div>
+
+<h3>Flavor B — in 5 simple steps</h3>
+
+<ol>
+  <li>
+    <b>Estimate first, just as a head start.</b> The token estimator looks at
+    the size of the source sheets routed to a layer and predicts how big the
+    Gemini output will be. If the prediction is above 35,000 tokens, Flavor B
+    pre-splits the layer into smaller chunks <i>before</i> making any call —
+    this saves wall time when we already know one big call would fail.
+  </li>
+  <li>
+    <b>Make the Gemini call.</b> Each chunk is sent to Gemini as a normal
+    parallel call inside the shared ThreadPoolExecutor. We do not try to
+    second-guess Gemini's behaviour at this point — we just let it run.
+  </li>
+  <li>
+    <b>Detect truncation with three independent signals.</b> After the call
+    returns, we check whether the response was cut off:
+    <ul>
+      <li><b>Signal 1 — Gemini's own flag.</b> The Vertex AI SDK sets
+        <code>response.candidates[0].finish_reason = MAX_TOKENS</code> when
+        Gemini hit its output ceiling. This is the gold-standard signal:
+        if Gemini says "I was truncated", we believe it 100%.</li>
+      <li><b>Signal 2 — JSON parse failure mid-array.</b> If the response
+        ends abruptly (no closing brace) or has malformed JSON, that's
+        circumstantial evidence of truncation.</li>
+      <li><b>Signal 3 — Token usage ratio.</b> If <code>output_tokens</code>
+        is at ≥ 95% of the model's maximum, the response is suspiciously
+        close to the limit — likely truncated even if it happens to parse.</li>
+    </ul>
+  </li>
+  <li>
+    <b>If truncated, split the chunk in two and rerun automatically.</b>
+    When any signal fires, the orchestrator does not give up. It splits the
+    chunk's row set into two non-overlapping halves and runs each as a new
+    Gemini call. Splitting is mathematically clean: a chunk filtering
+    <code>row % N == K</code> becomes two children
+    <code>row % 2N == K</code> and <code>row % 2N == (K+N)</code>, so every
+    original row is covered by exactly one child — no duplicates, no gaps.
+    Each child can split again if it too truncates.
+  </li>
+  <li>
+    <b>Bottom out when a chunk is small enough that it MUST fit.</b> Recursion
+    is capped at <code>PHASE3_MAX_SPLIT_DEPTH</code> levels (default 4). A
+    chunk that splits four times becomes 1/16th of the original row set —
+    well below any plausible Gemini output ceiling. If a chunk somehow still
+    truncates at this depth, only that tiny fragment is marked failed; the
+    rest of the layer's data is preserved.
+  </li>
+</ol>
+
+<div class="callout success">
+  <b>The key insight.</b> The pre-call estimator can be off by 10× and the
+  import will still produce 100% correct data, because the post-call
+  detection-and-split layer catches every truncation. The estimator only
+  affects <i>speed</i> (fewer wasted calls), not <i>correctness</i>.
+</div>
+
+<h3>Visual flow of the detect-and-react loop</h3>
+
+<div class="diagram">
+  <svg viewBox="0 0 1100 500" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="arrFB" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+      </marker>
+      <marker id="arrFBRed" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/>
+      </marker>
+      <marker id="arrFBGreen" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M0,0 L10,5 L0,10 z" fill="#16a34a"/>
+      </marker>
+    </defs>
+
+    <!-- Step 1: estimator -->
+    <rect x="40" y="30" width="220" height="60" rx="10" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+    <text x="150" y="55" text-anchor="middle" fill="#0f172a" font-size="13" font-weight="700">1. Token estimator</text>
+    <text x="150" y="75" text-anchor="middle" fill="#334155" font-size="11">predicts output tokens</text>
+
+    <!-- Diamond decision: chunk pre-emptively? -->
+    <polygon points="380,60 470,30 560,60 470,90" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+    <text x="470" y="58" text-anchor="middle" fill="#0f172a" font-size="12" font-weight="700">est &gt; 35K ?</text>
+    <text x="470" y="72" text-anchor="middle" fill="#92400e" font-size="10">pre-chunk?</text>
+
+    <line x1="260" y1="60" x2="378" y2="60" stroke="#475569" stroke-width="2" marker-end="url(#arrFB)"/>
+
+    <!-- No → single call -->
+    <text x="585" y="55" fill="#16a34a" font-size="11" font-weight="700">no</text>
+    <line x1="560" y1="60" x2="660" y2="60" stroke="#16a34a" stroke-width="2" marker-end="url(#arrFBGreen)"/>
+
+    <!-- Yes → multiple chunks -->
+    <text x="475" y="115" fill="#dc2626" font-size="11" font-weight="700">yes</text>
+    <line x1="470" y1="90" x2="470" y2="135" stroke="#dc2626" stroke-width="2" marker-end="url(#arrFBRed)"/>
+
+    <rect x="380" y="135" width="180" height="50" rx="8" fill="#fed7aa" stroke="#f97316" stroke-width="2"/>
+    <text x="470" y="158" text-anchor="middle" fill="#0f172a" font-size="12" font-weight="700">Pre-split into N chunks</text>
+    <text x="470" y="174" text-anchor="middle" fill="#7c2d12" font-size="10">(saves wall time)</text>
+
+    <!-- Step 2: make the call -->
+    <rect x="660" y="30" width="200" height="60" rx="10" fill="#e0e7ff" stroke="#4f46e5" stroke-width="2"/>
+    <text x="760" y="55" text-anchor="middle" fill="#0f172a" font-size="13" font-weight="700">2. Gemini call</text>
+    <text x="760" y="75" text-anchor="middle" fill="#312e81" font-size="11">one per chunk, in parallel</text>
+
+    <line x1="560" y1="160" x2="640" y2="160" stroke="#475569" stroke-width="2"/>
+    <line x1="640" y1="160" x2="640" y2="90" stroke="#475569" stroke-width="2" marker-end="url(#arrFB)"/>
+
+    <!-- Step 3: 3-signal truncation detection -->
+    <rect x="660" y="130" width="380" height="120" rx="10" fill="#fee2e2" stroke="#dc2626" stroke-width="2"/>
+    <text x="850" y="155" text-anchor="middle" fill="#7f1d1d" font-size="13" font-weight="700">3. Truncation detection — 3 signals</text>
+    <text x="675" y="180" fill="#0f172a" font-size="11">●</text>
+    <text x="690" y="180" fill="#0f172a" font-size="11"><tspan font-weight="700">Signal 1:</tspan> finish_reason = MAX_TOKENS (Gemini said so)</text>
+    <text x="675" y="200" fill="#0f172a" font-size="11">●</text>
+    <text x="690" y="200" fill="#0f172a" font-size="11"><tspan font-weight="700">Signal 2:</tspan> JSON parse fails mid-array</text>
+    <text x="675" y="220" fill="#0f172a" font-size="11">●</text>
+    <text x="690" y="220" fill="#0f172a" font-size="11"><tspan font-weight="700">Signal 3:</tspan> output_tokens ≥ 95% of model max</text>
+    <text x="850" y="240" text-anchor="middle" fill="#991b1b" font-size="10" font-style="italic">ANY signal → assume truncated</text>
+
+    <line x1="760" y1="90" x2="760" y2="128" stroke="#475569" stroke-width="2" marker-end="url(#arrFB)"/>
+
+    <!-- Decision diamond: truncated? -->
+    <polygon points="850,290 920,260 990,290 920,320" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+    <text x="920" y="290" text-anchor="middle" fill="#0f172a" font-size="12" font-weight="700">truncated?</text>
+
+    <line x1="850" y1="250" x2="850" y2="305" stroke="#475569" stroke-width="2"/>
+    <line x1="850" y1="305" x2="850" y2="305" stroke="#475569" stroke-width="2"/>
+    <line x1="850" y1="305" x2="850" y2="290" stroke="#475569" stroke-width="2" marker-end="url(#arrFB)"/>
+
+    <!-- No → success -->
+    <text x="1010" y="285" fill="#16a34a" font-size="11" font-weight="700">no</text>
+    <rect x="1000" y="295" width="80" height="50" rx="8" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+    <text x="1040" y="320" text-anchor="middle" fill="#166534" font-size="12" font-weight="700">DONE</text>
+    <text x="1040" y="334" text-anchor="middle" fill="#166534" font-size="10">parse + return</text>
+    <line x1="990" y1="290" x2="1000" y2="320" stroke="#16a34a" stroke-width="2" marker-end="url(#arrFBGreen)"/>
+
+    <!-- Yes → check depth -->
+    <text x="855" y="340" fill="#dc2626" font-size="11" font-weight="700">yes</text>
+    <line x1="920" y1="320" x2="920" y2="360" stroke="#dc2626" stroke-width="2" marker-end="url(#arrFBRed)"/>
+
+    <!-- Decision: depth < 4? -->
+    <polygon points="830,400 920,360 1010,400 920,440" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+    <text x="920" y="398" text-anchor="middle" fill="#0f172a" font-size="12" font-weight="700">depth &lt; 4 ?</text>
+    <text x="920" y="412" text-anchor="middle" fill="#92400e" font-size="10">can we split more?</text>
+
+    <!-- Yes → split -->
+    <text x="810" y="395" fill="#16a34a" font-size="11" font-weight="700">yes</text>
+    <line x1="830" y1="400" x2="700" y2="400" stroke="#16a34a" stroke-width="2" marker-end="url(#arrFBGreen)"/>
+
+    <rect x="320" y="370" width="380" height="80" rx="10" fill="#fde2e4" stroke="#dc2626" stroke-width="2"/>
+    <text x="510" y="395" text-anchor="middle" fill="#7f1d1d" font-size="13" font-weight="700">4. Auto-split chunk → 2 new sub-chunks</text>
+    <text x="510" y="415" text-anchor="middle" fill="#0f172a" font-size="11">row % N == K  ⟶  row % 2N == K   AND   row % 2N == (K+N)</text>
+    <text x="510" y="432" text-anchor="middle" fill="#7f1d1d" font-size="10" font-style="italic">non-overlapping, every row covered exactly once</text>
+
+    <!-- Loop back: each sub-chunk re-enters step 2 -->
+    <line x1="320" y1="410" x2="220" y2="410" stroke="#475569" stroke-width="2"/>
+    <line x1="220" y1="410" x2="220" y2="220" stroke="#475569" stroke-width="2"/>
+    <line x1="220" y1="220" x2="660" y2="60" stroke="#475569" stroke-width="2" marker-end="url(#arrFB)" stroke-dasharray="5 3"/>
+    <text x="200" y="320" text-anchor="middle" fill="#475569" font-size="10" font-style="italic">recurse: each</text>
+    <text x="200" y="334" text-anchor="middle" fill="#475569" font-size="10" font-style="italic">sub-chunk</text>
+    <text x="200" y="348" text-anchor="middle" fill="#475569" font-size="10" font-style="italic">re-enters step 2</text>
+
+    <!-- No (depth maxed out) → minimal-fragment failure -->
+    <text x="1020" y="395" fill="#dc2626" font-size="11" font-weight="700">no</text>
+    <line x1="1010" y1="400" x2="1060" y2="400" stroke="#dc2626" stroke-width="2" marker-end="url(#arrFBRed)"/>
+    <rect x="1060" y="375" width="30" height="50" rx="6" fill="#fde2e4" stroke="#dc2626"/>
+    <text x="1075" y="395" text-anchor="middle" fill="#7f1d1d" font-size="9" font-weight="700">5.</text>
+    <text x="1075" y="408" text-anchor="middle" fill="#7f1d1d" font-size="8">fail</text>
+    <text x="1075" y="420" text-anchor="middle" fill="#7f1d1d" font-size="8">tiny</text>
+
+    <!-- Caption -->
+    <text x="550" y="478" text-anchor="middle" fill="#475569" font-size="11" font-style="italic">Estimator is just the first guess. The loop guarantees correctness regardless of how wrong the estimate was.</text>
+  </svg>
+  <div class="diagram-caption">Figure 4. Flavor B detect-and-react flow. Pre-call prediction is best-effort; the post-call truncation detection + auto-split is the safety net that makes the system 100% safe.</div>
+</div>
+
+<h4>Worked example — Mock_14_Multiples_IV.xlsx (the import that triggered this rewrite)</h4>
+<p>
+  This is from a real failure on 2026-06-23 that drove the redesign. The
+  workbook has 125 portfolio companies. Before the redesign, Layer 2 ran as
+  one giant call, hit Gemini's 65K output ceiling, truncated mid-array, the
+  entire L2 payload was lost, and the dashboard showed zero companies. With
+  the new flow:
+</p>
+<table>
+  <thead><tr><th>Stage</th><th>What happens</th><th>Calls</th></tr></thead>
+  <tbody>
+    <tr><td>Estimator</td><td>Predicts L2 output ≈ 40K tokens → pre-splits into 2 chunks (row % 2 == 0 and row % 2 == 1)</td><td>2 parallel L2 calls</td></tr>
+    <tr><td>First chunk runs</td><td>Gemini emits clean JSON in ~25K tokens. <code>finish_reason = STOP</code> → no truncation → done.</td><td>—</td></tr>
+    <tr><td>Second chunk runs in parallel</td><td>Gemini emits ~32K tokens but is unexpectedly verbose; <code>finish_reason = MAX_TOKENS</code>.</td><td>—</td></tr>
+    <tr><td>Detection</td><td>Signal 1 fires (finish_reason). Orchestrator auto-splits into <code>row % 4 == 1</code> and <code>row % 4 == 3</code> at depth = 2.</td><td>+2 sub-calls (sequential)</td></tr>
+    <tr><td>Both sub-calls succeed</td><td>~16K tokens each, both <code>finish_reason = STOP</code>. Merger combines into the original L2.split_b slot.</td><td>—</td></tr>
+    <tr><td><b>Result</b></td><td>All 125 companies + all valuations + all exits in the unified JSON. Dashboard fully populated.</td><td>4 total L2 calls (was 1 catastrophic)</td></tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+  <b>Why no overlap when splitting?</b> The modulo split <code>row%N==K</code>
+  → <code>row%2N==K</code> ∪ <code>row%2N==(K+N)</code> is provably disjoint
+  and complete. Mathematically, every original row maps to exactly one child
+  chunk — guaranteed by the structure of modular arithmetic, not by any
+  manual list of row indices. The merger therefore concatenates child results
+  losslessly.
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2 id="parallel">7. Parallel Execution Model</h2>
+
+<p>
+  All Gemini calls (Flavor A layers + Flavor B chunks) submit to one shared <code>ThreadPoolExecutor</code>.
+  Default pool size = 8 workers (matches our Vertex quota burst budget). Calls return JSON futures that the
+  orchestrator gathers with <code>concurrent.futures.as_completed</code>.
+</p>
+
+<div class="diagram">
+  <svg viewBox="0 0 1100 320" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="arr2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+      </marker>
+    </defs>
+    <rect x="20" y="20" width="220" height="60" rx="8" fill="#1e293b"/>
+    <text x="130" y="48" text-anchor="middle" fill="#f1f5f9" font-size="13" font-weight="700">orchestrator.py</text>
+    <text x="130" y="68" text-anchor="middle" fill="#94a3b8" font-size="11">submit all futures</text>
+
+    <line x1="240" y1="50" x2="290" y2="50" stroke="#475569" stroke-width="2" marker-end="url(#arr2)"/>
+
+    <rect x="290" y="20" width="220" height="60" rx="8" fill="#1e3a8a"/>
+    <text x="400" y="48" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">ThreadPoolExecutor</text>
+    <text x="400" y="68" text-anchor="middle" fill="#bfdbfe" font-size="11">max_workers = 8</text>
+
+    <!-- Worker columns -->
+    <line x1="400" y1="80" x2="400" y2="110" stroke="#475569" stroke-width="2"/>
+    <line x1="120" y1="110" x2="900" y2="110" stroke="#475569" stroke-width="2"/>
+
+    <g>
+      <line x1="160" y1="110" x2="160" y2="130" stroke="#475569" stroke-width="2"/>
+      <rect x="100" y="130" width="120" height="40" rx="6" fill="#2563eb"/>
+      <text x="160" y="155" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">L1 call</text>
+    </g>
+    <g>
+      <line x1="320" y1="110" x2="320" y2="130" stroke="#475569" stroke-width="2"/>
+      <rect x="260" y="130" width="120" height="40" rx="6" fill="#16a34a"/>
+      <text x="320" y="155" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">L2 chunk 1/2</text>
+    </g>
+    <g>
+      <line x1="480" y1="110" x2="480" y2="130" stroke="#475569" stroke-width="2"/>
+      <rect x="420" y="130" width="120" height="40" rx="6" fill="#16a34a"/>
+      <text x="480" y="155" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">L2 chunk 2/2</text>
+    </g>
+    <g>
+      <line x1="640" y1="110" x2="640" y2="130" stroke="#475569" stroke-width="2"/>
+      <rect x="580" y="130" width="120" height="40" rx="6" fill="#f59e0b"/>
+      <text x="640" y="155" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">L3 chunk 1/4</text>
+    </g>
+    <g>
+      <line x1="800" y1="110" x2="800" y2="130" stroke="#475569" stroke-width="2"/>
+      <rect x="740" y="130" width="120" height="40" rx="6" fill="#f59e0b"/>
+      <text x="800" y="155" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">L3 chunk 2/4</text>
+    </g>
+
+    <!-- as_completed -->
+    <line x1="160" y1="170" x2="160" y2="210" stroke="#475569" stroke-width="2" marker-end="url(#arr2)"/>
+    <line x1="320" y1="170" x2="320" y2="210" stroke="#475569" stroke-width="2" marker-end="url(#arr2)"/>
+    <line x1="480" y1="170" x2="480" y2="210" stroke="#475569" stroke-width="2" marker-end="url(#arr2)"/>
+    <line x1="640" y1="170" x2="640" y2="210" stroke="#475569" stroke-width="2" marker-end="url(#arr2)"/>
+    <line x1="800" y1="170" x2="800" y2="210" stroke="#475569" stroke-width="2" marker-end="url(#arr2)"/>
+
+    <rect x="60" y="210" width="900" height="60" rx="8" fill="#0f172a"/>
+    <text x="510" y="237" text-anchor="middle" fill="#f1f5f9" font-size="13" font-weight="700">as_completed → merger → reconciler → cross_layer_validator</text>
+    <text x="510" y="258" text-anchor="middle" fill="#94a3b8" font-size="11">Wall time = MAX(individual durations) ≈ 15–25 s typical, ≤ 40 s worst case</text>
+  </svg>
+  <div class="diagram-caption">Figure 2. Parallel execution — all layers and chunks share one ThreadPoolExecutor.</div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2 id="reconcile">8. Reconciliation &amp; Priority Matrix</h2>
+
+<p>
+  The reconciler (<code>reconciler.py</code>) consumes the merged JSON and, for every field that exists in
+  <code>priority_matrix.md</code>, picks ONE authoritative value using the matrix rules. The picked value goes
+  into the unified output; alternative values are recorded in <code>FundMetric.provenance.alternatives[]</code>.
+</p>
+
+<h4>Reconciler algorithm (per field)</h4>
+<ol>
+  <li>Load <code>priority_matrix</code> entry for the field.</li>
+  <li>For each priority source (P1, P2, P3...), check if a value exists in the merged JSON.</li>
+  <li>Pick the highest-priority source that has a value. Record <code>priority_rule_applied</code> = the principle(s) that determined this choice.</li>
+  <li>For all lower-priority sources that also have a value: compare against the picked value.
+    <ul>
+      <li>Within tolerance → record as <code>alternatives[]</code> (informational, no flag).</li>
+      <li>Outside tolerance → record as <code>disagreements[]</code> and set <code>quality_flag = 'reconciled'</code> (⚠️ in side panel).</li>
+    </ul>
+  </li>
+  <li>Write the final value + provenance into <code>FundMetric</code>.</li>
+</ol>
+
+<div class="callout success">
+  <b>Single value, transparent provenance.</b> Downstream calculations and dashboard rendering always see ONE
+  authoritative value per field. Disagreements are visible (⚠️ icon + side-panel detail) but never block downstream math.
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2 id="validator">9. Cross-Layer Validator</h2>
+
+<p>
+  Runs after reconciliation. Checks the mathematical identities listed in <code>priority_matrix.md §Q</code>:
+</p>
+<ul>
+  <li><code>total_committed_capital ≡ Σ Commitment.commitment_amount</code> (±1%)</li>
+  <li><code>active_fair_value ≡ Σ latest Valuation.fair_value_of_holding (active)</code> (±1%)</li>
+  <li><code>tvpi ≡ (distributions + nav) ÷ called</code> (±0.05x)</li>
+  <li><code>rvpi + dpi ≡ tvpi</code> (±0.05x)</li>
+  <li><code>nav_per_unit × total_units ≡ total_nav</code> (±0.5%)</li>
+  <li>… and ~10 more identity checks</li>
+</ul>
+
+<p>
+  Violations are logged at WARN, written to <code>FundMetric.provenance.identity_violations[]</code>, and surface as
+  ⚠️ on the dashboard side panel. They do NOT block persistence — the import succeeds; the dashboard shows the
+  values with a quality flag.
+</p>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2 id="dfds">10. Data Flow Diagrams</h2>
+
+<h3>DFD-1 — Upload &amp; Routing</h3>
+<div class="diagram">
+  <svg viewBox="0 0 1000 240" xmlns="http://www.w3.org/2000/svg">
+    <defs><marker id="dfdArr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker></defs>
+    <ellipse cx="80" cy="120" rx="60" ry="40" fill="#fee2e2" stroke="#dc2626" stroke-width="2"/>
+    <text x="80" y="115" text-anchor="middle" fill="#991b1b" font-size="12" font-weight="700">GP User</text>
+    <text x="80" y="132" text-anchor="middle" fill="#991b1b" font-size="11">(browser)</text>
+
+    <line x1="140" y1="120" x2="220" y2="120" stroke="#475569" stroke-width="2" marker-end="url(#dfdArr)"/>
+    <text x="180" y="110" text-anchor="middle" fill="#475569" font-size="11">Excel file</text>
+
+    <rect x="220" y="80" width="160" height="80" rx="8" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+    <text x="300" y="115" text-anchor="middle" fill="#0f172a" font-size="12" font-weight="700">views.py</text>
+    <text x="300" y="135" text-anchor="middle" fill="#334155" font-size="11">ImportJob create</text>
+
+    <line x1="380" y1="120" x2="460" y2="120" stroke="#475569" stroke-width="2" marker-end="url(#dfdArr)"/>
+    <text x="420" y="110" text-anchor="middle" fill="#475569" font-size="11">file path</text>
+
+    <rect x="460" y="80" width="180" height="80" rx="8" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+    <text x="550" y="110" text-anchor="middle" fill="#0f172a" font-size="12" font-weight="700">workbook_router</text>
+    <text x="550" y="128" text-anchor="middle" fill="#334155" font-size="11">classify sheets</text>
+    <text x="550" y="144" text-anchor="middle" fill="#334155" font-size="11">L1 / L2 / L3</text>
+
+    <line x1="640" y1="120" x2="720" y2="120" stroke="#475569" stroke-width="2" marker-end="url(#dfdArr)"/>
+    <text x="680" y="110" text-anchor="middle" fill="#475569" font-size="11">layer plan</text>
+
+    <rect x="720" y="80" width="180" height="80" rx="8" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+    <text x="810" y="110" text-anchor="middle" fill="#0f172a" font-size="12" font-weight="700">token_estimator</text>
+    <text x="810" y="128" text-anchor="middle" fill="#334155" font-size="11">decide Flavor B</text>
+    <text x="810" y="144" text-anchor="middle" fill="#334155" font-size="11">activation per layer</text>
+
+    <!-- Data store -->
+    <line x1="300" y1="160" x2="300" y2="200" stroke="#475569" stroke-width="2" stroke-dasharray="3 3" marker-end="url(#dfdArr)"/>
+    <rect x="200" y="200" width="200" height="30" fill="#e0e7ff" stroke="#4f46e5" stroke-width="1.5"/>
+    <text x="300" y="222" text-anchor="middle" fill="#3730a3" font-size="11" font-weight="700">ImportFile (DB)</text>
+  </svg>
+</div>
+
+<h3>DFD-2 — Parallel Extraction with Detect-and-React Loop</h3>
+<div class="diagram">
+  <svg viewBox="0 0 1100 380" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="dfdArr2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+      <marker id="dfdArr2Red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/></marker>
+    </defs>
+
+    <rect x="20" y="40" width="180" height="60" rx="8" fill="#1e293b"/>
+    <text x="110" y="68" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">parallel_executor</text>
+    <text x="110" y="88" text-anchor="middle" fill="#94a3b8" font-size="11">ThreadPoolExecutor</text>
+
+    <!-- Branch into 3 layers -->
+    <line x1="200" y1="70" x2="260" y2="70" stroke="#475569" stroke-width="2"/>
+    <line x1="260" y1="70" x2="260" y2="220" stroke="#475569" stroke-width="2"/>
+
+    <line x1="260" y1="100" x2="320" y2="100" stroke="#475569" stroke-width="2" marker-end="url(#dfdArr2)"/>
+    <rect x="320" y="70" width="200" height="60" rx="8" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+    <text x="420" y="100" text-anchor="middle" fill="#0f172a" font-size="12" font-weight="700">Layer 1 prompt</text>
+    <text x="420" y="118" text-anchor="middle" fill="#475569" font-size="11">layer1_identity.py</text>
+
+    <line x1="260" y1="160" x2="320" y2="160" stroke="#475569" stroke-width="2" marker-end="url(#dfdArr2)"/>
+    <rect x="320" y="130" width="200" height="60" rx="8" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+    <text x="420" y="160" text-anchor="middle" fill="#0f172a" font-size="12" font-weight="700">Layer 2 prompt</text>
+    <text x="420" y="178" text-anchor="middle" fill="#475569" font-size="11">layer2_universe.py</text>
+
+    <line x1="260" y1="220" x2="320" y2="220" stroke="#475569" stroke-width="2" marker-end="url(#dfdArr2)"/>
+    <rect x="320" y="190" width="200" height="60" rx="8" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+    <text x="420" y="220" text-anchor="middle" fill="#0f172a" font-size="12" font-weight="700">Layer 3 prompt</text>
+    <text x="420" y="238" text-anchor="middle" fill="#475569" font-size="11">layer3_timeseries.py</text>
+
+    <!-- Vertex AI -->
+    <line x1="520" y1="100" x2="600" y2="100" stroke="#475569" stroke-width="2" marker-end="url(#dfdArr2)"/>
+    <line x1="520" y1="160" x2="600" y2="160" stroke="#475569" stroke-width="2" marker-end="url(#dfdArr2)"/>
+    <line x1="520" y1="220" x2="600" y2="220" stroke="#475569" stroke-width="2" marker-end="url(#dfdArr2)"/>
+
+    <ellipse cx="700" cy="160" rx="100" ry="80" fill="#fef2f2" stroke="#dc2626" stroke-width="2"/>
+    <text x="700" y="150" text-anchor="middle" fill="#991b1b" font-size="13" font-weight="700">Vertex AI</text>
+    <text x="700" y="170" text-anchor="middle" fill="#7f1d1d" font-size="11">Gemini 2.5 Pro</text>
+    <text x="700" y="186" text-anchor="middle" fill="#7f1d1d" font-size="10">(external)</text>
+
+    <!-- Truncation detector -->
+    <line x1="800" y1="160" x2="850" y2="160" stroke="#475569" stroke-width="2" marker-end="url(#dfdArr2)"/>
+    <rect x="850" y="130" width="200" height="60" rx="8" fill="#fee2e2" stroke="#dc2626" stroke-width="2"/>
+    <text x="950" y="155" text-anchor="middle" fill="#7f1d1d" font-size="12" font-weight="700">truncation detector</text>
+    <text x="950" y="173" text-anchor="middle" fill="#7f1d1d" font-size="10">finish_reason · JSON · token%</text>
+
+    <!-- Decision: truncated? -->
+    <polygon points="900,260 950,235 1000,260 950,285" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+    <text x="950" y="260" text-anchor="middle" fill="#0f172a" font-size="11" font-weight="700">truncated?</text>
+
+    <line x1="950" y1="190" x2="950" y2="233" stroke="#475569" stroke-width="2" marker-end="url(#dfdArr2)"/>
+
+    <!-- No → as_completed -->
+    <text x="1015" y="255" fill="#16a34a" font-size="10" font-weight="700">no</text>
+    <line x1="1000" y1="260" x2="1040" y2="260" stroke="#475569" stroke-width="2" marker-end="url(#dfdArr2)"/>
+    <rect x="1015" y="270" width="80" height="50" rx="8" fill="#1e293b"/>
+    <text x="1055" y="295" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">as_completed</text>
+    <text x="1055" y="310" text-anchor="middle" fill="#94a3b8" font-size="10">gather</text>
+
+    <!-- Yes → auto-split → re-enter executor -->
+    <text x="880" y="285" fill="#dc2626" font-size="10" font-weight="700">yes</text>
+    <line x1="900" y1="260" x2="800" y2="310" stroke="#dc2626" stroke-width="2" marker-end="url(#dfdArr2Red)"/>
+
+    <rect x="540" y="290" width="260" height="50" rx="8" fill="#fde2e4" stroke="#dc2626" stroke-width="2"/>
+    <text x="670" y="313" text-anchor="middle" fill="#7f1d1d" font-size="12" font-weight="700">_split_chunk → 2 sub-chunks</text>
+    <text x="670" y="329" text-anchor="middle" fill="#7f1d1d" font-size="10">row%N → row%2N (depth ≤ 4)</text>
+
+    <!-- Feedback edge: split → back to executor -->
+    <line x1="540" y1="315" x2="110" y2="315" stroke="#dc2626" stroke-width="2" stroke-dasharray="6 4"/>
+    <line x1="110" y1="315" x2="110" y2="100" stroke="#dc2626" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#dfdArr2Red)"/>
+    <text x="350" y="335" fill="#dc2626" font-size="10" font-style="italic">recurse: each sub-chunk re-enters the pool as a fresh job</text>
+  </svg>
+  <div class="diagram-caption">Figure DFD-2 (updated). The detection node sits between Vertex AI and as_completed; when truncation is detected, the chunk auto-splits and the sub-chunks loop back into the executor.</div>
+</div>
+
+<h3>DFD-3 — Merge → Reconcile → Persist</h3>
+<div class="diagram">
+  <svg viewBox="0 0 1000 240" xmlns="http://www.w3.org/2000/svg">
+    <defs><marker id="dfdArr3" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker></defs>
+    <rect x="20" y="80" width="160" height="60" rx="8" fill="#1e293b"/>
+    <text x="100" y="108" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">merger.py</text>
+    <text x="100" y="128" text-anchor="middle" fill="#94a3b8" font-size="11">dict merge</text>
+
+    <line x1="180" y1="110" x2="240" y2="110" stroke="#475569" stroke-width="2" marker-end="url(#dfdArr3)"/>
+    <rect x="240" y="80" width="160" height="60" rx="8" fill="#0c4a6e"/>
+    <text x="320" y="108" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">reconciler.py</text>
+    <text x="320" y="128" text-anchor="middle" fill="#bae6fd" font-size="11">apply priority_matrix</text>
+
+    <line x1="400" y1="110" x2="460" y2="110" stroke="#475569" stroke-width="2" marker-end="url(#dfdArr3)"/>
+    <rect x="460" y="80" width="180" height="60" rx="8" fill="#7c2d12"/>
+    <text x="550" y="108" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">cross_layer_validator</text>
+    <text x="550" y="128" text-anchor="middle" fill="#fed7aa" font-size="11">identity checks → ⚠️</text>
+
+    <line x1="640" y1="110" x2="700" y2="110" stroke="#475569" stroke-width="2" marker-end="url(#dfdArr3)"/>
+    <rect x="700" y="80" width="180" height="60" rx="8" fill="#166534"/>
+    <text x="790" y="108" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">phase2_persister</text>
+    <text x="790" y="128" text-anchor="middle" fill="#bbf7d0" font-size="11">update_or_create</text>
+
+    <!-- DB stores -->
+    <line x1="790" y1="140" x2="790" y2="180" stroke="#475569" stroke-width="2" stroke-dasharray="3 3"/>
+    <line x1="500" y1="180" x2="900" y2="180" stroke="#475569" stroke-width="2" stroke-dasharray="3 3"/>
+    <line x1="550" y1="180" x2="550" y2="200" stroke="#475569" stroke-width="2" stroke-dasharray="3 3" marker-end="url(#dfdArr3)"/>
+    <line x1="700" y1="180" x2="700" y2="200" stroke="#475569" stroke-width="2" stroke-dasharray="3 3" marker-end="url(#dfdArr3)"/>
+    <line x1="850" y1="180" x2="850" y2="200" stroke="#475569" stroke-width="2" stroke-dasharray="3 3" marker-end="url(#dfdArr3)"/>
+
+    <rect x="490" y="200" width="120" height="30" fill="#e0e7ff" stroke="#4f46e5"/>
+    <text x="550" y="222" text-anchor="middle" fill="#3730a3" font-size="11" font-weight="700">Investment/Valuation</text>
+    <rect x="640" y="200" width="120" height="30" fill="#e0e7ff" stroke="#4f46e5"/>
+    <text x="700" y="222" text-anchor="middle" fill="#3730a3" font-size="11" font-weight="700">NAVRecord/CarriedInterest</text>
+    <rect x="790" y="200" width="120" height="30" fill="#fde2e4" stroke="#dc2626"/>
+    <text x="850" y="222" text-anchor="middle" fill="#991b1b" font-size="11" font-weight="700">FundMetric ⭐</text>
+  </svg>
+  <div class="diagram-caption">Figure 3. FundMetric is the dashboard SSoT — written last, read by every tile.</div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2 id="frontend">11. Frontend Render &amp; Provenance</h2>
+
+<p>
+  The dashboard never re-derives metrics. Every visible value reads from <code>FundMetric</code> via the
+  <code>fmValue('metric_key')</code> helper. When a user clicks a tile, <code>openProvenancePanel(metricKey)</code> opens
+  a side panel showing the value, the priority rule applied, the formula/extraction provenance, and any
+  reconciliation disagreements.
+</p>
+
+<h4>Render chain</h4>
+<ol>
+  <li>Page load → <code>loadOverview()</code> calls <code>/api/dataimport/derived-metrics/?scheme=&lt;id&gt;</code></li>
+  <li>API returns <code>FundMetric</code> rows for the scheme, indexed by <code>metric_key</code> into <code>_derivedMetrics</code></li>
+  <li><code>fmValue('moic')</code> returns <code>_derivedMetrics['moic'].value</code> (or null if absent)</li>
+  <li>Tile render: <code>el.textContent = fmCr('active_fair_value')</code></li>
+  <li><code>wireProvenance('kv-moic', 'moic', displayed)</code> binds click handler</li>
+  <li>On click → <code>openProvenancePanel('moic')</code> renders panel from <code>_METRIC_COPY['moic']</code> + <code>FundMetric.inputs_used</code> + <code>FundMetric.provenance</code></li>
+</ol>
+
+<h4>Side-panel layout (post-Phase-3 enhancement)</h4>
+<div class="callout muted">
+  <b>The Number</b><br>1.85x<br><i>How many times the fund has grown its invested money.</i><br><br>
+  <b>Priority Rule Applied</b><br>P3 + P7 — computed from DB row sum (active_fair_value ÷ invested_cost).<br>Higher priorities not used: P1 (Layer 1 GP-stated MOIC was absent).<br><br>
+  <b>How we got it</b><br>active_fair_value ÷ invested_cost = ₹485.50 Cr ÷ ₹262.43 Cr = 1.85x<br><br>
+  <b>Reconciliation status</b><br>✓ Layer 1 absent (no override). Layer 2 cell value: 1.83x (within ±0.05x tolerance — agreement).
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2 id="retirement">12. Phase Retirement Plan</h2>
+
+<table>
+  <thead><tr><th>Step</th><th>Trigger</th><th>Action</th><th>Files</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>1. Delete Phase 1</td>
+      <td>Immediate (user-approved 2026-06-22)</td>
+      <td>Delete legacy multi-pass chain entirely. Remove gate &amp; fallback branch.</td>
+      <td><code>import_service.py</code> (entire file), <code>anchor_pipeline.py</code>, <code>derivation_service.py</code>, <code>run_pass4_for_latest.py</code>; trim Phase-1-only functions from <code>gemini_column_mapper.py</code>; remove fallback branch in <code>views.py</code>.</td>
+    </tr>
+    <tr>
+      <td>2. Build Phase 3</td>
+      <td>After <code>priority_matrix.md</code> approved</td>
+      <td>Create <code>phase3_layers/</code> package: orchestrator, workbook_router, token_estimator, parallel_executor, reconciler, merger, cross_layer_validator, priority_matrix, layer prompts, layer validators.</td>
+      <td>New package <code>backend/dataimport/phase3_layers/</code>; add <code>USE_PHASE3</code> env var to views.py.</td>
+    </tr>
+    <tr>
+      <td>3. Prove Flavor A</td>
+      <td>~2 weeks of dual-running</td>
+      <td>Run Phase 3 alongside single-call extractor on every import. Compare JSON output. Resolve discrepancies.</td>
+      <td>(no file changes — telemetry only)</td>
+    </tr>
+    <tr>
+      <td>4. Rename gate</td>
+      <td>Flavor A proven</td>
+      <td>Rename <code>USE_NEW_EXTRACTOR</code> → <code>USE_SINGLE_CALL_FALLBACK</code>, flip default to <code>false</code>. Phase 3 becomes default; single-call only runs when explicitly requested.</td>
+      <td><code>.env</code>, <code>.env.example</code>, <code>views.py</code>.</td>
+    </tr>
+    <tr>
+      <td>5. Retire single-call</td>
+      <td>~3 months after step 4 with zero fallback usage</td>
+      <td>Delete <code>single_call_extractor.py</code>. Phase 3 is the only path.</td>
+      <td><code>single_call_extractor.py</code> (delete), <code>views.py</code> (remove fallback branch).</td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2 id="filemap">13. File Map (post-Phase-3)</h2>
+
+<pre style="background:#0f172a;color:#cbd5e1;padding:18px;border-radius:8px;font-family:ui-monospace,Menlo,monospace;font-size:12px;line-height:1.5;overflow-x:auto;">
+backend/dataimport/
+├── views.py                          ← entry point: ImportJob endpoint, USE_PHASE3 gate
+├── models.py                         ← ImportJob, ImportFile, DerivedMetric, MetricCandidate, FundMetric ⭐
+├── serializers.py
+├── canonical_schema.py               ← SHEET_DOMAINS, DOMAIN_FIELDS (shared)
+├── gemini_column_mapper.py           ← _call_gemini() + shared helpers (Phase-1-only funcs deleted)
+├── phase2_persister.py               ← reused by Phase 3 (unchanged interface)
+├── phase2_validator.py               ← reused by Phase 3 (Rules 1–34, identity checks)
+├── single_call_extractor.py          ← kept as emergency fallback (will be deleted in step 5)
+└── phase3_layers/                    ← NEW package
+    ├── __init__.py
+    ├── orchestrator.py               ← main entry: run_phase3_import(import_file)
+    ├── workbook_router.py            ← classify sheets → L1/L2/L3 (no Gemini)
+    ├── token_estimator.py            ← decide if Flavor B activates per layer
+    ├── parallel_executor.py          ← ThreadPoolExecutor wrapper
+    ├── merger.py                     ← merge layer/chunk JSONs
+    ├── reconciler.py                 ← apply priority_matrix; pick authoritative value
+    ├── cross_layer_validator.py      ← identity checks (§Q of priority_matrix.md)
+    ├── priority_matrix.py            ← Python encoding of priority_matrix.md rules
+    ├── prompts/
+    │   ├── common_rules.py           ← Rules 1–34 (extracted from single_call_extractor)
+    │   ├── layer1_identity.py
+    │   ├── layer2_universe.py
+    │   └── layer3_timeseries.py
+    └── layer_validators/
+        ├── layer1_validator.py
+        ├── layer2_validator.py
+        └── layer3_validator.py
+
+docs/
+├── priority_matrix.md                ← single source of truth for reconciler rules
+├── architecture.html                 ← this document
+└── anchor_pipeline_architecture.html ← legacy reference
+</pre>
+
+<div class="callout success">
+  <b>Phase 3 is additive.</b> <code>phase2_persister.py</code> and <code>phase2_validator.py</code> have stable interfaces; Phase 3 produces the same merged JSON shape so existing persistence/validation logic is reused as-is. Migration risk is contained to <code>phase3_layers/</code>.
+</div>
+
+</main>
+</div>
+
+<footer class="doc-footer">
+  <p><b>TrackFundAI</b> · System Architecture &amp; Phase 3 Design · v1.0 · 2026-06-22</p>
+  <p>Pair this document with <code>docs/priority_matrix.md</code> for the field-level reconciliation rules.</p>
+</footer>
+
+</body>
+</html>

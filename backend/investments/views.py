@@ -14,6 +14,7 @@ import json
 from datetime import date
 
 from django.db.models import Count, Max, Subquery, OuterRef
+from django.db.models.functions import Coalesce
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status
@@ -68,10 +69,14 @@ def investment_list(request, scheme_id):
         return Response({'detail': 'Scheme not found.'}, status=404)
 
     if request.method == 'GET':
-        # Annotate with tranche count and latest valuation fair_value
+        # Annotate with tranche count and latest valuation.
+        # Prefer fair_value_of_holding (the fund's share) over fair_value
+        # (whole-company equity) — see Rule 22 in the Phase 2 extractor.
         latest_val = Valuation.objects.filter(
             investment=OuterRef('pk'), status='approved',
-        ).order_by('-valuation_date').values('fair_value')[:1]
+        ).order_by('-valuation_date').annotate(
+            holding_or_equity=Coalesce('fair_value_of_holding', 'fair_value')
+        ).values('holding_or_equity')[:1]
 
         investments = (
             scheme.investments
@@ -346,7 +351,9 @@ def founder_companies(request):
             latest_valuation=Subquery(
                 Valuation.objects.filter(
                     investment=OuterRef('pk'), status='approved',
-                ).order_by('-valuation_date').values('fair_value')[:1]
+                ).order_by('-valuation_date').annotate(
+                    holding_or_equity=Coalesce('fair_value_of_holding', 'fair_value')
+                ).values('holding_or_equity')[:1]
             ),
         ), many=True,
     ).data)
@@ -1204,7 +1211,7 @@ def portfolio_investments_list(request):
                                           else (float(inv.ownership_pct) if inv.ownership_pct else None),
             'investment_date':          str(t.date) if t.date else None,
             'irr_pct':                  float(inv.irr_pct) if inv.irr_pct else None,
-            'latest_valuation':         float(latest_val.fair_value) if latest_val else None,
+            'latest_valuation':         float(latest_val.fair_value_of_holding or latest_val.fair_value) if latest_val else None,
             'currency':                 inv.currency,
         })
 

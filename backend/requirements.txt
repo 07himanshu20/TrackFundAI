@@ -5,7 +5,11 @@ django-cors-headers==4.4.0
 psycopg2-binary==2.9.9
 openpyxl==3.1.5
 pandas==2.2.3
-google-generativeai==0.8.3
+# Vertex AI (Google Gen AI SDK) — TrackFundAI is 100% on Vertex AI.
+# AI Studio's `google-generativeai` is BANNED — see api/gemini_service.py
+# and memory/feedback_no_partial_migration.md. Do not re-add it.
+google-genai>=0.5.0
+google-cloud-aiplatform>=1.71.0
 python-dotenv==1.0.1
 Pillow==10.4.0
 

@@ -244,12 +244,12 @@ def ai_insights(request):
     """
     import json
     import re
-    import google.generativeai as genai
     from django.conf import settings
     from accounts.fund_access_helpers import get_accessible_fund_ids
     from investments.models import PortfolioCompany, Investment, Valuation
     from riskscore.models import CompanyRiskScore
     from collections import defaultdict
+    from api.gemini_service import generate_content
 
     org = getattr(request, 'organization', None)
     if not org:
@@ -333,14 +333,10 @@ def ai_insights(request):
         })
     sector_summary.sort(key=lambda x: x['avg_moic'] or 0, reverse=True)
 
-    # Full Gemini portfolio analysis
+    # Full Gemini (Vertex AI) portfolio analysis
     full_analysis = ''
     try:
-        api_key = getattr(settings, 'GEMINI_API_KEY', '')
-        if api_key and heatmap:
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel(getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash'))
-
+        if heatmap:
             portfolio_summary = json.dumps({
                 'total_companies': len(heatmap),
                 'sector_summary': sector_summary,
@@ -367,7 +363,7 @@ Structure your analysis with these sections:
 Be specific about numbers, sector trends, and actionable recommendations.
 Use Indian financial context (₹ Crore, SEBI, AIF categories, Indian market dynamics)."""
 
-            response = model.generate_content(prompt)
+            response = generate_content(prompt)
             full_analysis = response.text.strip()
     except Exception as e:
         logger.error('AI Insights Gemini error: %s', e)
@@ -425,11 +421,11 @@ def ai_predictions(request):
     """
     import json
     import re
-    import google.generativeai as genai
     from django.conf import settings
     from accounts.fund_access_helpers import get_accessible_fund_ids
     from investments.models import PortfolioCompany, Investment, Valuation
     from riskscore.models import CompanyRiskScore
+    from api.gemini_service import generate_content, get_model_name
 
     org = getattr(request, 'organization', None)
     if not org:
@@ -561,13 +557,7 @@ Rules:
 - Return valid JSON only"""
 
     try:
-        api_key = getattr(settings, 'GEMINI_API_KEY', '')
-        if not api_key:
-            raise ValueError('GEMINI_API_KEY not set')
-        genai.configure(api_key=api_key)
-        model_name = getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash')
-        model = genai.GenerativeModel(model_name=model_name)
-        response = model.generate_content(prompt)
+        response = generate_content(prompt)
         raw = response.text.strip()
 
         # Strip markdown code fences if Gemini wraps in ```json ... ```
@@ -697,8 +687,8 @@ def generate_mis_report(request):
     import json
     import re
     import datetime
-    import google.generativeai as genai
     from django.conf import settings
+    from api.gemini_service import generate_content
 
     org = getattr(request, 'organization', None)
     if not org and request.user and request.user.is_authenticated:
@@ -755,12 +745,7 @@ Return JSON:
 }}"""
 
     try:
-        api_key = getattr(settings, 'GEMINI_API_KEY', '')
-        if not api_key:
-            raise ValueError('GEMINI_API_KEY not set')
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash'))
-        response = model.generate_content(prompt)
+        response = generate_content(prompt)
         raw = response.text.strip()
         raw = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.MULTILINE)
         raw = re.sub(r'```\s*$', '', raw, flags=re.MULTILINE).strip()

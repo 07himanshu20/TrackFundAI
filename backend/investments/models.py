@@ -43,6 +43,10 @@ class PortfolioCompany(models.Model):
         default=list, blank=True,
         help_text='List of founder names',
     )
+    co_investors = models.JSONField(
+        default=list, blank=True,
+        help_text='List of other investor/firm names that participated in the same rounds',
+    )
     description = models.TextField(blank=True)
     is_active = models.BooleanField(default=True)
 
@@ -187,7 +191,11 @@ class Investment(models.Model):
 
     class Meta:
         ordering = ['company_name']
-        unique_together = ('scheme', 'company_name', 'instrument_type')
+        # Natural key includes `stage` so that two rounds of the same company+
+        # instrument (e.g. Series A CCPS + Series B CCPS) persist as DISTINCT
+        # Investment rows. Without `stage` the persister collapses multi-round
+        # investments into one row and loses per-round cost basis / FMV / IRR.
+        unique_together = ('scheme', 'company_name', 'instrument_type', 'stage')
 
     def __str__(self):
         return f'{self.company_name} ({self.get_instrument_type_display()}) — {self.scheme}'

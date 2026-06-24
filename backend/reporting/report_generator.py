@@ -253,14 +253,9 @@ def generate_lp_letter(scheme, period_label: str, period_start: date, period_end
 
 
 def _generate_lp_commentary(scheme, period_label, investments):
-    """Use Gemini to generate LP letter investment highlights."""
+    """Use Gemini (Vertex AI) to generate LP letter investment highlights."""
     try:
-        import google.generativeai as genai
-        if not settings.GEMINI_API_KEY:
-            return ''
-
-        genai.configure(api_key=settings.GEMINI_API_KEY)
-        model = genai.GenerativeModel(settings.GEMINI_MODEL)
+        from api.gemini_service import generate_content
 
         companies = [inv.company_name for inv in investments[:10]]
         sectors = list(set(inv.sector for inv in investments if inv.sector))
@@ -276,7 +271,7 @@ Write in a professional private equity tone. Paragraph 1: portfolio overview.
 Paragraph 2: key highlights and value creation. Paragraph 3: outlook.
 Keep each paragraph to 3-4 sentences. Be concise and professional."""
 
-        result = model.generate_content(prompt)
+        result = generate_content(prompt)
         return result.text.strip()
     except Exception as e:
         logger.warning(f'LP commentary generation failed: {e}')

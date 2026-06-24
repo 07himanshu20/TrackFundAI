@@ -108,7 +108,7 @@ def _match_company_with_gemini(organization, sender_email: str, subject: str):
     Returns PortfolioCompany instance or None.
     """
     from investments.models import PortfolioCompany
-    import google.generativeai as genai
+    from api.gemini_service import generate_content
 
     companies = list(
         PortfolioCompany.objects.filter(organization=organization, is_active=True)
@@ -136,12 +136,7 @@ Return ONLY the exact company name from the list above, or "UNKNOWN" if no match
 Do not include any explanation."""
 
     try:
-        api_key = settings.GEMINI_API_KEY
-        if not api_key:
-            return None
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(settings.GEMINI_MODEL)
-        result = model.generate_content(prompt)
+        result = generate_content(prompt)
         matched_name = result.text.strip().strip('"').strip("'")
 
         if matched_name and matched_name != 'UNKNOWN':
@@ -344,7 +339,6 @@ def _trigger_import(organization, submission, payload: bytes, filename: str):
     from django.core.files.base import ContentFile
     from django.core.files.storage import default_storage
     from dataimport.models import ImportJob, ImportFile
-    from dataimport.import_service import run_import
 
     # Get or create a system user for this org
     from django.contrib.auth import get_user_model

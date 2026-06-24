@@ -253,12 +253,10 @@ def portfolio_chat(request):
 def _scoped_gemini_chat(message: str, history: list, context: dict, gemini_service) -> dict:
     """
     Wrap gemini_service with a hierarchy-aware system prompt that describes
-    the currently selected scope + the available data.
+    the currently selected scope + the available data. All Gemini calls go
+    through api.gemini_service (Vertex AI).
     """
-    import google.generativeai as genai
-
-    # Ensure configured (reuses the same flag inside gemini_service)
-    gemini_service._ensure_configured()
+    from api.gemini_service import create_chat
 
     scope = context.get("scope", {})
     level = scope.get("level", "portfolio")
@@ -302,30 +300,17 @@ Guidelines:
   them clearly and suggest navigating to that entity instead.
 """
 
-    model_name = "gemini-2.5-flash"
-    try:
-        from django.conf import settings
-        model_name = getattr(settings, "GEMINI_MODEL", model_name)
-    except Exception:
-        pass
-
-    model = genai.GenerativeModel(
-        model_name=model_name,
+    chat_session = create_chat(
         system_instruction=system_instruction,
+        history=[
+            {'role': t.get('role', 'user'), 'parts': [t.get('content', '')]}
+            for t in (history or [])
+        ],
     )
-
-    gemini_history = []
-    for turn in history:
-        role = turn.get("role", "user")
-        text = turn.get("content", "")
-        gemini_history.append({"role": role, "parts": [text]})
-
-    chat_session = model.start_chat(history=gemini_history)
     response = chat_session.send_message(message)
-    reply_text = response.text
 
     return {
-        "reply": reply_text,
+        "reply": response.text,
         "scope": scope,
     }
 

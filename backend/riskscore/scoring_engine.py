@@ -420,15 +420,9 @@ def _score_compliance_status(company, as_of_date, flags):
 
 
 def _generate_commentary(company, score, tier, flags, signals):
-    """Generate AI commentary using Gemini."""
-    from django.conf import settings
+    """Generate AI commentary using Gemini (Vertex AI)."""
     try:
-        import google.generativeai as genai
-        if not settings.GEMINI_API_KEY:
-            return ''
-
-        genai.configure(api_key=settings.GEMINI_API_KEY)
-        model = genai.GenerativeModel(settings.GEMINI_MODEL)
+        from api.gemini_service import generate_content
 
         flags_text = '\n'.join(f'- {f}' for f in flags) if flags else '- No critical flags'
         signal_summary = ', '.join(
@@ -448,7 +442,7 @@ Key Flags:
 Write a concise, professional risk commentary. Focus on the most important risk drivers.
 Do not repeat the score. Be specific and actionable."""
 
-        result = model.generate_content(prompt)
+        result = generate_content(prompt)
         return result.text.strip()
     except Exception as e:
         logger.warning(f'Gemini commentary generation failed: {e}')

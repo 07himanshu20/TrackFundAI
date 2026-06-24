@@ -295,23 +295,15 @@ def parse_mis_with_gemini(
         Financials dict matching the canonical schema.
         All monetary values in native currency, full units.
     """
-    import google.generativeai as genai
-    from django.conf import settings
+    # Gemini calls go through the shared Vertex AI helper
+    from api.gemini_service import generate_content
 
-    # Ensure Gemini is configured
-    api_key = getattr(settings, "GEMINI_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY not set in .env / Django settings")
-    genai.configure(api_key=api_key)
-
-    model_name = getattr(settings, "GEMINI_MODEL", "gemini-2.5-flash")
-    model = genai.GenerativeModel(
-        model_name=model_name,
-        generation_config={
-            "temperature": 0,       # zero temperature = deterministic, no hallucination
-            "response_mime_type": "application/json",  # force JSON output
-        },
-    )
+    def _vertex_call(prompt_text):
+        return generate_content(
+            prompt_text,
+            temperature=0,                              # deterministic, no hallucination
+            response_mime_type="application/json",      # force JSON output
+        )
 
     raw_json_str = json.dumps(raw_workbook_data, ensure_ascii=False, separators=(",", ":"))
 
@@ -325,7 +317,7 @@ def parse_mis_with_gemini(
     pass1_message = PASS1_PROMPT + hints_str + "\n\n" + raw_json_str
 
     try:
-        pass1_response = model.generate_content(pass1_message)
+        pass1_response = _vertex_call(pass1_message)
         structure = _parse_json_response(pass1_response.text, "Pass 1")
         logger.info("Pass 1 structure: %s", json.dumps(structure, indent=2))
     except Exception as e:
@@ -373,7 +365,7 @@ def parse_mis_with_gemini(
     def _call_with_retry(prompt: str, max_retries: int = 3) -> str:
         for attempt in range(max_retries):
             try:
-                response = model.generate_content(prompt)
+                response = _vertex_call(prompt)
                 return response.text
             except Exception as exc:
                 err_str = str(exc)

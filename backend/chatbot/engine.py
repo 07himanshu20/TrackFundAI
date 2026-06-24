@@ -324,9 +324,7 @@ INTENT_SCHEMA = {
 def classify_intent(query: str, organization_name: str, fund_name: str = None) -> Dict[str, str]:
     """Use Gemini to classify user intent."""
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=settings.GEMINI_API_KEY)
-        model = genai.GenerativeModel(getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash'))
+        from api.gemini_service import generate_content
 
         intents_desc = '\n'.join(f'- {k}: {v}' for k, v in INTENT_SCHEMA.items())
 
@@ -356,7 +354,7 @@ User query: "{query}"
 Respond with JSON only (no markdown fences):
 {{"intent": "<intent_key>", "entity": "<company/fund name if mentioned or null>", "time_filter": "<e.g. last 3 months, FY2025 or null>", "confidence": 0.0-1.0}}"""
 
-        response = model.generate_content(prompt)
+        response = generate_content(prompt)
         text = response.text.strip()
         text = re.sub(r'^```json\s*', '', text)
         text = re.sub(r'\s*```$', '', text)
@@ -1039,9 +1037,7 @@ def _try_template_query(query: str, intent: str, context: Dict) -> Optional[str]
 
 def build_sql_query(query: str, intent: str, context: Dict, time_filter: Optional[str], entity: Optional[str]) -> Optional[str]:
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=settings.GEMINI_API_KEY)
-        model = genai.GenerativeModel(getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash'))
+        from api.gemini_service import generate_content
 
         # ── Dialect awareness (Postgres-ready, SQLite-compatible today) ──
         # `connection.vendor` is Django's portable way to identify the active
@@ -1131,7 +1127,7 @@ INTENT-SPECIFIC GUIDANCE:
 
 SQL:"""
 
-        response = model.generate_content(prompt)
+        response = generate_content(prompt)
         sql = response.text.strip()
         sql = re.sub(r'^```(?:sql)?\s*', '', sql)
         sql = re.sub(r'\s*```$', '', sql)
@@ -1209,9 +1205,7 @@ def build_aggregate_and_detail_sql(
         (e.g. "sector", "investor_type"). NULL when no grouping applies.
     """
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=settings.GEMINI_API_KEY)
-        model = genai.GenerativeModel(getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash'))
+        from api.gemini_service import generate_content
 
         from django.db import connection as _conn
         vendor = _conn.vendor
@@ -1281,7 +1275,7 @@ RETURN FORMAT — JSON ONLY, no markdown fences:
   "grouping_dimension": "sector"
 }}
 """
-        response = model.generate_content(prompt)
+        response = generate_content(prompt)
         text = response.text.strip()
         text = re.sub(r'^```(?:json)?\s*', '', text)
         text = re.sub(r'\s*```$', '', text)
@@ -1531,9 +1525,7 @@ def render_response(
     agg_truncated = bool(agg_meta.get('truncated'))
 
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=settings.GEMINI_API_KEY)
-        model = genai.GenerativeModel(getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash'))
+        from api.gemini_service import generate_content
 
         # ── TRUE TOTALS block (aggregate) ────────────────────────
         if agg_columns and agg_rows:
@@ -1624,7 +1616,7 @@ C. FORMATTING
    • Never say "based on the data", "according to the query", "the dataset shows".
 """
 
-        response = model.generate_content(prompt)
+        response = generate_content(prompt)
         return response.text.strip()
     except Exception as e:
         logger.warning(f'Response render error: {e}')
@@ -1670,9 +1662,7 @@ def _table_response(columns: List[str], rows: List[tuple]) -> str:
 def _handle_general_finance(query: str, context: Dict) -> str:
     """Answer general finance/market questions using Gemini's knowledge."""
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=settings.GEMINI_API_KEY)
-        model = genai.GenerativeModel(getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash'))
+        from api.gemini_service import generate_content
 
         prompt = f"""You are a senior financial analyst AI assistant for TrackFundAI, a portfolio management platform for Indian AIFs.
 You are speaking with {context.get('user_name', 'a fund manager')} (address them personally as "{context.get('user_first_name', 'there')}" when appropriate — never as a company, firm, or organization). They are asking a general finance question.
@@ -1692,7 +1682,7 @@ Keep the response professional, concise (3-8 sentences), and relevant to fund ma
 Use markdown formatting: **bold** for key terms, bullet points for lists.
 If the question is completely unrelated to finance, politely redirect."""
 
-        response = model.generate_content(prompt)
+        response = generate_content(prompt)
         return response.text.strip()
     except Exception as e:
         logger.warning(f'General finance handler error: {e}')

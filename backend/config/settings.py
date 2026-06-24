@@ -11,9 +11,19 @@ SECRET_KEY = os.getenv('SECRET_KEY', 'fallback-secret-key-change-in-production')
 DEBUG = os.getenv('DEBUG', 'True') == 'True'
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
 
-# Gemini — loaded here, NEVER sent to frontend
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
+# Gemini Configuration — dual-mode (Vertex AI for prod, AI Studio for dev).
+# See .env for the active backend. The SDK client construction lives in
+# api/gemini_service.py:get_client() and branches on GOOGLE_GENAI_USE_VERTEXAI.
+GOOGLE_GENAI_USE_VERTEXAI = os.getenv('GOOGLE_GENAI_USE_VERTEXAI', 'False')
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
+
+# AI Studio auth (used when GOOGLE_GENAI_USE_VERTEXAI=False)
+GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY', '')
+
+# Vertex AI auth (used when GOOGLE_GENAI_USE_VERTEXAI=True).
+# Requires `gcloud auth application-default login` on the host.
+GOOGLE_CLOUD_PROJECT = os.getenv('GOOGLE_CLOUD_PROJECT', '')
+GOOGLE_CLOUD_LOCATION = os.getenv('GOOGLE_CLOUD_LOCATION', 'us-central1')
 
 # Excel MIS file path (optional — can also be uploaded via UI)
 MIS_FILE_PATH = os.getenv('MIS_FILE_PATH', '')

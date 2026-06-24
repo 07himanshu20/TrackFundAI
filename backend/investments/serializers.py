@@ -14,7 +14,7 @@ class PortfolioCompanySerializer(serializers.ModelSerializer):
             'id', 'organization', 'name', 'cin', 'pan',
             'sector', 'sub_sector',
             'incorporation_date', 'headquarters_city', 'headquarters_country',
-            'website', 'founder_names', 'description',
+            'website', 'founder_names', 'co_investors', 'description',
             'is_active', 'portfolio_node_id',
             'created_at', 'updated_at',
         ]
@@ -25,7 +25,9 @@ class PortfolioCompanyListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for dropdowns and portfolio lists."""
     class Meta:
         model = PortfolioCompany
-        fields = ['id', 'name', 'sector', 'sub_sector', 'headquarters_city',
+        fields = ['id', 'name', 'sector', 'sub_sector',
+                  'headquarters_city', 'headquarters_country',
+                  'co_investors',
                   'is_active', 'is_quoted', 'listing_exchange']
 
 

@@ -3,10 +3,12 @@ Data Import views — file upload, SSE streaming, job status.
 """
 import json
 import logging
+import os
 import queue
 import threading
 import time
 
+from django.conf import settings as _dj_settings
 from django.http import StreamingHttpResponse
 from django.utils import timezone
 from rest_framework import status
@@ -19,7 +21,55 @@ from accounts.permissions import IsGPAdmin, IsGPUser
 from .models import ImportJob, ImportFile
 from .serializers import ImportJobSerializer, ImportJobStatusSerializer
 
+
+# H1 — Concurrent-import sentinel. The Phase 3 orchestrator creates this
+# file on import start and deletes it on completion (try/finally). If a
+# second import is requested while it exists, we refuse with HTTP 409 so
+# the user doesn't unknowingly queue parallel runs that can step on each
+# other (Django dev server / single-worker prod / shared cache).
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_IMPORT_SENTINEL = os.path.join(os.path.dirname(_PROJECT_ROOT), '.import_active')
+_SENTINEL_MAX_AGE_S = int(os.environ.get('IMPORT_SENTINEL_MAX_AGE_S', '3600'))
+
+
+def _import_in_flight() -> tuple[bool, dict]:
+    """Return (in_flight, info). Treats a stale sentinel (> _SENTINEL_MAX_AGE_S)
+    as cleared — a crashed worker shouldn't lock out future imports forever."""
+    if not os.path.exists(_IMPORT_SENTINEL):
+        return False, {}
+    try:
+        age = time.time() - os.path.getmtime(_IMPORT_SENTINEL)
+        if age > _SENTINEL_MAX_AGE_S:
+            try:
+                os.remove(_IMPORT_SENTINEL)
+            except Exception:
+                pass
+            return False, {'stale_cleared': True, 'age_s': round(age, 1)}
+        with open(_IMPORT_SENTINEL) as f:
+            body = f.read().strip().splitlines()
+        return True, {
+            'age_s': round(age, 1),
+            'import_file_id': body[0] if body else None,
+            'started_at': body[1] if len(body) > 1 else None,
+        }
+    except Exception:
+        return True, {}
+
 logger = logging.getLogger(__name__)
+
+# Startup banner — emitted once at import time so the active extractor path
+# and Gemini model are visible in every server log.
+import os as _os_boot
+_boot_phase3 = _os_boot.environ.get('USE_PHASE3', 'true').lower() in ('true', '1', 'yes')
+_boot_model = _os_boot.environ.get('GEMINI_MODEL', 'gemini-2.5-flash')
+_boot_vertex = _os_boot.environ.get('GOOGLE_GENAI_USE_VERTEXAI', 'False').lower() in ('true', '1', 'yes')
+_boot_backend = 'Vertex AI (ADC)' if _boot_vertex else 'AI Studio (api_key)'
+logger.info(
+    f'[BOOT] dataimport ready — extractor='
+    f'{"Phase 3 (Flavor A + B parallel layers)" if _boot_phase3 else "single-call fallback"}, '
+    f'model={_boot_model}, backend={_boot_backend}'
+)
+del _os_boot, _boot_phase3, _boot_model, _boot_vertex, _boot_backend
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +84,17 @@ def upload_fund_files(request):
     org = request.organization
     if not org:
         return Response({'detail': 'No organization.'}, status=403)
+
+    in_flight, info = _import_in_flight()
+    if in_flight:
+        return Response(
+            {
+                'detail': 'Another import is already running. Wait for it to finish '
+                          'before starting a new one.',
+                'in_flight': info,
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
 
     files = request.FILES.getlist('files')
     if not files:
@@ -209,8 +270,12 @@ def _import_event_generator(job, user):
     This means the browser sees live decimal progress updates throughout the
     entire import — never a 0% freeze.
     """
-    from .import_service import FundImportService
     import django.db
+    import os as _os
+    # Phase 3 (Flavor A + Flavor B) — DEFAULT-ON. Always runs 3 parallel Gemini
+    # calls; Flavor B chunks any layer whose estimated output > 50K tokens.
+    # Set USE_PHASE3=false to fall back to the single-call extractor (emergency only).
+    _USE_PHASE3 = _os.environ.get('USE_PHASE3', 'true').lower() in ('true', '1', 'yes')
 
     pending_files = list(job.files.filter(status='pending'))
     if not pending_files:
@@ -262,26 +327,28 @@ def _import_event_generator(job, user):
                 'phase': _pct_to_phase(stage_pct),
             })
 
-        service = FundImportService(
-            organization=user.organization,
-            user=user,
-        )
-
         result_holder = [None]
         error_holder = [None]
 
         def _run_import(_rf=import_file, _pcb=progress_cb,
-                        _q=event_queue, _svc=service,
-                        _rh=result_holder, _eh=error_holder):
+                        _q=event_queue,
+                        _rh=result_holder, _eh=error_holder,
+                        _phase3=_USE_PHASE3):
             try:
-                # Each thread needs its own DB connection
                 django.db.close_old_connections()
-                _rh[0] = _svc.import_file(_rf, _pcb)
+                if _phase3:
+                    from .phase3_layers.orchestrator import run_phase3_import
+                    logger.info(f'Phase 3 (Flavor A+B) for {_rf.original_filename}')
+                    _rh[0] = run_phase3_import(_rf, _pcb)
+                else:
+                    from .single_call_extractor import run_phase2_import
+                    logger.info(f'Single-call fallback for {_rf.original_filename}')
+                    _rh[0] = run_phase2_import(_rf, _pcb)
             except Exception as exc:
                 logger.exception(f'Import failed for {_rf.original_filename}')
                 _eh[0] = exc
             finally:
-                _q.put(None)  # Sentinel: import thread is done
+                _q.put(None)
                 django.db.close_old_connections()
 
         thread = threading.Thread(target=_run_import, daemon=True, name=f'import-{file_idx}')
@@ -312,15 +379,23 @@ def _import_event_generator(job, user):
 
         thread.join(timeout=600)   # Safety: max 10 min per file
 
-        if error_holder[0]:
-            err = error_holder[0]
+        result = result_holder[0] or {}
+        result_failed = isinstance(result, dict) and result.get('status') == 'failed'
+
+        if error_holder[0] or result_failed:
+            if error_holder[0]:
+                err_msg = str(error_holder[0])
+            else:
+                err_msg = (result.get('detail') or result.get('error')
+                           or 'Import failed (no detail).')
+
             import_file.status = 'failed'
-            import_file.error_detail = str(err)
+            import_file.error_detail = err_msg
             import_file.save(update_fields=['status', 'error_detail'])
 
             all_errors.append({
                 'file': import_file.original_filename,
-                'error': str(err),
+                'error': err_msg,
             })
 
             yield _sse_event({
@@ -328,11 +403,9 @@ def _import_event_generator(job, user):
                 'file': import_file.original_filename,
                 'file_index': file_idx,
                 'total_files': total_files,
-                'error': str(err),
+                'error': err_msg,
             })
         else:
-            result = result_holder[0] or {}
-
             import_file.status = 'completed'
             import_file.completed_at = timezone.now()
             import_file.save(update_fields=['status', 'completed_at'])
@@ -721,127 +794,64 @@ def delete_imported_file(request, file_id):
 @api_view(['GET'])
 @permission_classes([IsGPUser])
 def derived_metrics_list(request):
-    """Return Pass 4 derived fund-level metrics with full provenance.
+    """Return fund-level metrics (Phase 3 reconciler output) with provenance.
+
+    Phase 3 writes every dashboard-displayed metric into FundMetric. The
+    response shape is preserved from the Phase 1/2 era so the frontend's
+    `fmValue()` / `wireProvenance()` continue to read the same fields,
+    but the source is now solely FundMetric — DerivedMetric and the
+    legacy Pass-4 anchor pipeline are gone.
 
     Query params:
-        fund:   funds.Fund UUID (returns derived metrics for all schemes of fund)
-        scheme: funds.Scheme UUID (returns derived metrics for one scheme only)
-
-    Response shape:
-        {
-            "metrics": [
-                {
-                    "scheme_id":          "<uuid>",
-                    "scheme_name":        "...",
-                    "metric_key":         "moic",
-                    "value":              1.85,
-                    "formula_expression": "(total_distributions_to_lps + total_unrealised_fair_value) / total_called_capital",
-                    "inputs_used":        {input_key: {value, unit, source, description}},
-                    "confidence":         0.95,
-                    "gemini_reasoning":   "...",
-                    "candidate_formulas": [...],
-                    "derived_at":         "2026-06-04T...",
-                    "source":             "derived"  // or "imported_direct"
-                },
-                ...
-            ]
-        }
+        fund:   funds.Fund UUID (all schemes of the fund)
+        scheme: funds.Scheme UUID (one scheme only)
     """
-    from .models import DerivedMetric, FundMetric
+    from .models import FundMetric
     from .canonical_schema import DERIVABLE_FUND_METRICS
-    from .anchor_pipeline import LEGACY_DERIVED_MAP
 
     org = request.organization
     if not org:
         return Response({'detail': 'No organization.'}, status=403)
 
-    qs = DerivedMetric.objects.filter(organization=org).select_related('scheme')
+    fm_qs = FundMetric.objects.filter(organization=org).select_related('scheme')
 
-    fund_id = request.GET.get('fund')
     scheme_id = request.GET.get('scheme')
-    if scheme_id:
-        qs = qs.filter(scheme_id=scheme_id)
-    elif fund_id:
-        qs = qs.filter(scheme__fund_id=fund_id)
-
-    legacy_to_canonical = {v: k for k, v in LEGACY_DERIVED_MAP.items()}
-    canonical_to_legacy = dict(LEGACY_DERIVED_MAP)
-
-    fm_qs = FundMetric.objects.filter(organization=org)
+    fund_id = request.GET.get('fund')
     if scheme_id:
         fm_qs = fm_qs.filter(scheme_id=scheme_id)
     elif fund_id:
         fm_qs = fm_qs.filter(scheme__fund_id=fund_id)
-    fm_index = {}
-    for fm in fm_qs:
-        fm_index[(fm.scheme_id, fm.metric_key)] = fm
 
     metrics = []
-    emitted_canonical = set()
-
-    for dm in qs:
-        meta = DERIVABLE_FUND_METRICS.get(dm.metric_key, {})
-        source = 'imported_direct' if dm.formula_expression == '(direct value imported)' else 'derived'
-        canonical_key = legacy_to_canonical.get(dm.metric_key, dm.metric_key)
-        fm = fm_index.get((dm.scheme_id, canonical_key))
-        provenance = (fm.provenance if fm else {}) or {}
-        metrics.append({
-            'scheme_id':          str(dm.scheme_id),
-            'scheme_name':        dm.scheme.name,
-            'metric_key':         dm.metric_key,
-            'canonical_key':      canonical_key,
-            'metric_label':       meta.get('label', dm.metric_key),
-            'metric_unit':        meta.get('unit', ''),
-            'metric_description': meta.get('description', ''),
-            'value':              float(dm.value) if dm.value is not None else None,
-            'formula_expression': dm.formula_expression,
-            'inputs_used':        dm.inputs_used or {},
-            'confidence':         dm.confidence,
-            'gemini_reasoning':   dm.gemini_reasoning,
-            'candidate_formulas': dm.candidate_formulas or [],
-            'derived_at':         dm.derived_at.isoformat() if dm.derived_at else None,
-            'source':             source,
-            'provenance': {
-                'source':        provenance.get('source'),
-                'source_sheet':  provenance.get('source_sheet'),
-                'source_cells':  provenance.get('source_cells') or [],
-                'reasoning':     provenance.get('reasoning'),
-                'inputs_used':   provenance.get('inputs_used') or dm.inputs_used or {},
-            },
-        })
-        emitted_canonical.add((dm.scheme_id, canonical_key))
-
-    # Emit FundMetric records that have no matching DerivedMetric.
-    # This surfaces canonical-only keys (e.g. sponsor_commitment_pct,
-    # fund_nav, active_fair_value, mgmt_fee_pct on funds where Pass 4 did
-    # not run) so the dashboard can read them via a single endpoint.
     for fm in fm_qs:
-        if (fm.scheme_id, fm.metric_key) in emitted_canonical:
-            continue
-        legacy_key = canonical_to_legacy.get(fm.metric_key, fm.metric_key)
-        provenance = fm.provenance or {}
+        meta = DERIVABLE_FUND_METRICS.get(fm.metric_key, {}) if isinstance(DERIVABLE_FUND_METRICS, dict) else {}
+        inputs_used = fm.inputs_used or {}
+        # Phase 3 stores priority_rule_applied, source_sheet, source_cells,
+        # provenance_kind, formula_expression, alternatives, disagreements,
+        # quality_flag inside inputs_used.
         metrics.append({
             'scheme_id':          str(fm.scheme_id),
-            'scheme_name':        fm.scheme.name,
-            'metric_key':         legacy_key,
+            'scheme_name':        fm.scheme.name if fm.scheme else '',
+            'metric_key':         fm.metric_key,
             'canonical_key':      fm.metric_key,
-            'metric_label':       fm.metric_key,
-            'metric_unit':        '',
-            'metric_description': '',
+            'metric_label':       meta.get('label', fm.metric_key),
+            'metric_unit':        meta.get('unit', ''),
+            'metric_description': meta.get('description', ''),
             'value':              float(fm.value) if fm.value is not None else None,
-            'formula_expression': fm.formula_expression or '',
-            'inputs_used':        fm.inputs_used or {},
+            'formula_expression': inputs_used.get('formula_expression') or '',
+            'inputs_used':        inputs_used,
             'confidence':         None,
-            'gemini_reasoning':   provenance.get('reasoning') or '',
+            'gemini_reasoning':   inputs_used.get('priority_rule_reason') or '',
             'candidate_formulas': [],
-            'derived_at':         fm.updated_at.isoformat() if fm.updated_at else None,
+            'derived_at':         fm.updated_at.isoformat() if getattr(fm, 'updated_at', None) else None,
             'source':             fm.source or 'extracted',
             'provenance': {
-                'source':        provenance.get('source') or fm.source,
-                'source_sheet':  provenance.get('source_sheet'),
-                'source_cells':  provenance.get('source_cells') or [],
-                'reasoning':     provenance.get('reasoning'),
-                'inputs_used':   provenance.get('inputs_used') or fm.inputs_used or {},
+                'source':        fm.source,
+                'source_sheet':  inputs_used.get('source_sheet'),
+                'source_cells':  inputs_used.get('source_cells') or [],
+                'reasoning':     inputs_used.get('priority_rule_reason')
+                                 or inputs_used.get('note'),
+                'inputs_used':   inputs_used,
             },
         })
 

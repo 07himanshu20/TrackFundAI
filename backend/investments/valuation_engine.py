@@ -310,9 +310,7 @@ def _fetch_peer_multiples_gemini(investment) -> dict:
     based on the company's sector and stage.
     """
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=settings.GEMINI_API_KEY)
-        model = genai.GenerativeModel(settings.GEMINI_MODEL)
+        from api.gemini_service import generate_content
 
         company = investment.portfolio_company
         sector = (company.sector if company else '') or investment.sector or 'Technology'
@@ -328,7 +326,7 @@ Return ONLY a JSON object with keys: "ev_revenue" (float) and "ev_ebitda" (float
 Use current market data as of your knowledge cutoff. Be conservative (use median, not top-quartile).
 Example: {{"ev_revenue": 4.5, "ev_ebitda": 18.0}}"""
 
-        result = model.generate_content(prompt)
+        result = generate_content(prompt)
         import json
         text = result.text.strip()
         # Extract JSON from response

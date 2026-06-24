@@ -144,9 +144,7 @@ Investment Thesis: {opp.investment_thesis}
 Fund Type: {opp.get_fund_type_display()}"""
 
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=settings.GEMINI_API_KEY)
-        model = genai.GenerativeModel(settings.GEMINI_MODEL)
+        from api.gemini_service import generate_content
 
         total_words = 0
         for field_name, section_title, section_prompt in SECTION_PROMPTS:
@@ -165,7 +163,7 @@ Write in professional consulting prose. Use data, frameworks, and specific examp
 Length: 400-600 words for this section."""
 
             try:
-                response = model.generate_content(prompt)
+                response = generate_content(prompt)
                 section_text = response.text.strip()
             except Exception as e:
                 section_text = f'[Generation error for {section_title}: {str(e)}]'

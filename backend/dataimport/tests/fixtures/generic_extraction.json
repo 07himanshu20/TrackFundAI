@@ -1,0 +1,162 @@
+{
+  "fund_master": {
+    "fund_name": "Generic Alpha Fund Phase2 Test",
+    "sebi_registration_number": "IN/AIF2/99-99/9999",
+    "sebi_category_code": "CAT_II",
+    "structure_type": "trust",
+    "fund_pan": "TESTP1234A",
+    "inception_date": "2020-04-01",
+    "corpus_target": 1500,
+    "base_currency": "INR",
+    "fund_status": "active",
+    "scheme_name": "Generic Alpha Fund Phase2 Test - Scheme I",
+    "vintage_year": 2020,
+    "first_close_date": "2020-09-30",
+    "final_close_date": "2021-03-31",
+    "scheme_size": 1500,
+    "tenure_years": 8,
+    "hurdle_rate_pct": 8,
+    "carry_pct": 20,
+    "carry_type": "european",
+    "management_fee_basis": "committed",
+    "management_fee_pct": 2,
+    "sponsor_commitment_pct": 2.5,
+    "scheme_status": "investing"
+  },
+  "investors": [
+    {"investor_name": "Investor One Pension Fund", "investor_type": "pension", "country": "India", "commitment_amount": 500, "drawdown": 300, "distributions": 50, "pan": "INVAA0001A"},
+    {"investor_name": "Investor Two Sovereign", "investor_type": "sovereign", "country": "Singapore", "commitment_amount": 400, "drawdown": 250, "distributions": 40, "pan": "INVBB0002B"},
+    {"investor_name": "Investor Three Family Office", "investor_type": "family_office", "country": "India", "commitment_amount": 300, "drawdown": 200, "distributions": 30, "pan": "INVCC0003C"},
+    {"investor_name": "Investor Four HUF", "investor_type": "huf", "country": "India", "commitment_amount": 200, "drawdown": 150, "distributions": 25, "pan": "INVDD0004D"},
+    {"investor_name": "Investor Five GP", "investor_type": "company", "country": "India", "commitment_amount": 100, "drawdown": 80, "distributions": 15, "pan": "INVEE0005E"}
+  ],
+  "commitments": [
+    {"investor_name": "Investor One Pension Fund", "scheme_name": "Generic Alpha Fund Phase2 Test - Scheme I", "commitment_amount": 500, "close_type": "first_close"},
+    {"investor_name": "Investor Two Sovereign", "scheme_name": "Generic Alpha Fund Phase2 Test - Scheme I", "commitment_amount": 400, "close_type": "first_close"},
+    {"investor_name": "Investor Three Family Office", "scheme_name": "Generic Alpha Fund Phase2 Test - Scheme I", "commitment_amount": 300, "close_type": "final_close"},
+    {"investor_name": "Investor Four HUF", "scheme_name": "Generic Alpha Fund Phase2 Test - Scheme I", "commitment_amount": 200, "close_type": "final_close"},
+    {"investor_name": "Investor Five GP", "scheme_name": "Generic Alpha Fund Phase2 Test - Scheme I", "commitment_amount": 100, "close_type": "first_close"}
+  ],
+  "capital_calls": [
+    {"call_number": 1, "call_date": "2020-12-15", "payment_due_date": "2020-12-30", "call_percentage": 0.10, "total_call_amount": 150, "purpose": "Initial deployment", "call_status": "paid"},
+    {"call_number": 2, "call_date": "2021-06-15", "payment_due_date": "2021-06-30", "call_percentage": 0.15, "total_call_amount": 225, "purpose": "Round 2 follow-on", "call_status": "paid"},
+    {"call_number": 3, "call_date": "2022-03-15", "payment_due_date": "2022-03-30", "call_percentage": 0.20, "total_call_amount": 300, "purpose": "New investments + fees", "call_status": "paid"}
+  ],
+  "portfolio_investments": [
+    {"company_name": "Company Alpha", "sector": "Technology", "sub_sector": "SaaS", "headquarters_city": "Bangalore", "instrument_type": "ccps", "stage": "Series A", "round_name": "Series A", "investment_date": "2021-05-15", "total_invested": 60, "ownership_pct": 0.20, "tranche_number": 1},
+    {"company_name": "Company Alpha", "sector": "Technology", "sub_sector": "SaaS", "instrument_type": "ccps", "stage": "Series B Follow-on", "round_name": "Series B", "investment_date": "2023-02-10", "total_invested": 40, "ownership_pct": 0.10, "tranche_number": 2},
+    {"company_name": "Company Beta", "sector": "Healthcare", "sub_sector": "Diagnostics", "headquarters_city": "Mumbai", "instrument_type": "equity", "stage": "Series A", "round_name": "Series A", "investment_date": "2021-09-20", "total_invested": 80, "ownership_pct": 0.25, "tranche_number": 1},
+    {"company_name": "Company Beta", "sector": "Healthcare", "sub_sector": "Diagnostics", "instrument_type": "ccd", "stage": "Bridge", "round_name": "Bridge", "investment_date": "2023-08-01", "total_invested": 30, "ownership_pct": 0.05, "tranche_number": 1},
+    {"company_name": "Company Gamma", "sector": "FinTech", "sub_sector": "Lending", "headquarters_city": "Delhi", "instrument_type": "equity", "stage": "Series A", "round_name": "Series A", "investment_date": "2022-01-12", "total_invested": 100, "ownership_pct": 0.30, "tranche_number": 1},
+    {"company_name": "Company Gamma", "sector": "FinTech", "sub_sector": "Lending", "instrument_type": "equity", "stage": "Series B Follow-on", "round_name": "Series B", "investment_date": "2024-04-10", "total_invested": 50, "ownership_pct": 0.10, "tranche_number": 2},
+    {"company_name": "Company Delta", "sector": "Consumer", "sub_sector": "E-commerce", "headquarters_city": "Chennai", "instrument_type": "ccps", "stage": "Seed", "round_name": "Seed", "investment_date": "2022-06-30", "total_invested": 25, "ownership_pct": 0.15, "tranche_number": 1}
+  ],
+  "valuations": [
+    {"company_name": "Company Alpha", "valuation_date": "2025-03-31", "methodology": "comparables", "fair_value_of_holding": 120, "cost_basis": 100, "multiple": 1.2, "ipev_level": 3, "valuer_name": "BDO Valuation Pvt Ltd"},
+    {"company_name": "Company Alpha", "valuation_date": "2024-03-31", "methodology": "comparables", "fair_value_of_holding": 95, "cost_basis": 100, "multiple": 0.95, "ipev_level": 3, "valuer_name": "BDO Valuation Pvt Ltd"},
+    {"company_name": "Company Beta", "valuation_date": "2025-03-31", "methodology": "dcf", "fair_value_of_holding": 90, "cost_basis": 110, "multiple": 0.82, "ipev_level": 3, "valuer_name": "Ernst & Young LLP"},
+    {"company_name": "Company Gamma", "valuation_date": "2025-03-31", "methodology": "recent_transaction", "fair_value_of_holding": 200, "cost_basis": 150, "multiple": 1.33, "ipev_level": 2, "valuer_name": "Deloitte Haskins"},
+    {"company_name": "Company Delta", "valuation_date": "2025-03-31", "methodology": "cost", "fair_value_of_holding": 25, "cost_basis": 25, "multiple": 1.0, "ipev_level": 3, "valuer_name": "Cost - Seed Stage"}
+  ],
+  "quoted_unquoted": [
+    {"company_name": "Company Alpha", "share_type": "Unquoted", "ipev_level": 3},
+    {"company_name": "Company Beta", "share_type": "Unquoted", "ipev_level": 3},
+    {"company_name": "Company Gamma", "share_type": "Unquoted", "ipev_level": 2},
+    {"company_name": "Company Delta", "share_type": "Unquoted", "ipev_level": 3}
+  ],
+  "burn_runway": [
+    {"company_name": "Company Alpha", "period": "Mar-25", "mrr": 5, "arr": 60, "churn_rate": 0.02, "burn_rate": 3, "runway_months": 18},
+    {"company_name": "Company Gamma", "period": "Mar-25", "burn_rate": 8, "runway_months": 24}
+  ],
+  "nav_records": [
+    {"nav_date": "2024-06-30", "total_nav": 750, "total_units_outstanding": 1000, "nav_per_unit": 750000, "investments_at_fair_value": 700, "cash_and_equivalents": 50, "management_fee_payable": 8},
+    {"nav_date": "2024-09-30", "total_nav": 780, "total_units_outstanding": 1000, "nav_per_unit": 780000, "investments_at_fair_value": 720, "cash_and_equivalents": 60, "management_fee_payable": 8},
+    {"nav_date": "2024-12-31", "total_nav": 800, "total_units_outstanding": 1000, "nav_per_unit": 800000, "investments_at_fair_value": 740, "cash_and_equivalents": 60, "management_fee_payable": 8},
+    {"nav_date": "2025-03-31", "total_nav": 820, "total_units_outstanding": 1000, "nav_per_unit": 820000, "investments_at_fair_value": 760, "cash_and_equivalents": 60, "management_fee_payable": 8}
+  ],
+  "portfolio_kpis_periodic": [
+    {"company_name": "Company Alpha", "period": "FY 2023-24", "revenue": 45, "ebitda": 5, "ebitda_margin_pct": 0.11, "gross_margin_pct": 0.75, "headcount": 80, "arr": 50, "mrr": 4.2, "churn_rate": 0.03, "ltv_cac_ratio": 3.2},
+    {"company_name": "Company Alpha", "period": "FY 2024-25", "revenue": 62, "ebitda": 9, "ebitda_margin_pct": 0.145, "gross_margin_pct": 0.78, "headcount": 110, "arr": 70, "mrr": 5.8, "churn_rate": 0.025, "ltv_cac_ratio": 3.8},
+    {"company_name": "Company Beta", "period": "FY 2023-24", "revenue": 35, "ebitda": -3, "ebitda_margin_pct": -0.086, "gross_margin_pct": 0.55, "headcount": 65},
+    {"company_name": "Company Beta", "period": "FY 2024-25", "revenue": 48, "ebitda": 2, "ebitda_margin_pct": 0.042, "gross_margin_pct": 0.58, "headcount": 85},
+    {"company_name": "Company Gamma", "period": "FY 2024-25", "revenue": 120, "ebitda": 18, "ebitda_margin_pct": 0.15, "gross_margin_pct": 0.65, "aum_value": 800, "gnpa_pct": 0.012},
+    {"company_name": "Company Delta", "period": "FY 2024-25", "revenue": 8, "ebitda": -2, "ebitda_margin_pct": -0.25, "gross_margin_pct": 0.45, "gmv": 40, "orders": 12000, "aov": 333, "returns_pct": 0.08}
+  ],
+  "monthly_pl_rows": [
+    {"company_name": "Company Alpha", "period": "Mar-25", "period_type": "monthly", "revenue": 5.2, "cogs": 1.1, "gross_profit": 4.1, "employee_cost": 2.0, "g_and_a": 0.5, "ebitda": 1.0, "pat": 0.6},
+    {"company_name": "Company Beta", "period": "Mar-25", "period_type": "monthly", "revenue": 4.0, "cogs": 1.7, "gross_profit": 2.3, "employee_cost": 1.6, "g_and_a": 0.3, "ebitda": 0.1, "pat": -0.2}
+  ],
+  "monthly_bs_rows": [
+    {"company_name": "Company Alpha", "period": "Mar-25", "period_type": "monthly", "total_assets": 80, "total_debt": 15, "cash_and_equivalents": 12, "net_worth": 50},
+    {"company_name": "Company Beta", "period": "Mar-25", "period_type": "monthly", "total_assets": 55, "total_debt": 8, "cash_and_equivalents": 6, "net_worth": 30}
+  ],
+  "monthly_cf_rows": [
+    {"company_name": "Company Alpha", "period": "Mar-25", "period_type": "monthly", "cash_from_operations": 1.5, "cash_from_investing": -0.8, "cash_from_financing": 0, "net_cash_change": 0.7, "closing_cash": 12}
+  ],
+  "budget_vs_actual": [
+    {"company_name": "Company Alpha", "period": "FY 2024-25", "line_item": "Revenue", "budget": 60, "actual": 62, "variance": 2, "variance_pct": 3.3, "is_favorable": true},
+    {"company_name": "Company Beta", "period": "FY 2024-25", "line_item": "EBITDA", "budget": 5, "actual": 2, "variance": -3, "variance_pct": -60, "is_favorable": false}
+  ],
+  "compliance_records": [],
+  "exits": [
+    {"company_name": "Company Delta", "exit_type": "secondary_sale", "exit_date": "2024-08-15", "exit_valuation": 80, "proceeds": 35, "net_exit_proceeds": 34.5, "realized_gain_loss": 10, "moic": 1.4, "irr_pct": 18, "buyer_name": "Acme Secondary Buyer"}
+  ],
+  "distributions": [
+    {"distribution_number": 1, "distribution_date": "2024-09-15", "distribution_type": "return_of_capital", "total_gross_amount": 35, "total_net_amount": 34.5, "distribution_status": "distributed"},
+    {"distribution_number": 2, "distribution_date": "2025-02-20", "distribution_type": "return_of_capital", "total_gross_amount": 125, "total_net_amount": 123.5, "distribution_status": "distributed"}
+  ],
+  "waterfall": {
+    "total_capital_called": 675,
+    "preferred_return_amount": 184.5,
+    "step_1_return_of_capital": 675,
+    "step_2_preferred_return": 184.5,
+    "step_2_years_compounded": 4.0,
+    "step_3_catchup_amount": 0,
+    "step_4a_lp_residual": 0,
+    "step_4b_gp_residual_carry": 0,
+    "available_after_roc_and_pref": -39.5,
+    "carry_amount_gross": 0,
+    "clawback_provision": 0,
+    "net_carry": 0,
+    "carry_status": "indicative",
+    "total_distributions": 160,
+    "lp_total_return": 859.5,
+    "gp_total_distribution": 0
+  },
+  "fund_performance": {
+    "as_of_date": "2025-03-31",
+    "total_committed_capital": 1500,
+    "total_called_capital": 675,
+    "total_uncalled_capital": 825,
+    "total_invested_capital": 385,
+    "total_realised_proceeds": 35,
+    "total_distributions": 160,
+    "total_unrealised_fv_holding": 435,
+    "fund_nav_latest": 820,
+    "fund_units_outstanding": 1000,
+    "moic_portfolio": 1.13,
+    "tvpi": 1.451,
+    "dpi": 0.237,
+    "rvpi": 1.214,
+    "accrued_management_fees": 32,
+    "net_irr_cashflows": [
+      {"date": "2020-12-30", "amount": 150, "type": "call"},
+      {"date": "2021-06-30", "amount": 225, "type": "call"},
+      {"date": "2022-03-30", "amount": 300, "type": "call"},
+      {"date": "2024-09-15", "amount": 35, "type": "distribution"},
+      {"date": "2025-02-20", "amount": 125, "type": "distribution"}
+    ]
+  },
+  "sheet_completeness": [
+    {"sheet_name": "Investors", "rows_in_source": 5, "rows_extracted": 5, "truncated_in_prompt": false, "target_array": "investors"},
+    {"sheet_name": "Portfolio Investments", "rows_in_source": 7, "rows_extracted": 7, "truncated_in_prompt": false, "target_array": "portfolio_investments"}
+  ],
+  "provenance": {
+    "fund_master": "FundOverview",
+    "investors": "LP Register",
+    "portfolio_investments": "Investment Register",
+    "valuations": "Valuations IPEV (FV Holding column used)",
+    "waterfall": "Computed via European waterfall on inputs",
+    "notes": "Synthetic generic fixture covering: 2-rounds-same-instrument (Alpha CCPS x2), 2-rounds-different-instrument (Beta equity+ccd), Gamma 2-rounds-equity, Delta single round + exit"
+  }
+}
