@@ -255,6 +255,21 @@ class Commitment(models.Model):
         max_length=15, choices=STATUS_CHOICES, default='active',
     )
 
+    # Per-LP cumulative figures. Many fund-admin Excels publish per-LP
+    # cumulative drawn-down and cumulative distributed amounts directly on
+    # the Investors / LP-Master sheet, separately from the per-event
+    # Capital Calls / Distributions sheets. We persist them here so the
+    # Called Capital / DPI dashboard tiles reflect reality on funds whose
+    # explicit event sheets are sparse. Both nullable — sparse Excels skip.
+    cumulative_called = models.DecimalField(
+        max_digits=18, decimal_places=2, null=True, blank=True,
+        help_text='Per-LP cumulative drawdown to date (from Investors/LP-Master sheet)',
+    )
+    cumulative_distributed = models.DecimalField(
+        max_digits=18, decimal_places=2, null=True, blank=True,
+        help_text='Per-LP cumulative distributions received to date',
+    )
+
     # Bank account for capital call payments
     primary_bank_account = models.ForeignKey(
         BankAccount,

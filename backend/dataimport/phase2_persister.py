@@ -668,6 +668,26 @@ def _persist_commitments(organization, scheme, rows: list) -> int:
         if cs in ('active', 'defaulted', 'transferred', 'cancelled'):
             defaults['commitment_status'] = cs
 
+        # Per-LP cumulative drawdown + distributions (Bug 3+4 fix).
+        # The Investors/LP-Master sheet in most fund-admin Excels publishes
+        # these totals per LP. Many aliases handled — `_first_present`
+        # preserves a legitimate 0.
+        _set_if(defaults, 'cumulative_called', _d(_first_present(
+            row.get('cumulative_called'),
+            row.get('drawdown_amount'),
+            row.get('drawdown'),
+            row.get('drawn_amount'),
+            row.get('called_to_date'),
+            row.get('contributed_capital'),
+        )))
+        _set_if(defaults, 'cumulative_distributed', _d(_first_present(
+            row.get('cumulative_distributed'),
+            row.get('distributions_amount'),
+            row.get('distributions_to_date'),
+            row.get('distributions_received'),
+            row.get('total_distributions'),
+        )))
+
         _safe_save(Commitment,
             lookup_kwargs={'investor': investor, 'scheme': scheme},
             defaults=defaults,
@@ -1259,6 +1279,48 @@ def _persist_distributions(scheme, rows: list, user) -> int:
     return count
 
 
+def _compute_nav_fallback(row: dict) -> Optional[Decimal]:
+    """Universal NAV computer for when source's total_nav is None/missing.
+
+    Many fund Excels store Total NAV as a formula (=C+E+F-D etc.). When the
+    workbook is saved without calculated values, openpyxl returns None for
+    those cells — Gemini sees blank, JSON has no total_nav. This helper
+    re-derives total_nav from its components, in priority order.
+
+    Two strategies (returns first non-None):
+      1. NAV per Unit × Units Outstanding — most precise when both present
+      2. ASSETS − LIABILITIES with universal AIF accounting components
+
+    Universal across funds — uses every standard component alias and works
+    even when only a subset of inputs is present.
+    """
+    # Strategy 1: NAV per unit × units (works for any unit-based fund)
+    npu = _d(row.get('nav_per_unit'))
+    units = _d(row.get('total_units_outstanding')
+               or row.get('units_outstanding') or row.get('units_os'))
+    if npu is not None and units is not None and units > 0 and npu > 0:
+        return npu * units
+
+    # Strategy 2: standard AIF accounting — assets minus liabilities
+    iaf    = _d(row.get('investments_at_fair_value')
+                or row.get('total_investments')) or Decimal('0')
+    cash   = _d(row.get('cash_and_equivalents')
+                or row.get('fund_cash')) or Decimal('0')
+    unreal = _d(row.get('unrealized_gains')
+                or row.get('unrealised_gains')) or Decimal('0')
+    real   = _d(row.get('realized_gains')
+                or row.get('realised_gains')) or Decimal('0')
+    mgmt   = _d(row.get('management_fee_payable')
+                or row.get('mgmt_fee')) or Decimal('0')
+    exp    = _d(row.get('fund_expenses')
+                or row.get('accrued_expenses')) or Decimal('0')
+
+    assets = iaf + cash + unreal + real
+    liabilities = mgmt + exp
+    computed = assets - liabilities
+    return computed if computed > 0 else None
+
+
 def _persist_nav_records(scheme, rows: list) -> int:
     from accounting.models import NAVRecord
     count = 0
@@ -1269,9 +1331,18 @@ def _persist_nav_records(scheme, rows: list) -> int:
         if not nd:
             continue
         # NOT-NULL on NAVRecord: total_nav, total_units_outstanding, nav_per_unit.
-        # Compute nav_per_unit from total_nav/units when missing; default zeros
-        # so a row still persists even on sparse periods.
-        total_nav = _d(row.get('total_nav') or row.get('net_nav') or row.get('closing_nav')) or Decimal('0')
+        # Use _first_present so a literal 0 from Gemini is preserved (vs. `or`
+        # falling through). Fall back to computed components when source has
+        # neither a direct total_nav nor any standard alias.
+        total_nav = _d(_first_present(
+            row.get('total_nav'),
+            row.get('net_nav'),
+            row.get('closing_nav'),
+        ))
+        if total_nav is None:
+            total_nav = _compute_nav_fallback(row)
+        if total_nav is None:
+            total_nav = Decimal('0')
         units     = _d(row.get('total_units_outstanding') or row.get('units_outstanding') or row.get('units_os')) or Decimal('0')
         npu       = _d(row.get('nav_per_unit'))
         if npu is None:
@@ -1391,9 +1462,10 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
     # ── (a2) Authoritative DPI numerator: sum of CAPITAL distributions only.
     #        ILPA-aligned DPI excludes interim income (interest, dividends)
     #        and GP carry payouts. Capital types = return_of_capital + STCG + LTCG.
-    #        Falls back to Gemini's total_distributions if no distribution rows
-    #        persisted (e.g. an early-stage fund pre-first-distribution).
-    from lp.models import Distribution
+    #        Falls back through three sources: Distribution events → Gemini
+    #        fund-perf totals → sum of per-LP cumulative_distributed (Bug 3 fix).
+    from lp.models import Distribution, Commitment
+    from django.db.models import Sum
     CAPITAL_DIST_TYPES = ('return_of_capital', 'stcg', 'ltcg')
     capital_dist_qs = Distribution.objects.filter(
         scheme=scheme, distribution_type__in=CAPITAL_DIST_TYPES,
@@ -1404,10 +1476,46 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
         if amt is not None:
             db_capital_distributions += amt
     gemini_total_dist = _d(_first_present(fp.get('total_distributions'), wf.get('total_distributions')))
+    # Per-LP cumulative distributions (Bug 3 fix) — set by _persist_commitments
+    # from the Investors/LP-Master sheet.
+    lp_cumulative_dist_sum = Commitment.objects.filter(
+        scheme=scheme,
+    ).aggregate(s=Sum('cumulative_distributed'))['s'] or Decimal('0')
     lp_distributions_value = (
         db_capital_distributions if db_capital_distributions > 0
-        else (gemini_total_dist or Decimal('0'))
+        else (gemini_total_dist if gemini_total_dist not in (None, Decimal('0'))
+              else lp_cumulative_dist_sum)
     )
+
+    # ── (a3) Authoritative Called Capital (Bug 4 fix) ───────────────────
+    # Source priority (universal — works across any AIF Excel):
+    #   1. Gemini fund_performance.total_called_capital  (explicit headline)
+    #   2. Sum of CapitalCall events                    (per-event rollup)
+    #   3. Sum of per-LP cumulative_called               (Investors sheet)
+    #   4. waterfall.total_capital_called                (cross-check from wf block)
+    # Many fund-admin Excels publish per-LP drawdowns on the Investors
+    # sheet only, with a sparse Capital Calls sheet — the LP sum is the
+    # truer number in that case. We prefer larger sources to avoid
+    # under-reporting Called Capital when explicit events are incomplete.
+    from lp.models import CapitalCall
+    db_capital_calls_sum = CapitalCall.objects.filter(
+        scheme=scheme,
+    ).aggregate(s=Sum('total_call_amount'))['s'] or Decimal('0')
+    lp_cumulative_called_sum = Commitment.objects.filter(
+        scheme=scheme,
+    ).aggregate(s=Sum('cumulative_called'))['s'] or Decimal('0')
+    gemini_called = _d(_first_present(
+        fp.get('total_called_capital'),
+        wf.get('total_capital_called'),
+    ))
+    # Pick the largest non-None source. This catches the Tata-style case
+    # where Capital Calls sheet has 1 row of ₹44 Cr but Investors sheet
+    # has per-LP drawdowns summing to ₹500+ Cr — without distorting funds
+    # where the explicit Capital Calls sheet IS complete.
+    called_candidates = [v for v in (
+        gemini_called, db_capital_calls_sum, lp_cumulative_called_sum,
+    ) if v is not None]
+    called_capital_value = max(called_candidates) if called_candidates else None
 
     # ── (c) Build a provenance lookup keyed by FundMetric.metric_key.
     #        Each Gemini block has a `provenance` sub-object mapping its
@@ -1571,16 +1679,36 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
             return raw
         return _ZERO if _fund_in_roc_phase else None
 
+    # ── (a4) Derived consistency — uncalled_capital and dpi must stay in
+    #        sync with the called_capital we just recomputed. Gemini's
+    #        original total_uncalled_capital was calculated against its own
+    #        (often understated) called number; recompute here so the trio
+    #        committed/called/uncalled is always coherent on the dashboard.
+    committed_val = _d(fp.get('total_committed_capital'))
+    uncalled_capital_value = None
+    if committed_val is not None and called_capital_value is not None:
+        uncalled_capital_value = max(Decimal('0'), committed_val - called_capital_value)
+    else:
+        uncalled_capital_value = _d(fp.get('total_uncalled_capital'))
+
+    # DPI = LP distributions / Called Capital. Recompute when we have
+    # better called/distributions data than Gemini's headline.
+    dpi_value = None
+    if called_capital_value and called_capital_value > 0:
+        dpi_value = (lp_distributions_value or Decimal('0')) / called_capital_value
+    else:
+        dpi_value = _d(fp.get('dpi'))
+
     # ── (b) Resolution with _first_present so 0 persists ───────────────
     metric_map = {
         'moic':                     _first_present(fp.get('moic_portfolio'), fp.get('moic')),
         'tvpi':                     fp.get('tvpi'),
-        'dpi':                      fp.get('dpi'),
+        'dpi':                      dpi_value,
         'rvpi':                     fp.get('rvpi'),
         'net_irr':                  _first_present(fp.get('net_irr_computed'), fp.get('net_irr_stated')),
         'committed_capital':        fp.get('total_committed_capital'),
-        'called_capital':           _first_present(fp.get('total_called_capital'), wf.get('total_capital_called')),
-        'uncalled_capital':         fp.get('total_uncalled_capital'),
+        'called_capital':           called_capital_value,
+        'uncalled_capital':         uncalled_capital_value,
         'invested_cost':            fp.get('total_invested_capital'),
         'realized_proceeds':        fp.get('total_realised_proceeds'),
         'lp_distributions':         lp_distributions_value,

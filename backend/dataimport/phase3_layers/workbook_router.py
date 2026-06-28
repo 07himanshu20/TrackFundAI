@@ -188,16 +188,28 @@ def classify_workbook(filepath: str) -> dict:
         domain = _classify_domain(sheet_name, header_text)
         layer = DOMAIN_TO_LAYER.get(domain, 'L1')   # safe default
 
-        # Time-series boost: any sheet with strong date-header pattern + many
-        # rows is per-period data → Layer 3 regardless of the domain inferred
-        # from anchor terms. Exceptions: identity-domains (fund_master,
-        # entities, organization_users) and valuations_kpis (per-investment
-        # snapshots, not per-period) stay in their natural layer.
-        _IDENTITY_DOMAINS_STAY = {
-            'fund_scheme_master', 'organization_users', 'entities',
-            'valuations_kpis',
+        # Time-series boost — WHITELIST approach (inverted from earlier
+        # blacklist). Only domains that are time-series by NATURE get pushed
+        # to L3 when the sheet has date headers + many rows. Every other
+        # domain keeps its natural DOMAIN_TO_LAYER mapping.
+        #
+        # Why whitelist over blacklist:
+        #   • Future-proof — new L1/L2 domains added later are safe by default
+        #   • Was a real bug: nav_accounting / portfolio_investments /
+        #     distributions / exits / capital_calls all had date columns and
+        #     were wrongly boosted to L3, where the prompt explicitly says
+        #     "DO NOT emit nav_records / portfolio_investments / …".
+        #   • L3 prompt has narrow targets (monthly_pl_rows, monthly_bs_rows,
+        #     monthly_cf_rows, portfolio_kpis_periodic) — only domains aligned
+        #     with those should be boosted.
+        _TIME_SERIES_BOOST_DOMAINS = {
+            'financials_pl_bva',   # monthly P&L / BS / CF / BvA — always time-series
+            'burn_runway',         # SaaS burn metrics — always time-series
+            'kpi_matrix',          # per-company periodic KPIs
+            'fund_pl_bs',          # fund-level P&L when monthly
+            'unknown',             # router uncertain — let L3 try as fallback
         }
-        if time_series_hint and domain not in _IDENTITY_DOMAINS_STAY:
+        if time_series_hint and domain in _TIME_SERIES_BOOST_DOMAINS:
             layer = 'L3'
 
         routing[layer].append(sheet_name)
