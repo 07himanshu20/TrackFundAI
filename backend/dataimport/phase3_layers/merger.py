@@ -157,10 +157,18 @@ def _k_compliance(r):
 
 
 def _k_portfolio(r):
+    # Universal dedup key: include BOTH tranche_number AND investment_date AND
+    # amount_invested so two genuinely-distinct tranches into the same company
+    # on the same date (different amounts) don't get collapsed.
+    # Fixed 2026-06-30: previously falling back tranche→date meant two
+    # tranches on the same day with same instrument were treated as 1.
     return (_name(r.get('company_name')),
             _norm(r.get('scheme_name')),
             _norm(r.get('instrument_type')),
-            _norm(r.get('tranche_number') or r.get('investment_date')))
+            _norm(r.get('tranche_number')),
+            _norm(r.get('investment_date')),
+            _norm(r.get('amount_invested') or r.get('cost_basis') or
+                  r.get('investment_amount')))
 
 
 def _k_valuations(r):

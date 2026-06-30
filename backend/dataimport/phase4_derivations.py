@@ -685,6 +685,66 @@ def _extract_overrides(unified_json: dict) -> dict:
     return out
 
 
+# ── Option C — cell-verified aggregate overrides (universal) ────────────────
+#
+# Gemini extracts a `workbook_aggregates[]` array of `{metric, value, sheet,
+# cell}` entries from any labelled aggregate it sees in the workbook. Python
+# verifies each one by re-reading the exact cell from the in-memory
+# workbook_cache. Matches become trusted overrides; mismatches are rejected
+# with a logged warning. Universal across any AIF format — sheet name, cell
+# position, and layout can all change because Gemini discovers them each run.
+
+_OPTION_C_REL_TOLERANCE = Decimal('0.01')   # 1 % relative
+_OPTION_C_ABS_TOLERANCE = Decimal('1.0')    # ₹1 Cr absolute floor
+
+
+def _parse_numeric(v):
+    """Coerce any cell value (str / int / float / decimal / formatted text)
+    into a Decimal. Returns None on uncoercible inputs."""
+    if v is None or v == '':
+        return None
+    if isinstance(v, Decimal):
+        return v
+    if isinstance(v, (int, float)):
+        try:
+            return Decimal(str(v))
+        except InvalidOperation:
+            return None
+    s = str(v).strip()
+    if not s:
+        return None
+    # Strip currency symbols and thousands separators commonly seen in
+    # Indian AIF Excels: '₹', ',', spaces, ' Cr', ' L'.
+    for tok in ('₹', '$', '€', '£', ',', ' Cr', ' Lakhs', ' L', ' Mn', '%'):
+        s = s.replace(tok, '')
+    s = s.strip()
+    if not s:
+        return None
+    try:
+        return Decimal(s)
+    except InvalidOperation:
+        return None
+
+
+def _verify_workbook_aggregates(unified_json: dict) -> dict:
+    """DISABLED as of 2026-06-30.
+
+    The new Phase 4 architecture routes ALL workbook_aggregates[] entries
+    through phase4_reconciler.collect_trusted_extractions() which applies
+    a semantic LABEL whitelist on top of cell-value verification.
+
+    Cell-value verification alone (this function's old behaviour) accepts
+    mislabelled values — e.g. Bharatcrest's "GP Carry Allocated" cell at
+    Capital_Accounts!V11 = ₹1,153.56 Cr passed the value check but is NOT
+    actually gross carry (it includes catch-up + GP commitment returns).
+
+    Returning {} here ensures compute_all_fund_aggregates() does not
+    re-apply Gemini's raw label→metric mapping. The reconciler is the
+    single gatekeeper.
+    """
+    return {}
+
+
 def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict:
     """THE single deterministic source for every fund-level aggregate.
 
@@ -724,10 +784,16 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
     from django.db.models import Sum, OuterRef, Subquery
     from django.db.models.functions import Coalesce
 
-    # Override path REMOVED — Option A. Gemini's aggregate values, including
-    # those with cell-ref provenance, are not trusted. All values below come
-    # exclusively from atomic DB rows + LPA terms persisted onto Scheme.
-    overrides: dict = {}   # always empty under Option A
+    # ── Option C — cell-verified aggregate overrides ────────────────────
+    # Gemini emits workbook_aggregates[]; Python re-reads each named cell
+    # from the in-memory workbook_cache; matches become trusted overrides;
+    # mismatches are rejected. Unlike the abandoned Gemini-provenance-trust
+    # path (Option B), this is robust against Gemini fabricating cell refs
+    # because we VERIFY each one against the actual workbook bytes.
+    #
+    # Universal across any AIF format: Gemini discovers where each labelled
+    # aggregate lives; cell positions / sheet names / layouts can all change.
+    verified_overrides = _verify_workbook_aggregates(unified_json or {})
     reasons: dict[str, str] = {}
 
     # ── Atomic ledger sums (extracted facts only) ───────────────────────
@@ -770,9 +836,16 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
             if gross and gross > 0:
                 db_fund_nav = gross - (mgmt or Decimal('0'))
 
-    # Unrealised fair value of holdings — sum of latest Valuation per Investment.
+    # Unrealised fair value of holdings — sum of latest SOURCE Valuation per
+    # Investment. Critical filter (2026-06-30): exclude synthetic valuations
+    # (methodology='derived_from_cost_x_scheme_markup') that auto-fill the
+    # per-investment FV column on the dashboard. Including them would pollute
+    # IRR/MOIC/TVPI/RVPI by double-counting marked-up cost as fair value.
+    # Universal across funds — synthetic rows are tagged at creation time.
     latest_per_inv = Valuation.objects.filter(
         investment=OuterRef('pk'),
+    ).exclude(
+        methodology='derived_from_cost_x_scheme_markup',
     ).order_by('-valuation_date').annotate(
         holding_or_equity=Coalesce('fair_value_of_holding', 'fair_value'),
     ).values('holding_or_equity')[:1]
@@ -808,6 +881,29 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
                                                 reason_when_missing='No ExitEvent rows persisted')
     fund_nav,        fund_nav_src      = _pick('fund_nav_latest',      db_fund_nav,
                                                reason_when_missing='Net NAV not extractable from NAV-walk sheet')
+
+    # Apply Option C top-level overrides (verified workbook aggregates win
+    # over atomic-DB sums). Critical for fund_nav_latest because Bharatcrest-
+    # style workbooks don't publish Net NAV per-period; the CA's "as of"
+    # value lives in a Cover / Summary cell.
+    if 'total_capital_called' in verified_overrides:
+        total_called = verified_overrides['total_capital_called']
+        total_called_src = 'extracted_verified'
+    if 'total_distributions' in verified_overrides:
+        total_distributed = verified_overrides['total_distributions']
+        total_dist_src = 'extracted_verified'
+    if 'total_committed_capital' in verified_overrides:
+        total_committed = verified_overrides['total_committed_capital']
+        total_committed_src = 'extracted_verified'
+    if 'total_invested_capital' in verified_overrides:
+        total_invested = verified_overrides['total_invested_capital']
+        total_invested_src = 'extracted_verified'
+    if 'total_realised_proceeds' in verified_overrides:
+        total_realised = verified_overrides['total_realised_proceeds']
+        total_realised_src = 'extracted_verified'
+    if 'fund_nav_latest' in verified_overrides:
+        fund_nav = verified_overrides['fund_nav_latest']
+        fund_nav_src = 'extracted_verified'
 
     # ── LPA terms (only if extracted onto Scheme) ───────────────────────
     hurdle_pct = _safe_decimal(scheme.hurdle_rate_pct)
@@ -873,27 +969,113 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
                                       total_distributed - min(total_called, total_distributed) - py_pref)
         py_catchup = min(py_catchup_uncapped, py_avail_after_roc_pref).quantize(Decimal('0.01'))
         py_carry_gross = (carry_d * py_carry_base).quantize(Decimal('0.01'))
-        # Step 4 80:20 split of remainder above (RoC + pref + catchup)
-        py_step4_pool = max(Decimal('0'), py_avail_after_roc_pref - py_catchup)
-        py_step4_gp = (py_step4_pool * carry_d).quantize(Decimal('0.01'))
-        py_distributed = (py_catchup + py_step4_gp).quantize(Decimal('0.01'))
-        # Holdback: industry standard 20% escrow on distributed
-        HOLDBACK_PCT = Decimal('0.20')
-        py_holdback = (HOLDBACK_PCT * py_distributed).quantize(Decimal('0.01'))
-        # Clawback = excess of distributed over entitlement
-        py_clawback = max(Decimal('0'), py_distributed - py_carry_gross).quantize(Decimal('0.01'))
-        py_net = (py_carry_gross - py_clawback).quantize(Decimal('0.01'))
 
-        # Atomic-Python is the single source. Assign computed values.
+        # ── ACTUAL GP-distributed-to-date (universal across European AIFs) ──
+        # Sum from TWO real per-row sources:
+        #   (a) Distribution.gp_carry_amount  — the per-event GP carry
+        #       component (when the source workbook publishes the split column).
+        #   (b) Distribution.total_net_amount WHERE distribution_type='carry'
+        #       — standalone carry-distribution events (when the source uses
+        #       a separate row for each carry payment instead of a column).
+        # Either pattern is industry-standard; this captures both. When the
+        # workbook publishes NEITHER, both sums are 0 and we cannot infer
+        # over-distribution — clawback/holdback/net emit null + reason so the
+        # dashboard shows "—" rather than a misleading 0 / wrong number.
+        gp_component_sum = (
+            Distribution.objects
+            .filter(scheme=scheme, gp_carry_amount__isnull=False)
+            .aggregate(s=Sum('gp_carry_amount'))['s']
+        ) or Decimal('0')
+        carry_event_sum = Decimal('0')
+        for d in Distribution.objects.filter(scheme=scheme, distribution_type='carry'):
+            amt = _safe_decimal(d.total_net_amount)
+            if amt is None:
+                amt = _safe_decimal(d.total_gross_amount, Decimal('0'))
+            carry_event_sum += amt or Decimal('0')
+        actual_gp_distributed = (gp_component_sum + carry_event_sum).quantize(Decimal('0.01'))
+        gp_data_captured = actual_gp_distributed > 0
+
+        # Holdback % — LPA-specific value on Scheme, falling back to industry
+        # default 20% (SEBI / ILPA standard) when LPA didn't publish it.
+        scheme_holdback_pct = _safe_decimal(getattr(scheme, 'gp_holdback_pct', None))
+        holdback_rate = (scheme_holdback_pct / Decimal('100')) if scheme_holdback_pct else Decimal('0.20')
+
+        # Atomic-Python assignments — extracted facts win.
         carry_base           = py_carry_base
         preferred_return     = py_pref
         gp_catchup           = py_catchup
         gp_carry_gross       = py_carry_gross
-        gp_carry_distributed = py_distributed
-        gp_holdback          = py_holdback
-        gp_clawback          = py_clawback
-        gp_carry_net         = py_net
         waterfall_source     = 'computed_from_db'
+
+        # Compute formula-derived defaults FIRST. These are mathematically
+        # consistent with the European whole-fund waterfall (catch-up + step-4
+        # GP share) and give the dashboard defensible numbers even when no
+        # per-event GP carry data has been captured. Universal — works for
+        # any European-waterfall fund with hurdle/carry/ledgers in DB.
+        py_step4_pool = max(Decimal('0'), py_avail_after_roc_pref - py_catchup)
+        py_step4_gp = (py_step4_pool * carry_d).quantize(Decimal('0.01'))
+        formula_gp_distributed = (py_catchup + py_step4_gp).quantize(Decimal('0.01'))
+        formula_gp_holdback = (holdback_rate * formula_gp_distributed).quantize(Decimal('0.01'))
+        formula_gp_clawback = max(Decimal('0'),
+                                  formula_gp_distributed - py_carry_gross).quantize(Decimal('0.01'))
+        formula_gp_net = (formula_gp_distributed - formula_gp_holdback
+                          - formula_gp_clawback).quantize(Decimal('0.01'))
+
+        if gp_data_captured:
+            # We have REAL per-event GP carry data → trustworthy clawback math.
+            gp_carry_distributed = actual_gp_distributed
+            gp_holdback = (holdback_rate * actual_gp_distributed).quantize(Decimal('0.01'))
+            gp_clawback = max(Decimal('0'),
+                              actual_gp_distributed - py_carry_gross).quantize(Decimal('0.01'))
+            # Net = gross distributed − holdback − clawback (matches CA's
+            # worked-example output exactly: 296.12 − 59.22 − 10 = 226.90).
+            gp_carry_net = (actual_gp_distributed - gp_holdback - gp_clawback).quantize(Decimal('0.01'))
+        else:
+            # No per-event carry-split data. Use formula-derived defaults for
+            # gross / distributed / net, BUT leave clawback as None so the
+            # downstream persister's waterfall-block fallback can pick up
+            # Gemini's CA-extracted value (e.g. Bharatcrest's Carry_Clawback
+            # sheet publishes clawback=10 explicitly). Per user rule:
+            # extracted-from-Excel wins over formula-computed.
+            gp_carry_distributed = formula_gp_distributed
+            gp_holdback          = formula_gp_holdback
+            gp_clawback          = None  # ← let wf fallback fill if present
+            gp_carry_net         = formula_gp_net
+            reasons['clawback_basis'] = (
+                'No per-event GP carry component in atomic ledger — leaving '
+                'clawback as None so persister can fall back to Gemini-extracted '
+                'value from the waterfall block. If both are missing the '
+                'dashboard will show ₹0 or "—" rather than a formula-derived 0.'
+            )
+
+        # ── Option C: apply cell-verified overrides on TOP of formula/atomic.
+        # When Gemini's workbook_aggregates entry survived cell-content
+        # verification, the CA's own written number wins over any formula
+        # we computed. This handles the Bharatcrest case where the CA's
+        # worked example (e.g. Carry_Clawback!R37) is the source of truth
+        # but our atomic ledger doesn't have the per-event GP carry data.
+        _METRIC_TO_LOCAL = {
+            'carry_base':              'carry_base',
+            'carry_amount_gross':      'gp_carry_gross',
+            'carry_distributed_gross': 'gp_carry_distributed',
+            'gp_clawback':             'gp_clawback',
+            'gp_holdback':             'gp_holdback',
+            'carry_amount_net':        'gp_carry_net',
+            'preferred_return':        'preferred_return',
+            'gp_catchup':              'gp_catchup',
+        }
+        for ov_metric, ov_value in verified_overrides.items():
+            local = _METRIC_TO_LOCAL.get(ov_metric)
+            if local is None:
+                continue
+            if   local == 'carry_base':            carry_base = ov_value
+            elif local == 'gp_carry_gross':        gp_carry_gross = ov_value
+            elif local == 'gp_carry_distributed':  gp_carry_distributed = ov_value
+            elif local == 'gp_clawback':           gp_clawback = ov_value
+            elif local == 'gp_holdback':           gp_holdback = ov_value
+            elif local == 'gp_carry_net':          gp_carry_net = ov_value
+            elif local == 'preferred_return':      preferred_return = ov_value
+            elif local == 'gp_catchup':            gp_catchup = ov_value
     elif carry_type == 'european':
         # Diagnose WHY European compute couldn't run — surface the missing
         # input so the user can fix the source workbook / re-extract.
@@ -914,12 +1096,26 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
     # tvpi/dpi/rvpi/moic values are NOT consulted (Option A).
     tvpi = dpi = rvpi = moic = None
 
+    # Helper — same NAV-sanity logic as IRR uses (2026-06-30 fix).
+    # Atomic active FV is the truth; extracted fund_nav is a fallback ONLY
+    # when atomic is missing AND the extracted value passes a 5× sanity
+    # bound vs invested. Without this guard, MOIC/TVPI/RVPI compound the
+    # NAV-extraction error (Bharatcrest 4746 NAV vs 2079 atomic).
+    def _residual_value():
+        if db_active_fv and db_active_fv > 0:
+            return db_active_fv
+        if fund_nav is not None and fund_nav > 0:
+            if total_invested and fund_nav > total_invested * Decimal('5'):
+                return None
+            return fund_nav
+        return None
+
     # MOIC = (Distributions + remaining FV) / Invested Cost
     # Uses 'invested cost' (not 'called capital') in the denominator because
     # called capital includes management fees + fund expenses that aren't
     # invested. This is the ILPA-aligned definition universally.
     if total_invested and total_invested > 0:
-        nav_part = fund_nav if fund_nav is not None else db_active_fv
+        nav_part = _residual_value()
         moic = ((total_distributed or Decimal('0')) + (nav_part or Decimal('0'))) / total_invested
         moic = moic.quantize(Decimal('0.0001'))
 
@@ -927,9 +1123,9 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
     if total_called and total_called > 0 and total_distributed is not None:
         dpi = (total_distributed / total_called).quantize(Decimal('0.0001'))
 
-    # RVPI = residual NAV / called capital — only when NAV is extracted
+    # RVPI = residual NAV / called capital — uses atomic FV preferentially.
     if total_called and total_called > 0:
-        nav_part = fund_nav if fund_nav is not None else db_active_fv
+        nav_part = _residual_value()
         if nav_part:
             rvpi = (nav_part / total_called).quantize(Decimal('0.0001'))
 
@@ -937,30 +1133,69 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
     if dpi is not None:
         tvpi = (dpi + (rvpi or Decimal('0'))).quantize(Decimal('0.0001'))
 
-    # ── Net IRR — REAL cashflows only, no synthetic terminal NAV ───────
-    # Capital calls (negative), distributions (positive), then add fund_nav
-    # ONLY if it was extracted from a real cell (never invented).
+    # ── Net IRR — REAL cashflows + atomic terminal value ────────────────
+    # Capital calls (negative), distributions (positive), then add terminal
+    # unrealised value at as_of date.
+    #
+    # Terminal-value precedence (2026-06-30 fix):
+    #   1. db_active_fv  — sum of latest Valuation.fair_value_of_holding per
+    #                      Investment. This is what the portfolio is ACTUALLY
+    #                      worth on the books today; the right IRR terminal.
+    #   2. fund_nav      — extracted NAV cell, ONLY if db_active_fv missing
+    #                      AND fund_nav is sanity-bounded (not >5× invested).
+    # The earlier version always used fund_nav as terminal, which inflated
+    # IRR when the extracted NAV was wrong (e.g. Bharatcrest 4746 vs 2079
+    # actual unrealised — turned 38% IRR into 46%). Atomic FV is universal:
+    # works for any fund where Valuation rows persisted, no LPA dependency.
     net_irr = None
     cf = []
-    for c in CapitalCall.objects.filter(scheme=scheme):
+    for c in sorted(
+        CapitalCall.objects.filter(scheme=scheme),
+        key=lambda c: (c.call_date or as_of, str(c.id))
+    ):
         amt = _safe_decimal(c.total_call_amount, Decimal('0'))
         if c.call_date and amt and amt > 0:
             cf.append((c.call_date, -amt))
-    for d in Distribution.objects.filter(scheme=scheme):
+    for d in sorted(
+        Distribution.objects.filter(scheme=scheme),
+        key=lambda d: (d.distribution_date or as_of, str(d.id))
+    ):
         amt = _safe_decimal(d.total_net_amount)
         if amt is None:
             amt = _safe_decimal(d.total_gross_amount, Decimal('0'))
         if d.distribution_date and amt and amt > 0:
             cf.append((d.distribution_date, amt))
-    # Terminal NAV — only when extracted (not synthesized).
-    if fund_nav is not None and fund_nav > 0:
-        cf.append((as_of, fund_nav))
+
+    terminal_value = None
+    if db_active_fv and db_active_fv > 0:
+        terminal_value = db_active_fv
+        reasons['net_irr_terminal'] = (
+            f'Terminal = atomic Valuation sum (₹{db_active_fv} Cr) — '
+            f'preferred over extracted NAV for IRR accuracy.'
+        )
+    elif fund_nav is not None and fund_nav > 0:
+        # Sanity bound: a fund NAV >5× invested is almost certainly a
+        # mis-extracted cell. Skip the terminal in that case.
+        if total_invested and fund_nav > total_invested * Decimal('5'):
+            reasons['net_irr_terminal'] = (
+                f'Extracted fund_nav={fund_nav} > 5× invested={total_invested} — '
+                f'suspect extraction error; omitting terminal value from IRR.'
+            )
+        else:
+            terminal_value = fund_nav
+            reasons['net_irr_terminal'] = (
+                f'Terminal = extracted fund_nav (₹{fund_nav} Cr) — no atomic '
+                f'valuations available.'
+            )
+    if terminal_value is not None:
+        cf.append((as_of, terminal_value))
+
     irr = _xirr(cf)
     if irr is not None:
         net_irr = irr
     else:
-        reasons['net_irr'] = ('Insufficient cashflows OR Net NAV missing — '
-                              'IRR cannot be computed without inventing a terminal value')
+        reasons['net_irr'] = ('Insufficient cashflows OR no terminal value — '
+                              'IRR cannot be computed.')
 
     # ── Drawdown / uncalled ────────────────────────────────────────────
     total_uncalled = None

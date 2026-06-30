@@ -258,6 +258,12 @@ FUND_SCHEME_MASTER_FIELDS = {
     'hurdle_rate_pct': 'Hurdle rate / preferred return percentage',
     'carry_pct': 'Carried interest percentage (e.g., 20)',
     'carry_type': 'Carry type: european (whole fund) or american (deal-by-deal)',
+    'gp_holdback_pct': (
+        'GP carry escrow holdback as % of distributed carry. Match labels like '
+        '"Clawback Provision", "GP Holdback %", "Escrow Holdback %", "20% holdback". '
+        'Industry default 20% — extract only when LPA explicitly states a different value '
+        'or omit if not stated.'
+    ),
     'management_fee_basis': 'Fee basis: committed, called, or nav',
     'management_fee_pct': 'Annual management fee percentage',
     'sponsor_commitment_pct': 'Sponsor commitment as % of scheme size',
@@ -495,6 +501,14 @@ EXITS_DISTRIBUTIONS_FIELDS = {
     'total_gross_amount': 'Total gross distribution amount',
     'total_tds_amount': 'Total TDS withheld',
     'total_net_amount': 'Total net distribution after TDS',
+    'gp_carry_amount': (
+        'Portion of this distribution paid to the GP as carried interest. '
+        'Match column labels like: "GP Carry Component", "Carried Interest Distribution", '
+        '"Carry Component (Cr)", "GP Carry", "Carry to GP", "GP Share of Distribution". '
+        'Distinct from total_net_amount (which is the whole event). Used downstream '
+        'by Python to compute clawback and net carry. Leave null when the source '
+        'workbook does not publish a per-distribution carry-component split.'
+    ),
     'distribution_status': 'Status: draft, approved, distributed',
     # Line item fields
     'investor_name': 'LP name for distribution line item',

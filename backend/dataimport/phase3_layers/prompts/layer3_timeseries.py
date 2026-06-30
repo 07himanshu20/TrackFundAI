@@ -6,6 +6,10 @@ monthly_cf_rows, budget_vs_actual, burn_runway.
 
 Highest output-token risk layer. Flavor B chunks by company-group
 (preferred) or by period-range when one company has too many periods.
+
+TEMPLATING DISCIPLINE: see layer2_universe.py docstring. Multi-line bodies
+are plain triple-quoted strings + .replace() sentinels; short conditional
+one-liners stay as f-strings for readability.
 """
 
 from ...canonical_schema import BURN_RUNWAY_FIELDS
@@ -16,8 +20,7 @@ def _vocab(fields: dict) -> str:
     return '\n'.join(f'    - {k}: {desc}' for k, desc in fields.items())
 
 
-def _schema_block() -> str:
-    return f"""
+_SCHEMA_TEMPLATE = """
 TOP-LEVEL KEYS ALLOWED IN LAYER 3:
 
   portfolio_kpis_periodic  — array  (one per (company, period) KPI row)
@@ -66,7 +69,7 @@ FIELD VOCABULARIES:
     variance_pct, is_favorable
 
 ▸ burn_runway[] (per-company SaaS/burn snapshot):
-{_vocab(BURN_RUNWAY_FIELDS)}
+__VOCAB_BURN_RUNWAY__
 
 ▸ sheet_completeness[]: sheet_name, rows_in_source, rows_extracted,
   truncated_in_prompt, target_array
@@ -85,6 +88,28 @@ DO NOT emit (other layers own these):
 """
 
 
+def _schema_block() -> str:
+    return _SCHEMA_TEMPLATE.replace('__VOCAB_BURN_RUNWAY__', _vocab(BURN_RUNWAY_FIELDS))
+
+
+_LAYER3_TEMPLATE = """__COMMON_PREAMBLE__
+
+__JSON_OUTPUT_CONTRACT__
+
+LAYER 3 SCOPE: Per-company time-series — KPIs, monthly P&L / BS / CF,
+budget-vs-actual, burn & runway.
+__CTX_BLOCK____CHUNK_BLOCK__
+WORKBOOK CONTENT (only the sheets routed to this layer; if this is a chunk,
+only the row slice listed above is included — extract every row you see and
+make no assumptions about omitted rows):
+__WORKBOOK_TEXT__
+
+__SCHEMA__
+
+Return ONLY the JSON object. No prose, no markdown fences.
+"""
+
+
 def LAYER3_PROMPT_TEMPLATE(workbook_text: str, identity_context: str = '',
                            chunk_filter: str = '') -> str:
     """Build Layer 3 prompt.
@@ -96,21 +121,17 @@ def LAYER3_PROMPT_TEMPLATE(workbook_text: str, identity_context: str = '',
         only informational so Gemini doesn't extrapolate.
     """
     schema = _schema_block()
-    ctx_block = f"\nIDENTITY CONTEXT (from Layer 1 — for reference only, do NOT re-emit):\n{identity_context}\n" if identity_context else ''
+    ctx_block = (
+        f"\nIDENTITY CONTEXT (from Layer 1 — for reference only, do NOT re-emit):\n{identity_context}\n"
+        if identity_context else ''
+    )
     chunk_block = f"\nCHUNK SCOPE: {chunk_filter}\n" if chunk_filter else ''
-    return f"""{COMMON_PREAMBLE}
-
-{JSON_OUTPUT_CONTRACT}
-
-LAYER 3 SCOPE: Per-company time-series — KPIs, monthly P&L / BS / CF,
-budget-vs-actual, burn & runway.
-{ctx_block}{chunk_block}
-WORKBOOK CONTENT (only the sheets routed to this layer; if this is a chunk,
-only the row slice listed above is included — extract every row you see and
-make no assumptions about omitted rows):
-{workbook_text}
-
-{schema}
-
-Return ONLY the JSON object. No prose, no markdown fences.
-"""
+    return (
+        _LAYER3_TEMPLATE
+        .replace('__COMMON_PREAMBLE__',      COMMON_PREAMBLE)
+        .replace('__JSON_OUTPUT_CONTRACT__', JSON_OUTPUT_CONTRACT)
+        .replace('__CTX_BLOCK__',            ctx_block)
+        .replace('__CHUNK_BLOCK__',          chunk_block)
+        .replace('__WORKBOOK_TEXT__',        workbook_text)
+        .replace('__SCHEMA__',               schema)
+    )

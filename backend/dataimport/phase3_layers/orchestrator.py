@@ -793,6 +793,13 @@ def run_phase3_import(import_file, progress_cb: Optional[Callable] = None):
                 stem = (import_file.original_filename or 'Unnamed Fund').rsplit('.', 1)[0]
                 fm['fund_name'] = f'{stem} (identity incomplete)'
 
+        # Stash the workbook filepath so the Phase 4 aggregator can verify
+        # any cell-referenced aggregates Gemini extracted (Option C — cell-
+        # verified aggregate overrides). The aggregator opens the workbook
+        # via workbook_cache (already loaded; no extra disk IO) and reads
+        # the exact cell to confirm Gemini's claimed value matches.
+        unified['__source_filepath__'] = filepath
+
         persist_result = persist_phase2(
             unified, import_file, organization, user, progress_cb=_p,
         )

@@ -7,6 +7,21 @@ compliance_records, sheet_completeness.
 
 Layer 1 owns every fund-level scalar metric (NAV, called/distributed totals,
 waterfall, performance). Layers 2 and 3 must NOT emit these — only L1 does.
+
+TEMPLATING DISCIPLINE (universal, post-2026-06-30 incident):
+  This module's multi-line prompt bodies are PLAIN triple-quoted strings
+  (no `f` prefix). Interpolation happens via `.replace('__SENTINEL__', value)`
+  so the body content can contain ANY characters — JSON examples, code
+  snippets, set notation, currency symbols — without Python interpreting
+  them as format specifiers.
+
+  Why: a single un-escaped `{...}` inside an f-string body throws
+  `ValueError: Invalid format specifier` at runtime inside parallel worker
+  threads, killing every Phase 3 L1 chunk simultaneously. Sentinel
+  templating eliminates that entire class of bug.
+
+  Short conditional one-liners (one \\n plus a variable) stay as f-strings
+  for readability — they have negligible risk of containing literal braces.
 """
 
 from ...canonical_schema import (
@@ -25,8 +40,7 @@ def _vocab(fields: dict) -> str:
     return '\n'.join(f'    - {k}: {desc}' for k, desc in fields.items())
 
 
-def _schema_block() -> str:
-    return f"""
+_SCHEMA_TEMPLATE = """
 ═══════════════════════════════════════════════════════════════════════════
 UNIVERSAL EXTRACTION PRINCIPLE — applies to every field in every section
 ═══════════════════════════════════════════════════════════════════════════
@@ -66,6 +80,12 @@ TOP-LEVEL KEYS ALLOWED IN LAYER 1 (omit any you cannot populate):
   fund_master            — object  (fund + scheme identity & lifecycle —
                                     INCLUDES extracted LPA terms: hurdle %,
                                     carry %, mgmt-fee %, inception date)
+  workbook_aggregates    — array   (Option C — cell-verified overrides.
+                                    Whenever you SEE a labeled aggregate
+                                    value in ANY sheet, emit one entry per
+                                    label. Python downstream re-reads the
+                                    cell to confirm. Universal across any
+                                    sheet name / cell position / layout.)
   investors              — array   (one per LP row — EMIT ALL rows)
   commitments            — array   (one per LP commitment — EMIT ALL rows)
   capital_calls          — array   (one per call header — EMIT ALL rows)
@@ -105,24 +125,39 @@ ATOMIC-ROW COMPLETENESS IS THE PRIORITY:
 FIELD VOCABULARIES:
 
 ▸ fund_master (object):
-{_vocab(FUND_SCHEME_MASTER_FIELDS)}
+__VOCAB_FUND_MASTER__
 
 ▸ investors[] (per-LP):
-{_vocab(INVESTORS_AML_FIELDS)}
+__VOCAB_INVESTORS__
 
 ▸ commitments[] (per-commitment; often same rows as investors):
-{_vocab(COMMITMENTS_FIELDS)}
+__VOCAB_COMMITMENTS__
 
 ▸ capital_calls[] (per-call header):
-{_vocab(CAPITAL_CALLS_FIELDS)}
+__VOCAB_CAPITAL_CALLS__
 
 ▸ distributions[] (per-distribution header — use NET amounts, Rule 29):
     scheme_name, distribution_number, distribution_date,
     distribution_type, total_gross_amount, total_tds_amount,
-    total_net_amount, distribution_status, source_description
+    total_net_amount, gp_carry_amount, distribution_status, source_description
+
+    GP CARRY COMPONENT (universal, per-row):
+      If the Distributions sheet has a column labeled "GP Carry Component",
+      "Carried Interest Distribution", "Carry Component (Cr)", "GP Carry",
+      "Carry to GP", or "GP Share of Distribution", extract that VALUE
+      per row into gp_carry_amount. This is the portion of THIS distribution
+      paid to the GP as carry (distinct from total_net_amount which is the
+      whole event paid out to LPs + GP combined).
+
+      Python downstream uses Σ gp_carry_amount to detect over-distribution
+      → clawback. WITHOUT this per-row data the dashboard cannot compute
+      clawback / GP holdback / net-after-clawback.
+
+      Leave gp_carry_amount NULL on a row only when the source sheet has
+      no such column or that row has no GP carry component.
 
 ▸ nav_records[] (per-period — emit ALL periods, sorted ascending by period_end):
-{_vocab(NAV_ACCOUNTING_FIELDS)}
+__VOCAB_NAV__
 
 ▸ waterfall (object) — EXTRACT-FIRST. DO NOT compute. DO NOT assume.
 
@@ -183,7 +218,7 @@ FIELD VOCABULARIES:
       sheet text or Fund_Overview reporting status)
 
   Allowed waterfall keys (omit any you cannot extract):
-{_vocab(WATERFALL_CARRY_FIELDS)}
+__VOCAB_WATERFALL__
     - step_1_return_of_capital
     - step_2_preferred_return
     - step_3_catchup_amount
@@ -241,6 +276,61 @@ FIELD VOCABULARIES:
   net_irr_cashflows: FORBIDDEN. Python builds cashflows from
     capital_calls[] and distributions[] directly. Do not emit this array.
 
+▸ workbook_aggregates[] (Option C — cell-verified aggregate overrides):
+
+  PURPOSE: When the source workbook contains a verified labeled aggregate
+  value in a specific cell (e.g. "Carry Base = 1,430.60" written by the CA
+  in `Fund_Overview!B60`, or the carry summary in `Carry_Clawback`), emit
+  ONE entry per labeled aggregate. Python re-reads the exact cell from the
+  workbook and verifies your claimed value before accepting the override.
+
+  WHY THIS PATTERN IS UNIVERSAL: You scan the workbook and discover where
+  the aggregates live. Cell positions can move, sheet names can change,
+  layouts can flip — none of that matters because you (the LLM) find the
+  label each time and emit the cell ref you actually saw. Python verifies
+  by re-reading that exact ref; no hardcoded coordinates anywhere.
+
+  HARD RULES:
+    • Emit ONLY when you actually see a labeled aggregate written down in
+      a specific cell. NEVER fabricate a cell ref to legitimise a computed
+      value. Python will compare your claimed value against the actual
+      cell value; mismatches are rejected and logged.
+    • The `cell` field MUST be the cell containing the VALUE (not the cell
+      containing the label). If label is in column A and value in column B,
+      emit the column B cell.
+    • If the same aggregate appears in multiple sheets, emit one entry per
+      sheet — Python deduplicates after verification.
+    • If the workbook doesn't publish a labeled aggregate for a metric,
+      OMIT IT — Python will derive from atomic ledger rows instead.
+
+  Each entry:
+    {
+      "metric":     "carry_base",                  // canonical name; see list below
+      "value":      1430.60,                       // numeric value as you read it
+      "sheet":      "Fund_Overview",               // exact sheet name (case-sensitive)
+      "cell":       "B60",                         // A1-style cell ref of the VALUE
+      "label_text": "Carry Base (Total Profit...)" // optional — for audit
+    }
+
+  Canonical `metric` names (use these exact strings):
+    - carry_base              : Total profit above capital (carry base)
+    - carry_amount_gross      : GP carry entitlement (= carry% × carry_base)
+    - carry_distributed_gross : GP carry actually distributed to date (may
+                                exceed entitlement → triggers clawback)
+    - gp_clawback             : Clawback provision (excess of distributed
+                                over entitlement)
+    - gp_holdback             : Escrow holdback (% of distributed)
+    - carry_amount_net        : Net carry to GP (distributed − holdback − clawback)
+    - preferred_return        : Total preferred return accrued
+    - gp_catchup              : GP catch-up amount
+    - return_of_capital       : Step 1 return-of-capital total
+    - total_capital_called    : Cumulative capital called
+    - total_distributions     : Cumulative net distributions
+    - total_committed_capital : Total LP committed capital
+    - total_invested_capital  : Total invested cost in portfolio
+    - total_realised_proceeds : Cumulative realised exit proceeds
+    - fund_nav_latest         : Latest Net NAV (only if a NUMERIC cell exists)
+
 ▸ entities[] (per service entity):
     entity_type (sponsor / trustee / investment_manager / custodian / auditor /
                  legal_counsel / registrar / valuer),
@@ -267,20 +357,41 @@ DO NOT emit these (other layers handle them — would be discarded by merger):
 """
 
 
-def LAYER1_PROMPT_TEMPLATE(workbook_text: str, identity_context: str = '') -> str:
-    """Build Layer 1 prompt. identity_context is empty for L1 — it IS the identity layer."""
-    schema = _schema_block()
-    return f"""{COMMON_PREAMBLE}
+def _schema_block() -> str:
+    return (
+        _SCHEMA_TEMPLATE
+        .replace('__VOCAB_FUND_MASTER__',   _vocab(FUND_SCHEME_MASTER_FIELDS))
+        .replace('__VOCAB_INVESTORS__',     _vocab(INVESTORS_AML_FIELDS))
+        .replace('__VOCAB_COMMITMENTS__',   _vocab(COMMITMENTS_FIELDS))
+        .replace('__VOCAB_CAPITAL_CALLS__', _vocab(CAPITAL_CALLS_FIELDS))
+        .replace('__VOCAB_NAV__',           _vocab(NAV_ACCOUNTING_FIELDS))
+        .replace('__VOCAB_WATERFALL__',     _vocab(WATERFALL_CARRY_FIELDS))
+    )
 
-{JSON_OUTPUT_CONTRACT}
+
+_LAYER1_TEMPLATE = """__COMMON_PREAMBLE__
+
+__JSON_OUTPUT_CONTRACT__
 
 LAYER 1 SCOPE: Identity, fund-level scalars, capital/distribution ledgers,
 NAV walk, waterfall, performance summary, service entities, compliance.
 
 WORKBOOK CONTENT (only the sheets routed to this layer):
-{workbook_text}
+__WORKBOOK_TEXT__
 
-{schema}
+__SCHEMA__
 
 Return ONLY the JSON object. No prose, no markdown fences.
 """
+
+
+def LAYER1_PROMPT_TEMPLATE(workbook_text: str, identity_context: str = '') -> str:
+    """Build Layer 1 prompt. identity_context is empty for L1 — it IS the identity layer."""
+    schema = _schema_block()
+    return (
+        _LAYER1_TEMPLATE
+        .replace('__COMMON_PREAMBLE__',      COMMON_PREAMBLE)
+        .replace('__JSON_OUTPUT_CONTRACT__', JSON_OUTPUT_CONTRACT)
+        .replace('__WORKBOOK_TEXT__',        workbook_text)
+        .replace('__SCHEMA__',               schema)
+    )

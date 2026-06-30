@@ -463,6 +463,19 @@ class Distribution(models.Model):
         help_text='Total net distribution after TDS',
     )
 
+    # Per-event GP carry breakdown. Universal across European whole-fund AIFs
+    # — the Distributions sheet often has a "GP Carry Component" column that
+    # tracks how much of THIS distribution was paid to the GP as carry vs
+    # returned to LPs as capital / preferred return. Captured here as an
+    # atomic fact so the waterfall computation can detect over-distribution
+    # → clawback. Null when the source workbook does not publish the split.
+    gp_carry_amount = models.DecimalField(
+        max_digits=18, decimal_places=2, null=True, blank=True,
+        help_text='Portion of this distribution paid as GP carry (when reported in source). '
+                  'Sum across all distributions = total carry GP has received to date — '
+                  'used to compute clawback when over-distribution occurs.',
+    )
+
     # Source of distribution
     related_exit_event = models.ForeignKey(
         'investments.ExitEvent',

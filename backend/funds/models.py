@@ -276,6 +276,19 @@ class Scheme(models.Model):
         max_length=10, choices=CARRY_TYPE_CHOICES, default='european',
     )
 
+    # GP carry escrow / holdback policy. Industry / SEBI default is 20% of
+    # carry distributed sits in escrow as protection against clawback. Some
+    # LPAs use 0% (no escrow), 25%, or other rates — store it explicitly so
+    # the waterfall computation uses the fund's actual LPA value, not a
+    # hardcoded global default. Null means "extractor could not find it";
+    # the aggregator falls back to industry default 20%.
+    gp_holdback_pct = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True,
+        help_text='GP carry escrow holdback as % of distributed carry '
+                  '(industry default 20%; LPA-specific value extracted from '
+                  'Fund_Overview "Clawback Provision" / "Escrow Holdback %" cell).',
+    )
+
     # Management fee config
     management_fee_basis = models.CharField(
         max_length=10, choices=FEE_BASIS_CHOICES, default='committed',

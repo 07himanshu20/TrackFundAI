@@ -139,3 +139,75 @@ def cache_size() -> int:
     """Number of workbooks currently in memory (diagnostic)."""
     with _LOCK:
         return len(_CACHE)
+
+
+import re as _re
+
+
+def _parse_cell_ref(cell_ref: str):
+    """Convert an A1-style cell reference into (col_idx_1based, row_idx_1based).
+
+    Accepts: 'B60', 'AA12', 'b60' (case-insensitive).
+    Returns: (col_idx, row_idx) — both 1-based, openpyxl convention.
+              None on malformed input.
+
+    Universal across any A1-style reference; supports multi-letter columns
+    up to ZZ (which is more than any realistic workbook).
+    """
+    if not cell_ref:
+        return None
+    s = str(cell_ref).strip().upper()
+    # Strip any leading '$' (Excel absolute references like '$B$60').
+    s = s.replace('$', '')
+    m = _re.match(r'^([A-Z]+)(\d+)$', s)
+    if not m:
+        return None
+    col_letters, row_str = m.group(1), m.group(2)
+    col_idx = 0
+    for ch in col_letters:
+        col_idx = col_idx * 26 + (ord(ch) - ord('A') + 1)
+    row_idx = int(row_str)
+    if row_idx < 1:
+        return None
+    return col_idx, row_idx
+
+
+def get_cell_value(filepath: str, sheet_name: str, cell_ref: str):
+    """Read a single cell's value from the cached workbook.
+
+    Universal — works with any sheet name (case-sensitive, must match what
+    openpyxl returned) and any A1-style cell ref ('B60', 'AA12', '$B$60').
+
+    Used by Option C (cell-verified aggregate overrides): when Gemini claims
+    a labeled aggregate lives at, e.g., `Fund_Overview!B60`, Python calls
+    this to read the actual cell value and compare.
+
+    Returns the raw cell value (str/int/float/datetime/None) so caller can
+    apply its own type coercion + tolerance. Returns None when:
+      • the sheet doesn't exist
+      • the cell reference is malformed
+      • the row/col is out of bounds
+      • the cell is genuinely empty
+    """
+    if not filepath or not sheet_name or not cell_ref:
+        return None
+    try:
+        cached = load_workbook(filepath)
+    except Exception as e:
+        logger.warning(f'[workbook_cache] get_cell_value({sheet_name}!{cell_ref}) '
+                       f'workbook load failed: {e}')
+        return None
+    sheet_data = cached['data'].get(sheet_name)
+    if not sheet_data:
+        return None
+    parsed = _parse_cell_ref(cell_ref)
+    if not parsed:
+        return None
+    col_idx, row_idx = parsed
+    rows = sheet_data['rows']
+    if row_idx > len(rows):
+        return None
+    row = rows[row_idx - 1]
+    if col_idx > len(row):
+        return None
+    return row[col_idx - 1]

@@ -4,6 +4,17 @@ Layer 2 — Investment Universe prompt.
 Extracts: portfolio_investments, valuations, tranches, exits, quoted_unquoted.
 Per-investment level data. Flavor B chunks this layer by company-range when
 estimated output > token budget.
+
+TEMPLATING DISCIPLINE (universal, post-2026-06-30):
+  Multi-line prompt bodies are PLAIN triple-quoted strings (no `f` prefix).
+  Interpolation happens via `.replace('__SENTINEL__', value)` calls so the
+  body content can contain ANY characters — JSON examples, code snippets,
+  set notation, currency symbols — without Python interpreting them as
+  format specifiers. See the L1 incident on 2026-06-30 for why this matters.
+
+  Short conditional one-liners (a single \\n plus a variable) stay as
+  f-strings for readability; they have negligible risk of containing
+  literal braces.
 """
 
 from ...canonical_schema import (
@@ -19,8 +30,7 @@ def _vocab(fields: dict) -> str:
     return '\n'.join(f'    - {k}: {desc}' for k, desc in fields.items())
 
 
-def _schema_block() -> str:
-    return f"""
+_SCHEMA_TEMPLATE = """
 TOP-LEVEL KEYS ALLOWED IN LAYER 2:
 
   portfolio_investments  — array  (one row per ACTUAL investment — Rule 7)
@@ -34,17 +44,17 @@ FIELD VOCABULARIES:
 
 ▸ portfolio_investments[] (per-investment — include irr_pct per Rule 21,
   and moic per Rule 24):
-{_vocab(PORTFOLIO_INVESTMENTS_FIELDS)}
+__VOCAB_PORTFOLIO_INVESTMENTS__
 
 ▸ valuations[] (per (investment, valuation_date); PREFER fair_value_of_holding;
   ALWAYS include cost_basis per Rule 26 for row disambiguation):
-{_vocab(VALUATIONS_KPIS_FIELDS)}
+__VOCAB_VALUATIONS__
 
 ▸ exits[] (per exit event):
-{_vocab(EXITS_DISTRIBUTIONS_FIELDS)}
+__VOCAB_EXITS__
 
 ▸ quoted_unquoted[] (per investment listing status):
-{_vocab(QUOTED_UNQUOTED_FIELDS)}
+__VOCAB_QUOTED_UNQUOTED__
 
 ▸ sheet_completeness[]: sheet_name, rows_in_source, rows_extracted,
   truncated_in_prompt, target_array
@@ -68,6 +78,34 @@ DO NOT emit (other layers own these):
 """
 
 
+def _schema_block() -> str:
+    return (
+        _SCHEMA_TEMPLATE
+        .replace('__VOCAB_PORTFOLIO_INVESTMENTS__', _vocab(PORTFOLIO_INVESTMENTS_FIELDS))
+        .replace('__VOCAB_VALUATIONS__',            _vocab(VALUATIONS_KPIS_FIELDS))
+        .replace('__VOCAB_EXITS__',                 _vocab(EXITS_DISTRIBUTIONS_FIELDS))
+        .replace('__VOCAB_QUOTED_UNQUOTED__',       _vocab(QUOTED_UNQUOTED_FIELDS))
+    )
+
+
+_LAYER2_TEMPLATE = """__COMMON_PREAMBLE__
+
+__JSON_OUTPUT_CONTRACT__
+
+LAYER 2 SCOPE: Investment universe — portfolio companies, per-investment
+tranches, valuations (latest per investment), exits, quoted/unquoted status.
+__CTX_BLOCK____CHUNK_BLOCK__
+WORKBOOK CONTENT (only the sheets routed to this layer; if this is a chunk,
+only the row slice listed above is included — extract every row you see and
+make no assumptions about omitted rows):
+__WORKBOOK_TEXT__
+
+__SCHEMA__
+
+Return ONLY the JSON object. No prose, no markdown fences.
+"""
+
+
 def LAYER2_PROMPT_TEMPLATE(workbook_text: str, identity_context: str = '',
                            chunk_filter: str = '') -> str:
     """Build Layer 2 prompt.
@@ -80,21 +118,17 @@ def LAYER2_PROMPT_TEMPLATE(workbook_text: str, identity_context: str = '',
         you see, do not extrapolate missing rows.
     """
     schema = _schema_block()
-    ctx_block = f"\nIDENTITY CONTEXT (from Layer 1 — for reference only, do NOT re-emit):\n{identity_context}\n" if identity_context else ''
+    ctx_block = (
+        f"\nIDENTITY CONTEXT (from Layer 1 — for reference only, do NOT re-emit):\n{identity_context}\n"
+        if identity_context else ''
+    )
     chunk_block = f"\nCHUNK SCOPE: {chunk_filter}\n" if chunk_filter else ''
-    return f"""{COMMON_PREAMBLE}
-
-{JSON_OUTPUT_CONTRACT}
-
-LAYER 2 SCOPE: Investment universe — portfolio companies, per-investment
-tranches, valuations (latest per investment), exits, quoted/unquoted status.
-{ctx_block}{chunk_block}
-WORKBOOK CONTENT (only the sheets routed to this layer; if this is a chunk,
-only the row slice listed above is included — extract every row you see and
-make no assumptions about omitted rows):
-{workbook_text}
-
-{schema}
-
-Return ONLY the JSON object. No prose, no markdown fences.
-"""
+    return (
+        _LAYER2_TEMPLATE
+        .replace('__COMMON_PREAMBLE__',      COMMON_PREAMBLE)
+        .replace('__JSON_OUTPUT_CONTRACT__', JSON_OUTPUT_CONTRACT)
+        .replace('__CTX_BLOCK__',            ctx_block)
+        .replace('__CHUNK_BLOCK__',          chunk_block)
+        .replace('__WORKBOOK_TEXT__',        workbook_text)
+        .replace('__SCHEMA__',               schema)
+    )

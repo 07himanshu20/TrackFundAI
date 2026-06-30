@@ -490,18 +490,162 @@ def persist_phase2(data: dict, import_file, organization, user,
         _p(93, 'Phase 2: NAV walk…')
         counts['nav_records'] = _persist_nav_records(scheme, data.get('nav_records') or [])
 
-        # ---- UNIVERSAL aggregator: deterministic fund-level metrics ----
-        # Single source of truth — runs ONCE on persisted atomic ledger
-        # rows + extracted LPA terms + Gemini's cell-ref-extracted overrides.
-        # Both CarriedInterest and FundMetric write from the same dict so
-        # they cannot diverge. Re-importing the same file MUST yield the
-        # same numbers because all inputs are deterministic.
-        _p(95, 'Phase 2: Aggregating fund-level metrics (deterministic Python)…')
-        from .phase4_derivations import compute_all_fund_aggregates
-        aggregates = compute_all_fund_aggregates(fund, scheme, data)
-        if aggregates.get('reasons'):
-            for k, why in aggregates['reasons'].items():
-                logger.info(f'[phase4.aggregator] {k}: {why}')
+        # ---- Compliance (SEBI + Calendar) ─────────────────────────────
+        # Universal: persist any compliance_records[] entries Phase 3 emitted.
+        try:
+            sebi_n, cal_n = _persist_compliance(
+                organization, fund, scheme, data.get('compliance_records') or []
+            )
+            counts['sebi_reports'] = sebi_n
+            counts['compliance_calendar'] = cal_n
+        except Exception as e:
+            logger.warning(f'[compliance] persistence failed (non-fatal): {e}')
+
+        # ---- Auto-Valuation for Investments missing FV ────────────────
+        # Universal: when source workbook publishes valuations for only some
+        # investments, derive FV for the rest using cost × scheme markup.
+        # Synthetic rows are flagged via methodology so the audit drawer can
+        # tell them apart from source-reported valuations.
+        try:
+            counts['auto_valuations'] = _auto_create_valuations(scheme)
+        except Exception as e:
+            logger.warning(f'[auto_valuation] failed (non-fatal): {e}')
+
+        # ---- Sector multi-source backfill ─────────────────────────────
+        # Universal: scan every Phase 3 block + PortfolioCompany for sector.
+        try:
+            counts['sectors_backfilled'] = _backfill_investment_sector_multi(scheme, data)
+        except Exception as e:
+            logger.warning(f'[sector_backfill] failed (non-fatal): {e}')
+
+        # ---- LP per-investor cumulative rollups (added 2026-06-30) ──────
+        # Commitment.cumulative_called / cumulative_distributed are NULL on
+        # almost every fund-admin Excel (the master sheet only shows raw
+        # commitment, not running drawdown totals).
+        #
+        # Two-step fill:
+        #   (a) PRIMARY: sum per-LP LineItem rows (most accurate, used
+        #       whenever the source workbook actually publishes per-LP
+        #       breakdowns per capital call / distribution).
+        #   (b) FALLBACK: pro-rate the SCHEME total by each LP's commitment
+        #       share. Universal across any European whole-fund AIF since
+        #       all LPs are called pro-rata under the standard LPA.
+        try:
+            from lp.models import (Commitment, CapitalCall, CapitalCallLineItem,
+                                   Distribution, DistributionLineItem)
+            from django.db.models import Sum
+
+            scheme_total_committed = (Commitment.objects.filter(scheme=scheme)
+                                      .aggregate(s=Sum('commitment_amount'))['s']) or Decimal('0')
+            scheme_total_called = (CapitalCall.objects.filter(scheme=scheme)
+                                   .aggregate(s=Sum('total_call_amount'))['s']) or Decimal('0')
+            # Sum NET first, fall back to gross for Distribution.
+            scheme_total_dist_net = (Distribution.objects.filter(scheme=scheme)
+                                     .aggregate(s=Sum('total_net_amount'))['s']) or Decimal('0')
+            scheme_total_dist_gross = (Distribution.objects.filter(scheme=scheme)
+                                       .aggregate(s=Sum('total_gross_amount'))['s']) or Decimal('0')
+            scheme_total_dist = scheme_total_dist_net if scheme_total_dist_net > 0 else scheme_total_dist_gross
+
+            rolled_a = rolled_b = 0
+            for c in Commitment.objects.filter(scheme=scheme):
+                line_called = (CapitalCallLineItem.objects.filter(commitment=c)
+                               .aggregate(s=Sum('called_amount'))['s']) or Decimal('0')
+                line_dist = (DistributionLineItem.objects.filter(commitment=c)
+                             .aggregate(s=Sum('net_amount'))['s']) or Decimal('0')
+
+                new_called = line_called if line_called > 0 else None
+                new_dist   = line_dist   if line_dist   > 0 else None
+
+                # Pro-rate fallback when LineItems missing AND we have a
+                # commitment share to apply.
+                if (new_called is None or new_dist is None) and \
+                   c.commitment_amount and scheme_total_committed > 0:
+                    share = c.commitment_amount / scheme_total_committed
+                    if new_called is None and scheme_total_called > 0:
+                        new_called = (scheme_total_called * share).quantize(Decimal('0.01'))
+                    if new_dist is None and scheme_total_dist > 0:
+                        new_dist = (scheme_total_dist * share).quantize(Decimal('0.01'))
+
+                changed = False
+                if new_called is not None and (c.cumulative_called or Decimal('0')) != new_called:
+                    c.cumulative_called = new_called
+                    changed = True
+                if new_dist is not None and (c.cumulative_distributed or Decimal('0')) != new_dist:
+                    c.cumulative_distributed = new_dist
+                    changed = True
+                if changed:
+                    c.save(update_fields=['cumulative_called', 'cumulative_distributed'])
+                    if line_called > 0 or line_dist > 0:
+                        rolled_a += 1
+                    else:
+                        rolled_b += 1
+            logger.info(
+                f'[lp_rollup] backfilled {rolled_a} from LineItems + '
+                f'{rolled_b} via pro-rate fallback (of {Commitment.objects.filter(scheme=scheme).count()} commitments)'
+            )
+        except Exception as e:
+            logger.warning(f'[lp_rollup] failed (non-fatal): {e}')
+
+        # ─── Phase 4: Reconciler + Python waterfall (fast, deterministic) ──
+        # Order of resolution per metric (universal across all funds):
+        #   1. Trusted extraction (workbook_aggregates with label-whitelist OK)
+        #   2. Python waterfall on persisted atomic ledger + LPA terms
+        #   3. None  (only when neither yields a number)
+        #
+        # Gemini Code Execution was removed from the primary path on
+        # 2026-06-30 because it took 600s+ for one Bharatcrest call. It is
+        # kept on disk (phase4_gemini_compute.py) for an optional async
+        # validator post-import. Primary path is now Python-only, <5s.
+        _p(95, 'Phase 4: Reconciler (extracted-wins) + Python waterfall…')
+        aggregates: dict = {}
+        phase4_audit: dict = {}
+
+        try:
+            from .phase4_derivations import compute_all_fund_aggregates as _py_waterfall
+            from .phase4_reconciler  import reconcile
+
+            # Python waterfall computes every fund-level + per-investment
+            # metric from atomic DB rows. Sub-second for 50 companies,
+            # ~2-3s for 200 companies. Deterministic by construction.
+            py_result = _py_waterfall(fund, scheme, data) or {}
+
+            # Reconciler picks per metric: trusted-extraction > python > None
+            recon = reconcile(data, {'flat': py_result, 'metrics': {}})
+            aggregates = dict(recon['flat'] or {})
+
+            # Fill any keys the reconciler left None from the Python result
+            # (reconciler only knows about its METRIC_CONTRACT; legacy keys
+            # like step_1_return_of_capital still come from py_result.)
+            for k, v in py_result.items():
+                if aggregates.get(k) is None and v is not None:
+                    aggregates[k] = v
+
+            phase4_audit = {
+                'extracted_count':   recon['extracted_count'],
+                'computed_count':    recon['computed_count'],
+                'unavailable_count': recon['unavailable_count'],
+                'provenance':        recon['provenance'],
+            }
+            logger.info(
+                f'[phase4.new] OK — extracted={phase4_audit["extracted_count"]}, '
+                f'python_computed={phase4_audit["computed_count"]}, '
+                f'unavailable={phase4_audit["unavailable_count"]}'
+            )
+            if py_result.get('reasons'):
+                for k, why in py_result['reasons'].items():
+                    logger.info(f'[phase4.py] {k}: {why}')
+        except Exception as e:
+            logger.exception(f'[phase4.new] failed: {e}')
+            phase4_audit['error'] = str(e)
+
+        if phase4_audit and hasattr(import_file, 'metadata'):
+            try:
+                meta = dict(import_file.metadata or {})
+                meta['phase4_audit'] = phase4_audit
+                import_file.metadata = meta
+                import_file.save(update_fields=['metadata'])
+            except Exception as e:
+                logger.warning(f'[phase4.audit] could not stash audit: {e}')
 
         _p(96, 'Phase 2: Carry + fund metrics…')
         _persist_carried_interest(scheme, aggregates, data.get('waterfall') or {}, fp)
@@ -563,6 +707,19 @@ def persist_phase2(data: dict, import_file, organization, user,
         f'KPI:{counts.get("portfolio_kpis",0)} '
         f'IRR4:{counts.get("phase4_irr_set",0)} MOIC4:{counts.get("phase4_moic_set",0)}'
     )
+
+    # Universal cache invalidation at the data-write boundary.
+    # Previously only the upload-API view invalidated cache; script/management/
+    # CLI triggered imports left stale cached API responses for up to 10 min.
+    # Now every import (regardless of how it was triggered) flushes the
+    # affected fund's cache so the dashboard sees the new data immediately.
+    try:
+        from config.cache_utils import invalidate_fund_cache
+        invalidate_fund_cache(organization.id, fund.id)
+        logger.info(f'[cache] invalidated fund={fund.id} org={organization.id}')
+    except Exception as e:
+        logger.warning(f'[cache] invalidation failed (non-fatal): {e}')
+
     return {
         'counts': counts,
         'summary': summary,
@@ -623,6 +780,12 @@ def _persist_scheme(fund, scheme_name: str, fm: dict):
     _set_if(defaults, 'hurdle_rate_pct', _d(fm.get('hurdle_rate_pct')))
     _set_if(defaults, 'carry_pct', _d(fm.get('carry_pct')))
     _set_if(defaults, 'carry_type', _str(fm.get('carry_type'), 10).lower() or 'european')
+    _set_if(defaults, 'gp_holdback_pct', _d(_first_present(
+        fm.get('gp_holdback_pct'),
+        fm.get('escrow_holdback_pct'),
+        fm.get('clawback_holdback_pct'),
+        fm.get('holdback_pct'),
+    )))
     _set_if(defaults, 'management_fee_basis', _str(fm.get('management_fee_basis'), 16).lower() or 'committed')
     _set_if(defaults, 'management_fee_pct', _d(fm.get('management_fee_pct')))
     _set_if(defaults, 'sponsor_commitment_pct', _d(fm.get('sponsor_commitment_pct')))
@@ -879,6 +1042,22 @@ def _persist_portfolio(organization, scheme, rows: list, valuation_rows: list, u
     """
     from investments.models import PortfolioCompany, Investment, InvestmentTranche
 
+    # ── Universal idempotency: drop stale Investments before re-persisting.
+    # Without this, every re-import accumulates extra Investment rows when
+    # the (instrument_type, stage_key) natural key differs by even one
+    # character between runs (e.g. CCPS vs ccps, "Series A" vs date string).
+    # Bharatcrest grew from 69 → 79 across 5 imports for exactly this reason.
+    # Cascade removes child Tranches / Valuations / Exits / KPIs — they will
+    # be re-created in the same Phase 2 pass from the current JSON.
+    # Fixed 2026-06-30.
+    stale_count = Investment.objects.filter(scheme=scheme).count()
+    if stale_count > 0:
+        Investment.objects.filter(scheme=scheme).delete()
+        logger.info(
+            f'[stale_cleanup] dropped {stale_count} stale Investment row(s) '
+            f'(plus cascading Tranches/Valuations/Exits/KPIs) before re-import'
+        )
+
     # Index latest FV holding + valuation_date per company for the IRR fallback.
     latest_fv_by_company: dict[str, tuple[date, Decimal]] = {}
     for vr in (valuation_rows or []):
@@ -1042,6 +1221,14 @@ def _persist_portfolio(organization, scheme, rows: list, valuation_rows: list, u
             inv_defaults['portfolio_company'] = co
         if user:
             inv_defaults.setdefault('created_by', user)
+
+        # Universal sector fallback: if row data didn't carry a sector but
+        # the PortfolioCompany has one (extracted from a master / cover
+        # sheet), copy it onto the Investment. Dashboard tile reads
+        # Investment.sector directly. Fix added 2026-06-30 for Bharatcrest
+        # where Investment.sector=0/69 even though PortfolioCompany.sector=80%.
+        if not inv_defaults.get('sector') and co and co.sector:
+            inv_defaults['sector'] = co.sector
 
         inv, created = _safe_save(Investment,
             lookup_kwargs={'scheme': scheme, 'company_name': name,
@@ -1298,6 +1485,19 @@ def _persist_distributions(scheme, rows: list, user) -> int:
         }
         _set_if(defaults, 'total_tds_amount', _d(row.get('total_tds_amount')))
         _set_if(defaults, 'total_net_amount', net)
+        # GP Carry Component per row — universal across European whole-fund
+        # AIFs that publish a carry-breakdown column. Used downstream by the
+        # waterfall aggregator to compute clawback and net carry from the
+        # actual amounts the GP has received, not formula-derived placeholders.
+        gp_carry = _d(_first_present(
+            row.get('gp_carry_amount'),
+            row.get('gp_carry_component'),
+            row.get('carried_interest_distribution'),
+            row.get('carry_component'),
+            row.get('gp_carry'),
+            row.get('carry_to_gp'),
+        ))
+        _set_if(defaults, 'gp_carry_amount', gp_carry)
         ds = _str(row.get('distribution_status') or row.get('status'), 16).lower()
         if ds in ('draft', 'approved', 'distributed'):
             defaults['distribution_status'] = ds
@@ -1310,6 +1510,332 @@ def _persist_distributions(scheme, rows: list, user) -> int:
         )
         count += 1
     return count
+
+
+def _persist_compliance(organization, fund, scheme, rows: list) -> tuple[int, int]:
+    """Persist compliance_records[] from Phase 3 into SEBIReport + ComplianceCalendar.
+
+    Universal across all AIFs — uses heuristics that work for any
+    fund-admin Excel that emits a compliance/regulatory tab.
+
+    Row shape (variable across funds; we accept any subset):
+      {fund_name, report_type, compliance_type, calendar_title,
+       due_date, filing_status, calendar_status, filed_date,
+       regulation_reference, calendar_notes,
+       reporting_period_start, reporting_period_end}
+
+    Routing:
+      • If row has report_type in {qar, aar, quarterly, annual, sebi...} AND
+        a reporting period end date → SEBIReport (formal SEBI filing).
+      • Otherwise → ComplianceCalendar (any other deadline/event).
+
+    Returns (sebi_count, calendar_count).
+    """
+    from compliance.models import SEBIReport, ComplianceCalendar
+    sebi_count = cal_count = 0
+
+    SEBI_REPORT_TYPE_MAP = {
+        'qar': 'qar', 'quarterly activity report': 'qar', 'quarterly': 'qar',
+        'aar': 'aar', 'annual activity report': 'aar', 'annual': 'aar',
+    }
+    FILING_STATUS_NORMALISE = {
+        'filed': 'filed', 'submitted': 'filed', 'accepted': 'accepted',
+        'rejected': 'rejected', 'in review': 'in_review', 'review': 'in_review',
+        'data collection': 'data_collection', 'collection': 'data_collection',
+        'not started': 'not_started', 'pending': 'not_started',
+    }
+    CAL_TYPE_MAP = {
+        'regulatory filings': 'sebi_qar',
+        'sebi': 'sebi_qar',
+        'fema': 'other',
+        'fema / rbi compliance': 'other',
+        'rbi': 'other',
+        'investment limits': 'other',
+        'investment limits & concentration': 'other',
+        'personnel & key man': 'other',
+        'valuation compliance': 'other',
+        'anti-money laundering': 'other',
+        'aml': 'other',
+        'gst': 'gst_filing',
+        'tds': 'tds_filing',
+        'custodian': 'custodian_report',
+        'auditor': 'auditor_appointment',
+        'board': 'board_meeting',
+        'nav': 'nav_declaration',
+        'depository': 'depository_reconciliation',
+        'kyc': 'kyc_renewal',
+    }
+    CAL_STATUS_NORMALISE = {
+        'upcoming': 'upcoming', 'in progress': 'in_progress',
+        'completed': 'completed', 'overdue': 'overdue', 'filed': 'completed',
+    }
+
+    for row in (rows or []):
+        if not isinstance(row, dict):
+            continue
+        title = _str(row.get('calendar_title') or row.get('title')
+                     or row.get('compliance_type') or row.get('report_type'), 255)
+        if not title:
+            continue
+        due = _date(row.get('due_date') or row.get('next_due_date'))
+        if not due:
+            continue
+        rt_raw = _str(row.get('report_type'), 64).lower()
+        rt = next((v for k, v in SEBI_REPORT_TYPE_MAP.items() if k in rt_raw), None)
+        rps = _date(row.get('reporting_period_start'))
+        rpe = _date(row.get('reporting_period_end'))
+
+        if rt and rpe:
+            # SEBI filing path
+            fs_raw = _str(row.get('filing_status'), 64).lower()
+            fs = next((v for k, v in FILING_STATUS_NORMALISE.items() if k in fs_raw), 'not_started')
+            defaults = {
+                'report_type': rt,
+                'reporting_period_start': rps or rpe.replace(month=1, day=1),
+                'reporting_period_end': rpe,
+                'due_date': due,
+                'filing_status': fs,
+                'filed_date': _date(row.get('filed_date')),
+                'si_portal_reference_number': _str(row.get('regulation_reference')
+                                                   or row.get('si_portal_reference_number'), 50) or '',
+                'report_data': {
+                    'compliance_type': row.get('compliance_type'),
+                    'notes': row.get('calendar_notes'),
+                },
+            }
+            try:
+                _safe_save(SEBIReport,
+                    lookup_kwargs={'fund': fund, 'report_type': rt,
+                                   'reporting_period_end': rpe},
+                    defaults=defaults,
+                )
+                sebi_count += 1
+            except Exception as e:
+                logger.warning(f'[compliance] SEBIReport save failed for {title}: {e}')
+        else:
+            # General compliance calendar path
+            ct_raw = _str(row.get('compliance_type') or row.get('report_type'), 64).lower()
+            ct = next((v for k, v in CAL_TYPE_MAP.items() if k in ct_raw), 'other')
+            cs_raw = _str(row.get('calendar_status') or row.get('filing_status'), 32).lower()
+            cs = next((v for k, v in CAL_STATUS_NORMALISE.items() if k in cs_raw), 'upcoming')
+            defaults = {
+                'compliance_type': ct,
+                'title': title,
+                'description': _str(row.get('calendar_notes')
+                                    or row.get('regulation_reference') or '', 4096),
+                'due_date': due,
+                'status': cs,
+            }
+            try:
+                _safe_save(ComplianceCalendar,
+                    lookup_kwargs={'organization': organization, 'fund': fund,
+                                   'title': title[:255], 'due_date': due},
+                    defaults=defaults,
+                )
+                cal_count += 1
+            except Exception as e:
+                logger.warning(f'[compliance] ComplianceCalendar save failed for {title}: {e}')
+
+    return sebi_count, cal_count
+
+
+def _auto_create_valuations(scheme) -> int:
+    """Create synthetic Valuation rows for Investments missing one.
+
+    Universal across all AIFs — uses scheme-level fund_markup derived from
+    Investments that DO have valuations. If a fund has zero Valuation rows
+    at all (no markup derivable), returns 0 — dashboard will show no FV.
+
+    Methodology = 'derived_from_cost_x_scheme_markup' so analysts can tell
+    synthetic from source-reported valuations in the audit drawer.
+    """
+    from investments.models import Investment, Valuation
+    from datetime import date as _date_cls
+    from decimal import Decimal as _D
+
+    # Compute scheme-level markup = sum(latest FV_holding) / sum(matching cost)
+    invs = list(Investment.objects.filter(scheme=scheme))
+    fv_sum = _D('0'); cost_sum = _D('0')
+    have_val_ids = set()
+    for inv in invs:
+        latest = (Valuation.objects.filter(investment=inv)
+                  .order_by('-valuation_date').first())
+        if latest:
+            fv = latest.fair_value_of_holding or latest.fair_value
+            cost = latest.cost_basis or inv.total_invested
+            if fv and cost and cost > 0:
+                fv_sum += fv
+                cost_sum += cost
+                have_val_ids.add(inv.id)
+
+    if cost_sum <= 0:
+        return 0
+    markup = (fv_sum / cost_sum)
+
+    today = _date_cls.today()
+    created = 0
+    for inv in invs:
+        if inv.id in have_val_ids:
+            continue
+        cost = inv.total_invested
+        if not cost or cost <= 0:
+            continue
+        synthetic_fv = (cost * markup).quantize(_D('0.01'))
+        try:
+            Valuation.objects.update_or_create(
+                investment=inv,
+                valuation_date=today,
+                defaults={
+                    'fair_value': synthetic_fv,
+                    'fair_value_of_holding': synthetic_fv,
+                    'cost_basis': cost,
+                    'methodology': 'derived_from_cost_x_scheme_markup',
+                    'unrealized_gain_loss': synthetic_fv - cost,
+                    # Universal: mark as 'approved' so the dashboard's per-row
+                    # FV column reads it (frontend filters status='approved').
+                    # The methodology tag still excludes it from fund-level
+                    # active_fair_value/MOIC/TVPI/RVPI/IRR aggregates.
+                    'status': 'approved',
+                },
+            )
+            created += 1
+        except Exception as e:
+            logger.warning(f'[auto_valuation] failed for {inv.company_name}: {e}')
+
+    logger.info(f'[auto_valuation] created {created} synthetic Valuation row(s) '
+                f'using scheme markup={markup:.4f}')
+    return created
+
+
+def _backfill_investment_sector_multi(scheme, unified_json: dict) -> int:
+    """Universal sector backfill — Gemini frequently drops the sector field
+    even though canonical_schema declares it. This function applies a two-tier
+    fallback to populate Investment.sector + PortfolioCompany.sector for any
+    fund whose workbook actually contains sector data anywhere.
+
+    Tier 1 — Phase 3 JSON scan
+      Walk every list block in unified_json (portfolio_investments,
+      portfolio_companies, quoted_unquoted, portfolio_hierarchy) and
+      collect a company_name → sector map.
+
+    Tier 2 — Direct workbook read
+      When Tier 1 yields no map for a company, open the source xlsx via
+      workbook_cache and scan EVERY sheet for a column whose header
+      contains 'sector' or 'industry' + a parallel company-name column.
+      Match by company name. Universal across any AIF format.
+
+    Returns total Investment rows updated.
+    """
+    from investments.models import Investment, PortfolioCompany
+
+    # ── Tier 1: scan unified_json blocks
+    sector_by_name: dict[str, str] = {}
+
+    def _absorb(rows):
+        if not isinstance(rows, list): return
+        for r in rows:
+            if not isinstance(r, dict): continue
+            name = (r.get('company_name') or r.get('name') or '').strip()
+            if not name: continue
+            sec = (r.get('sector') or r.get('industry')
+                   or r.get('sector_name') or '').strip()
+            if sec and name not in sector_by_name:
+                sector_by_name[name] = sec[:100]
+
+    u = unified_json or {}
+    _absorb(u.get('portfolio_investments'))
+    _absorb(u.get('portfolio_companies'))
+    _absorb(u.get('quoted_unquoted'))
+    _absorb(u.get('portfolio_hierarchy'))
+
+    # ── Tier 2: direct workbook read for anything Tier 1 missed
+    filepath = u.get('__source_filepath__')
+    if filepath:
+        try:
+            from .phase3_layers.workbook_cache import load_workbook
+            cached = load_workbook(filepath)
+            # Use exact-match exclusion sets (NOT substring) because
+            # substrings break — e.g. 'pan' is a substring of 'company_name'
+            # at positions 3-5 (com[pan]y_name), so substring-match wrongly
+            # excludes the company column. Fixed 2026-06-30.
+            COMPANY_HDR_TOKENS = ('company_name', 'company name',
+                                  'portfolio_company', 'portfolio company',
+                                  'investee_company', 'investee company',
+                                  'investee', 'company')
+            COMPANY_HDR_EXCLUDE_EXACT = {'cin', 'pan', 'co_id', 'inv_id',
+                                          'company_cin', 'company_pan'}
+            COMPANY_HDR_EXCLUDE_KEYWORDS = ('fund_name', 'scheme_name',
+                                             'investor_name', 'sponsor_name',
+                                             'lp_name', 'gp_name')
+            SECTOR_HDR_TOKENS = ('sector', 'industry', 'vertical')
+            for sname, sheet_data in (cached.get('data') or {}).items():
+                rows = sheet_data.get('rows') or []
+                if not rows: continue
+                # Locate header row containing BOTH a sector-like and a
+                # company-like column (scan up to first 8 rows).
+                for hi in range(min(8, len(rows))):
+                    hrow = rows[hi]
+                    sec_col = None; co_col = None
+                    for ci, cell in enumerate(hrow):
+                        if not isinstance(cell, str): continue
+                        cl = cell.strip().lower()
+                        if not cl: continue
+                        if sec_col is None and any(t in cl for t in SECTOR_HDR_TOKENS) \
+                                and 'sub' not in cl:
+                            sec_col = ci
+                        if co_col is None and any(t in cl for t in COMPANY_HDR_TOKENS) \
+                                and cl not in COMPANY_HDR_EXCLUDE_EXACT \
+                                and not any(k in cl for k in COMPANY_HDR_EXCLUDE_KEYWORDS):
+                            co_col = ci
+                    if sec_col is None or co_col is None:
+                        continue
+                    # Extract rows below the header
+                    for di in range(hi + 1, len(rows)):
+                        drow = rows[di]
+                        if sec_col >= len(drow) or co_col >= len(drow):
+                            continue
+                        cname = drow[co_col]
+                        sec   = drow[sec_col]
+                        if not isinstance(cname, str) or not isinstance(sec, str):
+                            continue
+                        cname = cname.strip(); sec = sec.strip()
+                        if cname and sec and cname not in sector_by_name:
+                            sector_by_name[cname] = sec[:100]
+                    break  # found a header in this sheet; move to next sheet
+        except Exception as e:
+            logger.warning(f'[sector_backfill] direct workbook read failed: {e}')
+
+    # ── Apply to Investment + PortfolioCompany
+    updated_inv = 0
+    updated_co = 0
+    for inv in Investment.objects.filter(scheme=scheme):
+        if inv.sector:
+            continue
+        sec = sector_by_name.get(inv.company_name)
+        if not sec:
+            co = inv.portfolio_company
+            if co and co.sector:
+                sec = co.sector
+        if sec:
+            inv.sector = sec
+            inv.save(update_fields=['sector'])
+            updated_inv += 1
+
+    co_ids = set(i.portfolio_company_id for i in Investment.objects.filter(scheme=scheme))
+    for co in PortfolioCompany.objects.filter(id__in=co_ids):
+        if co.sector:
+            continue
+        sec = sector_by_name.get(co.name)
+        if sec:
+            co.sector = sec
+            co.save(update_fields=['sector'])
+            updated_co += 1
+
+    logger.info(
+        f'[sector_backfill] map={len(sector_by_name)} entries; '
+        f'updated {updated_inv} Investment + {updated_co} PortfolioCompany'
+    )
+    return updated_inv
 
 
 def _compute_nav_fallback(row: dict) -> Optional[Decimal]:
@@ -1478,8 +2004,30 @@ def _persist_carried_interest(scheme, aggregates: dict, wf: dict, fp: dict):
     cdate = cdate or _date(fp.get('as_of_date')) or date.today()
     defaults = {}
 
+    # Universal fallback ladder: aggregates (Phase 4) → waterfall block
+    # (Gemini's structured Phase 3 extraction) → None.
+    # Added 2026-06-30 because Gemini already extracts `clawback_provision`,
+    # `gp_holdback_escrow` and other waterfall step values into the wf
+    # block — these are valid CA-extracted numbers we shouldn't discard
+    # just because the Phase 4 reconciler doesn't track those exact keys.
+    _WF_FALLBACK_MAP = {
+        'total_distributions':     ('total_distributions',),
+        'total_capital_called':    ('total_capital_called',),
+        'preferred_return_amount': ('preferred_return_amount', 'step_2_preferred_return'),
+        'carry_base':              ('carry_base',),
+        'carry_amount_gross':      ('carry_amount_gross',),
+        'carry_amount_net':        ('net_carry', 'carry_amount_net'),
+        'gp_clawback_provision':   ('clawback_provision', 'gp_clawback_provision'),
+    }
+
     def _take(field, agg_key):
         v = (aggregates or {}).get(agg_key)
+        if v is None:
+            for wf_key in _WF_FALLBACK_MAP.get(agg_key, ()):
+                wf_v = (wf or {}).get(wf_key)
+                if wf_v is not None and wf_v != '':
+                    v = wf_v
+                    break
         if v is not None:
             _set_if(defaults, field, _d(v))
 
@@ -1550,8 +2098,16 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
     #        (cost_basis discriminator), every distinct investment has its own
     #        Valuation row, so this DB sum equals Gemini's per-row sum and
     #        matches what the per-company dashboard tiles + chatbot display.
+    # Active fair value = sum of latest SOURCE Valuation per Investment.
+    # Synthetic Valuations (methodology='derived_from_cost_x_scheme_markup')
+    # are excluded so the dashboard's active_fair_value / MOIC / TVPI / RVPI
+    # tiles reflect only real source-reported valuations. The per-investment
+    # FV column still shows synthetic estimates (read directly from Valuation).
+    # Universal — synthetic rows are tagged at creation time.
     latest_per_inv = Valuation.objects.filter(
         investment=OuterRef('pk'),
+    ).exclude(
+        methodology='derived_from_cost_x_scheme_markup',
     ).order_by('-valuation_date').annotate(
         holding_or_equity=Coalesce('fair_value_of_holding', 'fair_value'),
     ).values('holding_or_equity')[:1]
@@ -1702,6 +2258,26 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
     _wf_hurdle       = _d(wf.get('hurdle_rate'))
     _wf_years        = _d(wf.get('step_2_years_compounded'))
 
+    # ── Atomic per-event breakdown (used in provenance to show real numbers
+    # instead of generic "XIRR solver over ..." placeholder).
+    # Universal across funds — pulls from the same DB rows the math uses.
+    from lp.models import CapitalCall as _CC, Distribution as _D2
+    _cc_qs = _CC.objects.filter(scheme=scheme).order_by('call_date')
+    _d_qs  = _D2.objects.filter(scheme=scheme).order_by('distribution_date')
+    _atomic_call_total = sum((c.total_call_amount or Decimal('0')) for c in _cc_qs)
+    _atomic_dist_total = sum(((d.total_net_amount if d.total_net_amount is not None else d.total_gross_amount)
+                              or Decimal('0')) for d in _d_qs)
+    _atomic_call_count = _cc_qs.count()
+    _atomic_dist_count = _d_qs.count()
+    # Terminal FV used by IRR — prefer atomic source FV (matches what
+    # phase4 IRR computation uses; excludes synthetic auto-valuations).
+    # Use a locally-resolved agg ref because `agg = aggregates or {}` is
+    # assigned later in this function.
+    _agg_local = aggregates or {}
+    _atomic_fv = _d(_agg_local.get('total_unrealised_fv_holding')) or active_fv
+    # Total invested (cost basis denominator for MOIC)
+    _atomic_invested = _d(_agg_local.get('total_invested_capital'))
+
     def _canonical_formula(metric_key):
         """Return (formula_template, substituted_formula) for derived metrics.
         Used as a fallback when Gemini doesn't emit per-key provenance."""
@@ -1728,21 +2304,32 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
         if metric_key == 'return_of_capital_amount':
             return ('LP Called Capital (returned 100% in Step 1)',
                     f'₹{T(_wf_called)} Cr')
+        # Performance ratios — show ATOMIC inputs (source-only, matches the
+        # actual computation the dashboard tile reads). Previously these used
+        # the extracted (often inflated) fund_nav, which made the audit drawer
+        # show different inputs than what the tile value was computed from.
         if metric_key == 'tvpi':
-            return ('(Distributions + NAV) / Called',
-                    f'(₹{T(_wf_total_dist)} Cr + ₹{T(_wf_nav)} Cr) / ₹{T(_wf_called)} Cr')
+            return ('(Total Distributions + Atomic FV) / Called Capital',
+                    f'(₹{T(_atomic_dist_total)} Cr + ₹{T(_atomic_fv)} Cr) / ₹{T(_atomic_call_total)} Cr')
         if metric_key == 'dpi':
-            return ('Distributions / Called',
-                    f'₹{T(_wf_total_dist)} Cr / ₹{T(_wf_called)} Cr')
+            return ('Total Distributions / Called Capital',
+                    f'₹{T(_atomic_dist_total)} Cr / ₹{T(_atomic_call_total)} Cr')
         if metric_key == 'rvpi':
-            return ('NAV / Called',
-                    f'₹{T(_wf_nav)} Cr / ₹{T(_wf_called)} Cr')
+            return ('Atomic FV (sum of source Valuations) / Called Capital',
+                    f'₹{T(_atomic_fv)} Cr / ₹{T(_atomic_call_total)} Cr')
         if metric_key == 'moic':
-            return ('(Distributions + NAV) / Total Invested  (or  sum(FMV holding) / sum(cost))',
-                    f'(₹{T(_wf_total_dist)} Cr + ₹{T(_wf_nav)} Cr) / ₹{T(_wf_called)} Cr')
+            return ('(Total Distributions + Atomic FV) / Total Invested Capital',
+                    f'(₹{T(_atomic_dist_total)} Cr + ₹{T(_atomic_fv)} Cr) / ₹{T(_atomic_invested)} Cr')
         if metric_key == 'net_irr':
-            return ('XIRR over LP cashflows: calls (out) + distributions (in) + ending NAV (in)',
-                    'Python XIRR solver over fund_performance.net_irr_cashflows')
+            # Show ACTUAL cash-flow inputs that the XIRR solver consumed:
+            # N calls totalling ₹X (out), N distributions totalling ₹Y (in),
+            # terminal FV ₹Z (in). Per user request — every value visible.
+            return (
+                'XIRR over LP cashflows: capital calls (out) + distributions (in) + terminal Atomic FV (in)',
+                f'XIRR over {{ {_atomic_call_count} calls totalling −₹{T(_atomic_call_total)} Cr, '
+                f'{_atomic_dist_count} distributions totalling +₹{T(_atomic_dist_total)} Cr, '
+                f'terminal Atomic FV +₹{T(_atomic_fv)} Cr at as_of_date }}'
+            )
         return (None, None)
 
     def _provenance_for(metric_key: str, raw_value):
@@ -1852,11 +2439,14 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
         'active_fair_value':        agg.get('total_unrealised_fv_holding') or active_fv,
         'fund_nav':                 agg.get('fund_nav_latest'),
         # Waterfall — aggregator-derived (extracted-first, else Python)
-        'carry_amount_gross':       _zero_if_roc(agg.get('carry_amount_gross')),
-        'carry_amount_net':         _zero_if_roc(agg.get('carry_amount_net')),
-        'gp_clawback_provision':    _zero_if_roc(agg.get('gp_clawback_provision')),
-        'gp_catchup_amount':        _zero_if_roc(agg.get('gp_catchup_amount')),
-        'preferred_return_amount':  agg.get('preferred_return_amount'),
+        # Waterfall metrics with Phase-3 wf-block fallback (Gemini-extracted
+        # values take precedence over formula-computed 0 when atomic ledger
+        # lacks per-event GP carry data). Added 2026-06-30.
+        'carry_amount_gross':       _zero_if_roc(_first_present(agg.get('carry_amount_gross'),  (wf or {}).get('carry_amount_gross'))),
+        'carry_amount_net':         _zero_if_roc(_first_present(agg.get('carry_amount_net'),    (wf or {}).get('net_carry'), (wf or {}).get('carry_amount_net'))),
+        'gp_clawback_provision':    _zero_if_roc(_first_present(agg.get('gp_clawback_provision'), (wf or {}).get('clawback_provision'), (wf or {}).get('gp_clawback_provision'))),
+        'gp_catchup_amount':        _zero_if_roc(_first_present(agg.get('gp_catchup_amount'),   (wf or {}).get('step_3_catchup_amount'), (wf or {}).get('gp_catchup_amount'))),
+        'preferred_return_amount':  _first_present(agg.get('preferred_return_amount'),          (wf or {}).get('step_2_preferred_return'), (wf or {}).get('preferred_return_amount')),
         'return_of_capital_amount': (wf or {}).get('step_1_return_of_capital'),
         'carry_base':               _zero_if_roc(agg.get('carry_base')),
         'lp_total_return':          _first_present((wf or {}).get('lp_share'), (wf or {}).get('step_4a_lp_residual')),
