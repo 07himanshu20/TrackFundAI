@@ -1,0 +1,118 @@
+# ---------------------------------------------------------------------------
+# TrackFundAI BACKEND STACK
+#
+# Brings up the Django app + PostgreSQL + Redis on one bridge network so the
+# Django container can resolve the DB and Redis services by their compose
+# service name.
+#
+# First-time setup:
+#   1. cp .env.example .env  (and fill in real secrets — at minimum
+#      SECRET_KEY, GOOGLE_API_KEY or Vertex AI credentials, and
+#      POSTGRES_* fields below).
+#   2. (Vertex AI only)  Run `gcloud auth application-default login` on the
+#      host. The compose file bind-mounts `~/.config/gcloud` read-only into
+#      the backend container so it can use Application Default Credentials.
+#   3. docker compose -f backend/docker-compose.yml up --build
+#
+# Production swap-out:
+#   • Change the `backend` service's `command:` to the gunicorn line shown
+#     in the inline comment below.
+#   • Set DEBUG=False, ALLOWED_HOSTS to your domain, and a strong SECRET_KEY
+#     in .env.
+#   • Remove the source bind-mount so the image is the single source of truth.
+# ---------------------------------------------------------------------------
+
+name: trackfundai-backend
+
+services:
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: trackfundai-backend:latest
+    container_name: trackfundai-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Override DATABASE_URL / REDIS_URL to point at the compose-internal
+      # services regardless of what .env says (the host on the developer's
+      # machine may use localhost which would not resolve inside the container).
+      DATABASE_URL: "postgres://${POSTGRES_USER:-trackfundai}:${POSTGRES_PASSWORD:-trackfundai_dev_pw}@postgres:5432/${POSTGRES_DB:-trackfundai}"
+      REDIS_URL: "redis://redis:6379/0"
+      # Gemini ADC discovery uses this default path when GOOGLE_GENAI_USE_VERTEXAI=True.
+      GOOGLE_APPLICATION_CREDENTIALS: /root/.config/gcloud/application_default_credentials.json
+    ports:
+      - "8000:8000"
+    volumes:
+      # Bind-mount the source for live-reload dev. Remove for production.
+      - .:/app
+      # Persist user-uploaded files outside the container so they survive
+      # rebuilds (Excel uploads, generated reports).
+      - backend_media:/app/media
+      # Read-only mount of host gcloud ADC so Vertex AI auth works without
+      # baking secrets into the image. Safe to remove if using AI Studio only.
+      - ${HOME}/.config/gcloud:/root/.config/gcloud:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Production override example (uncomment to use):
+    # command: ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000",
+    #           "--workers", "3", "--access-logfile", "-"]
+    networks:
+      - trackfundai
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: trackfundai-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-trackfundai}
+      POSTGRES_USER: ${POSTGRES_USER:-trackfundai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trackfundai_dev_pw}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-trackfundai} -d ${POSTGRES_DB:-trackfundai}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # Expose only on loopback so the dev machine can connect with psql but
+    # the port is not published to the wider network.
+    ports:
+      - "127.0.0.1:5432:5432"
+    networks:
+      - trackfundai
+
+  redis:
+    image: redis:7-alpine
+    container_name: trackfundai-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "127.0.0.1:6379:6379"
+    networks:
+      - trackfundai
+
+volumes:
+  postgres_data:
+  redis_data:
+  backend_media:
+
+networks:
+  # Marked `external: false` (default) — created/destroyed with this stack.
+  # If you want the frontend stack to share this network so the SPA can hit
+  # the backend by container name, change to `external: true` and create it
+  # once with: `docker network create trackfundai`.
+  trackfundai:
+    driver: bridge

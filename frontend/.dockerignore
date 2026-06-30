@@ -1,0 +1,24 @@
+# Build context exclusions for the frontend image.
+# Everything else under frontend/ is shipped into nginx's webroot.
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.vscode
+.idea
+*.swp
+
+# Git
+.git
+.gitignore
+
+# Logs
+*.log
+
+# Docker meta — these are not user-facing assets so keep them out of the
+# nginx webroot. (nginx.conf IS needed for the COPY nginx.conf step earlier
+# in the Dockerfile, so it must stay in the build context — the Dockerfile
+# removes it from the webroot after the catch-all COPY .)
+Dockerfile
+docker-compose.yml
+.dockerignore

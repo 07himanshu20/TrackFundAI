@@ -1,0 +1,53 @@
+# ---------------------------------------------------------------------------
+# TrackFundAI FRONTEND STACK
+#
+# A single nginx container serving the vanilla-JS SPA on port 3000.
+#
+# First-time setup:
+#   docker compose -f frontend/docker-compose.yml up --build
+#
+# The frontend talks to the backend over HTTP. In dev that's
+# http://127.0.0.1:8000/api/ on the host. The frontend stack does NOT
+# include the backend — start the backend stack separately:
+#   docker compose -f backend/docker-compose.yml up
+#
+# If you want the frontend container to reach the backend container by
+# service name instead of host loopback, create a shared external network
+# once with:
+#   docker network create trackfundai
+# then in BOTH compose files change the `trackfundai` network to:
+#   trackfundai:
+#     external: true
+# and update the frontend's API base URL to http://backend:8000/api/.
+#
+# Production swap-out:
+#   • Keep the image, swap in your own nginx.conf with TLS termination /
+#     real domain / stricter CSP headers.
+#   • Or front this container with a Caddy / Traefik reverse proxy that
+#     handles TLS and routes both /api/* (→ backend) and /* (→ frontend).
+# ---------------------------------------------------------------------------
+
+name: trackfundai-frontend
+
+services:
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: trackfundai-frontend:latest
+    container_name: trackfundai-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    # Optional: bind-mount the source for live edits during development.
+    # Comment out for production so the image is the single source of truth.
+    volumes:
+      - .:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - trackfundai
+
+networks:
+  trackfundai:
+    driver: bridge

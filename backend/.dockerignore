@@ -1,0 +1,50 @@
+# Secrets — must never enter the image. Mount via env_file at runtime instead.
+.env
+.env.*
+!.env.example
+
+# Python build artefacts.
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local databases & uploaded media — runtime state, not source.
+db.sqlite3
+db.sqlite3.*
+media/
+staticfiles/
+
+# Phase 3 / pipeline scratch outputs.
+_phase3_outputs/
+_phase*_outputs/
+scratchpad/
+
+# Logs.
+*.log
+server.log*
+
+# VCS / editor / OS cruft.
+.git/
+.gitignore
+.github/
+.vscode/
+.idea/
+.DS_Store
+
+# Anything Node-ish that may have leaked in.
+node_modules/
+
+# Virtualenvs.
+venv/
+env/
+.venv/
+
+# Docker meta — no point shipping these into the build context.
+Dockerfile
+docker-compose.yml
+.dockerignore
