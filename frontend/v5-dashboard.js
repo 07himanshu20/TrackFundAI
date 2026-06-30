@@ -1724,6 +1724,7 @@ async function loadPortfolioOverview() {
     window._pt_fvMap     = {};
     window._pt_stageMap  = {};
     window._pt_irrMap    = {};
+    window._pt_moicMap   = {};   // Phase 4 per-investment MOIC, aggregated to company
     window._pt_firstDate = {};   // earliest investment_date per company (for MOIC-from-IRR fallback)
     invs.forEach(inv => {
       const n = inv.company_name || inv.portfolio_company_name || '';
@@ -1731,6 +1732,8 @@ async function loadPortfolioOverview() {
       window._pt_fvMap[n]   = (window._pt_fvMap[n]   || 0) + parseFloat(inv.latest_valuation || 0);
       if (inv.stage && !window._pt_stageMap[n]) window._pt_stageMap[n] = inv.stage;
       if (inv.irr_pct != null && window._pt_irrMap[n] == null) window._pt_irrMap[n] = parseFloat(inv.irr_pct);
+      // Phase 4 fills inv.moic for every investment universally.
+      if (inv.moic != null && window._pt_moicMap[n] == null) window._pt_moicMap[n] = parseFloat(inv.moic);
       if (inv.investment_date) {
         const d = String(inv.investment_date).slice(0, 10);
         if (!window._pt_firstDate[n] || d < window._pt_firstDate[n]) window._pt_firstDate[n] = d;
@@ -1751,6 +1754,7 @@ async function loadFullPortfolio() {
     const costMap  = window._pt_costMap  || {};
     const stageMap = window._pt_stageMap || {};
     const irrMap   = window._pt_irrMap   || {};
+    const moicMap  = window._pt_moicMap  || {};
 
     // Populate Sector filter
     const sectorSel = $('pt-sector-filter');
@@ -1778,15 +1782,18 @@ async function loadFullPortfolio() {
       const fv    = fvMap[c.name]   || 0;
       const stage = stageMap[c.name] || '';
 
-      // MOIC resolution (universal):
-      //   1. Primary:  FV / Cost (when both > 0)
-      //   2. Fallback: (1 + IRR/100)^years_held — when FV is unknown but IRR is.
-      //      This is the textbook relationship between MOIC and annualised
-      //      IRR over the holding period; lets us still show MOIC for very
-      //      recent or FV-less investments.
-      //   3. Otherwise: '—'
+      // MOIC resolution (universal — Phase 4 + fallback chain):
+      //   1. Primary:    inv.moic from Phase 4 (set on every Investment row)
+      //   2. Secondary:  FV / Cost (when both > 0 — exact when Valuation exists)
+      //   3. Fallback:   (1 + IRR/100)^years_held — when FV is unknown but IRR is.
+      //      Textbook relationship between MOIC and annualised IRR over the
+      //      holding period; lets us still show MOIC for very recent or FV-less
+      //      investments.
+      //   4. Otherwise:  '—'
       let moic = '—';
-      if (cost > 0 && fv > 0) {
+      if (moicMap[c.name] != null && isFinite(moicMap[c.name])) {
+        moic = moicMap[c.name].toFixed(2) + 'x';
+      } else if (cost > 0 && fv > 0) {
         moic = (fv / cost).toFixed(2) + 'x';
       } else if (irrMap[c.name] != null && firstDateMap[c.name]) {
         const yearsHeld = (todayMs - new Date(firstDateMap[c.name]).getTime()) / (365.25 * 24 * 3600 * 1000);

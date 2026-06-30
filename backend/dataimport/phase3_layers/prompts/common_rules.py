@@ -21,6 +21,33 @@ COMMON_HARD_GUARDS = _CANONICAL_RULES
 # exactly the JSON contract the merger expects.
 JSON_OUTPUT_CONTRACT = """\
 ═══════════════════════════════════════════════════════════════════════════
+STRICT JSON OUTPUT FORMAT — READ BEFORE EMITTING ANY OUTPUT
+═══════════════════════════════════════════════════════════════════════════
+Your ENTIRE response must be EXACTLY one syntactically-valid JSON object,
+parseable by Python's json.loads on the first attempt. Concretely:
+
+  • Start with `{` and end with `}` — no leading or trailing prose.
+  • No markdown code fences (```), no ```json wrapper, no commentary before
+    or after the object.
+  • All keys and string values use double quotes ("…"), never single quotes.
+  • No trailing commas after the last array element or object key.
+  • No comments (// or /* */) — JSON does not allow them.
+  • No `NaN`, `Infinity`, `-Infinity`, or `undefined` — use `null` instead.
+  • All control characters inside strings MUST be escaped (\\n, \\t, \\", \\\\).
+  • Newlines inside string values: use \\n, never a raw line break.
+  • Numbers must be plain JSON numbers (no thousands separators, no currency
+    symbols, no units appended — emit 100000 not "₹1,00,000" or "10 Cr").
+  • Dates must be ISO-8601 strings ("2024-03-31"), never Excel serials or
+    locale-specific formats.
+  • Every opening `{` / `[` must have a matching closing `}` / `]`.
+
+If you cannot fit the complete object inside your output budget, emit fewer
+records (per the ROW PRESERVATION RULE below) but ALWAYS finish with a
+syntactically-valid JSON close. NEVER stop mid-string, mid-number, or
+mid-object — that produces an unparseable response and costs us a retry.
+═══════════════════════════════════════════════════════════════════════════
+
+═══════════════════════════════════════════════════════════════════════════
 OUTPUT CONTRACT (LAYER-SPECIFIC)
 ═══════════════════════════════════════════════════════════════════════════
 Return EXACTLY one JSON object. Top-level keys MUST be a subset of the
@@ -34,5 +61,30 @@ expression for computed values. Values without provenance are rejected.
 
 Empty arrays `[]` are encouraged for sections present in this layer's
 allowed keys but absent from the workbook. NEVER fabricate placeholder rows.
+═══════════════════════════════════════════════════════════════════════════
+
+═══════════════════════════════════════════════════════════════════════════
+ROW PRESERVATION RULE — STRICT (applies to every array in every layer)
+═══════════════════════════════════════════════════════════════════════════
+Every populated data row in every sheet you receive MUST appear as exactly
+one record in the relevant output array, UNLESS the row is:
+  (a) a header row,
+  (b) a blank separator,
+  (c) a subtotal / grand-total / summary row,
+  (d) a section title banner (e.g. "── INVESTORS ──").
+
+Specifically: if a sheet has N companies listed (e.g. PC001 ... PC050) and
+you receive all N in your input, your output MUST contain exactly N entries
+for that array (one per company). Skipping a single company in the middle of
+a list is a CRITICAL FAILURE that breaks downstream accounting.
+
+Before returning, mentally count: for each sheet you touched, how many
+populated data rows were in your input vs. how many entries you emitted for
+that sheet's target array(s)? They must match (allowing only header /
+separator / subtotal exclusions).
+
+If your output token budget cannot fit all rows: return as many complete
+records as fit AND set `sheet_completeness[].truncated_in_prompt = true` for
+that sheet so the orchestrator knows to re-split. NEVER silently drop rows.
 ═══════════════════════════════════════════════════════════════════════════
 """

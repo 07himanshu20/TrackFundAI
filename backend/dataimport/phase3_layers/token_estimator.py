@@ -1,27 +1,36 @@
 """
-Token estimator + chunk planner — decides whether Flavor B activates inside
-a given layer and produces row-range chunk plans.
+Token estimator + chunk planner — ONE SHEET PER GEMINI CALL.
 
-Universal mechanics (works for any AIF Excel format / size):
+Universal architecture (2026-06-30 rewrite).
 
-  • Per-sheet cell count drives output-token estimate.
-  • Threshold: if a layer's TOTAL est_output > _CHUNK_THRESHOLD → chunk.
-  • Chunking strategy:
-      1. Bin-pack small sheets together so a chunk's est_output ≤ _CHUNK_TARGET.
-      2. Any single sheet whose est_output exceeds _CHUNK_TARGET is split
-         into N row-range sub-chunks (each chunk owns rows [start, end) of
-         that one sheet).
-  • Row-range filtering happens IN PYTHON (orchestrator._serialize_sheets);
-    Gemini never has to count or modulo. This eliminates duplicate or
-    missed rows from chunk-boundary errors.
+The previous bin-packing strategy piled multiple sheets into one Gemini call
+to "minimise API calls". In practice that forced Gemini to juggle N output
+target arrays in a single JSON response, and it routinely failed by
+SILENTLY DROPPING entire sheets to stay inside its output budget. That
+forced the validator to detect drops + retry with row-range splits — but
+row-splitting doesn't reduce the SHEET COUNT in the prompt, so the same
+multi-sheet drop pattern repeated at every depth, cascading into long
+multi-pass runs (5 passes × 32+ chunks on Bharatcrest).
 
-Layer 1 is allowed to chunk too (was previously blocked — a workbook
-with a single huge fund_pl_bs sheet routed to L1 would have truncated).
+The new contract:
 
-Tuned 2026-06-24 (Mock_14 incident): tokens_per_cell=8.0, threshold=35K,
-target=30K. Tuning constants exposed via env so ops can adjust without
-redeploy. After enough imports we should switch to per-layer calibration
-(F2) — for now, conservative globals work.
+  • Every populated sheet in a layer gets its OWN dedicated Gemini call.
+  • Within a single sheet, if est_output > _CHUNK_TARGET, that one sheet is
+    row-range split into N sub-chunks (same Flavor B mechanism as before).
+  • Empty sheets are skipped (no point sending nothing to Gemini).
+  • All chunks across all layers run in PARALLEL via the shared
+    ThreadPoolExecutor — see parallel_executor._MAX_WORKERS.
+
+Why this works:
+  • Each prompt is small, focused on one target schema → fits in budget,
+    no silent multi-sheet drops.
+  • sheet_completeness self-reports map 1:1 to a chunk → the validator
+    has zero ambiguity about which sheet's numbers are which.
+  • Wall time = MAX(single call), not SUM, because all calls run in
+    parallel. Bharatcrest 14 sheets → 14 parallel calls finishing in
+    roughly the time of the slowest one.
+
+Tuning constants are env-overrideable so ops can adjust without redeploy.
 """
 
 import math
@@ -35,35 +44,37 @@ logger = logging.getLogger(__name__)
 
 _TOKENS_PER_CELL = float(os.environ.get('PHASE3_TOKENS_PER_CELL', '8.0'))
 _FIXED_OVERHEAD = int(os.environ.get('PHASE3_FIXED_OVERHEAD_TOKENS', '3000'))
-_CHUNK_THRESHOLD = int(os.environ.get('PHASE3_LAYER_CHUNK_THRESHOLD_TOKENS', '35000'))
 _CHUNK_TARGET = int(os.environ.get('PHASE3_CHUNK_TARGET_TOKENS', '30000'))
 
 
 def _per_sheet_stats(filepath: str, sheets: list[str]) -> dict:
-    """Walk only the given sheets. Returns {sheet: {'cells': N, 'rows': R}}."""
+    """Walk only the given sheets. Returns {sheet: {'cells': N, 'rows': R}}.
+
+    Reads the workbook through the shared cache — no disk access after first
+    load per import. Universal across all funds/formats. The file on disk can
+    vanish after the cache is populated and this still works.
+    """
     if not sheets:
         return {}
-    wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
+    from .workbook_cache import load_workbook
+    cached = load_workbook(filepath)
+    available = set(cached['sheets'])
     stats: dict = {}
-    try:
-        for sname in sheets:
-            if sname not in wb.sheetnames:
-                stats[sname] = {'cells': 0, 'rows': 0}
-                continue
-            ws = wb[sname]
-            cells = 0
-            populated_rows = 0
-            for row in ws.iter_rows(values_only=True):
-                row_has_value = False
-                for v in row:
-                    if v is not None and v != '':
-                        cells += 1
-                        row_has_value = True
-                if row_has_value:
-                    populated_rows += 1
-            stats[sname] = {'cells': cells, 'rows': populated_rows}
-    finally:
-        wb.close()
+    for sname in sheets:
+        if sname not in available:
+            stats[sname] = {'cells': 0, 'rows': 0}
+            continue
+        cells = 0
+        populated_rows = 0
+        for row in cached['data'][sname]['rows']:
+            row_has_value = False
+            for v in row:
+                if v is not None and v != '':
+                    cells += 1
+                    row_has_value = True
+            if row_has_value:
+                populated_rows += 1
+        stats[sname] = {'cells': cells, 'rows': populated_rows}
     return stats
 
 
@@ -82,8 +93,7 @@ def _split_sheet_into_ranges(sheet_name: str, total_rows: int,
                              cells_per_row: float, layer: str) -> list[dict]:
     """Split one large sheet into row-range chunks so each chunk's est
     output stays ≤ _CHUNK_TARGET. Each chunk owns rows [start, end)
-    (1-indexed in workbook terms; 0-indexed in worker terms, see
-    orchestrator._serialize_sheets)."""
+    (0-indexed populated-row positions; see orchestrator._serialize_sheets)."""
     est = _estimate_output_tokens(int(cells_per_row * total_rows))
     n = max(2, math.ceil(est / _CHUNK_TARGET))
     rows_per_chunk = max(1, math.ceil(total_rows / n))
@@ -106,88 +116,71 @@ def _split_sheet_into_ranges(sheet_name: str, total_rows: int,
 
 
 def plan_chunks(filepath: str, layer: str, sheets: list[str]) -> list[dict]:
-    """Decide if Flavor B activates and produce a chunk plan.
+    """ONE SHEET PER GEMINI CALL — universal across any AIF format.
 
     Returns a list of chunk dicts of shape:
       {
         'chunk_id':            str,
         'layer':               str,
-        'sheets':              list[str],
-        'row_ranges':          dict[sheet_name, (start, end)]  # optional
-                               (default: full sheet),
+        'sheets':              list[str],          # always length 1
+        'row_ranges':          dict[sheet_name, (start, end)]  # {} unless row-split
         'est_output_tokens':   int,
-        'flavor_b':            bool,
+        'flavor_b':            bool,               # True only when row-split
       }
 
-    Layer 1 IS allowed to chunk (E2 fix). Some funds have huge fund_pl_bs
-    sheets routed to L1 and would otherwise truncate.
+    Behaviour:
+      • Every populated sheet gets exactly ONE chunk (its own Gemini call).
+      • If a single sheet's est_output exceeds _CHUNK_TARGET, that one sheet
+        is row-range split into N sub-chunks via _split_sheet_into_ranges.
+        Each sub-chunk still owns ONLY that sheet — no cross-sheet mixing.
+      • Sheets with zero populated cells are skipped — no useless Gemini call.
+
+    Bin-packing has been removed. Calling Gemini with N sheets in one prompt
+    triggered silent per-sheet drops that the row-range split path could not
+    fix (halving rows doesn't reduce sheet count). One-sheet-per-call is the
+    only structurally safe shape.
     """
     if not sheets:
         return []
 
     stats = _per_sheet_stats(filepath, sheets)
-    total_cells = sum(s['cells'] for s in stats.values())
-    total_est = _estimate_output_tokens(total_cells)
-
-    if total_est <= _CHUNK_THRESHOLD:
-        return [{
-            'chunk_id': layer,
-            'layer': layer,
-            'sheets': list(sheets),
-            'row_ranges': {},
-            'est_output_tokens': total_est,
-            'flavor_b': False,
-        }]
-
-    # Identify sheets that ALONE exceed the chunk target → range-split them.
-    # Pack the rest into bin-packed chunks.
-    big_sheets: list[str] = []
-    small_sheets: list[str] = []
-    for sname in sheets:
-        cells = stats.get(sname, {}).get('cells', 0)
-        if _estimate_output_tokens(cells) > _CHUNK_TARGET:
-            big_sheets.append(sname)
-        else:
-            small_sheets.append(sname)
-
     chunks: list[dict] = []
+    skipped_empty: list[str] = []
+    row_split_sheets: list[str] = []
 
-    for sname in big_sheets:
-        rows = stats.get(sname, {}).get('rows', 0) or 1
-        cells = stats.get(sname, {}).get('cells', 0)
-        cells_per_row = (cells / rows) if rows else 1.0
-        chunks.extend(_split_sheet_into_ranges(sname, rows, cells_per_row, layer))
+    for sname in sheets:
+        s = stats.get(sname, {})
+        cells = s.get('cells', 0)
+        rows = s.get('rows', 0)
 
-    # Bin-pack small sheets first-fit-decreasing into chunks of ≤ _CHUNK_TARGET
-    small_sheets.sort(
-        key=lambda s: _estimate_output_tokens(stats.get(s, {}).get('cells', 0)),
-        reverse=True,
-    )
-    bins: list[dict] = []
-    for sname in small_sheets:
-        est = _estimate_output_tokens(stats.get(sname, {}).get('cells', 0))
-        placed = False
-        for b in bins:
-            if b['est_output_tokens'] + est <= _CHUNK_TARGET:
-                b['sheets'].append(sname)
-                b['est_output_tokens'] += est
-                placed = True
-                break
-        if not placed:
-            bins.append({
-                'chunk_id': f'{layer}.bin_{len(bins) + 1}',
+        if cells == 0:
+            skipped_empty.append(sname)
+            continue
+
+        est = _estimate_output_tokens(cells)
+
+        if est <= _CHUNK_TARGET or rows < 2:
+            # Comfortable single-sheet call. No row splitting needed.
+            chunks.append({
+                'chunk_id': f'{layer}.{sname[:40]}',
                 'layer': layer,
                 'sheets': [sname],
                 'row_ranges': {},
                 'est_output_tokens': est,
-                'flavor_b': True,
+                'flavor_b': False,
             })
-    chunks.extend(bins)
+        else:
+            # Single sheet too big for one call → row-range split.
+            cells_per_row = (cells / rows) if rows else 1.0
+            sub_chunks = _split_sheet_into_ranges(sname, rows, cells_per_row, layer)
+            chunks.extend(sub_chunks)
+            row_split_sheets.append(f'{sname}({len(sub_chunks)})')
 
     logger.info(
-        f'[phase3.token_estimator] {layer} est_output={total_est} > {_CHUNK_THRESHOLD} '
-        f'→ Flavor B with {len(chunks)} chunks '
-        f'({len(big_sheets)} sheet(s) row-split, {len(bins)} bin-packed chunk(s))'
+        f'[phase3.token_estimator] {layer}: {len(sheets)} sheet(s) → '
+        f'{len(chunks)} chunk(s) '
+        f'(1-per-sheet; row-split: {row_split_sheets or "none"}; '
+        f'skipped empty: {skipped_empty or "none"})'
     )
     return chunks
 
@@ -196,15 +189,12 @@ def estimate_workbook_input(filepath: str) -> int:
     """Rough total-input token estimate for the entire workbook (all sheets).
     Used for capacity-planning logging only — not for routing decisions.
     """
-    wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
+    from .workbook_cache import load_workbook
+    cached = load_workbook(filepath)
     total = 0
-    try:
-        for sname in wb.sheetnames:
-            ws = wb[sname]
-            for row in ws.iter_rows(values_only=True):
-                for v in row:
-                    if v is not None and v != '':
-                        total += 1
-    finally:
-        wb.close()
+    for sname in cached['sheets']:
+        for row in cached['data'][sname]['rows']:
+            for v in row:
+                if v is not None and v != '':
+                    total += 1
     return int(total * _TOKENS_PER_CELL)

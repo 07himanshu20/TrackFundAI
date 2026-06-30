@@ -1,7 +1,14 @@
 """
-Parallel executor — submits every Phase 3 call (Flavor A layers + Flavor B
-chunks) to one shared ThreadPoolExecutor. Wall time = MAX(individual call
-durations), not SUM.
+Parallel executor — submits every Phase 3 call (one per sheet, plus any
+row-range sub-chunks for sheets too large for a single call) to one shared
+ThreadPoolExecutor. Wall time = MAX(individual call durations), not SUM.
+
+After the 2026-06-30 chunker rewrite the planner emits one chunk per
+populated sheet across L1/L2/L3. The default worker cap is 32 so the
+typical AIF workbook (14–25 sheets) fires every call SIMULTANEOUSLY with
+zero queue wait. Funds with > 32 sheets still get serviced — extras simply
+queue behind the first 32 — and can lift the cap via env
+PHASE3_MAX_PARALLEL_WORKERS without code change.
 
 Supports MULTI-PASS execution: a job's runner may return a result with
 '_resubmit' = [job_dicts]. The executor collects those into a follow-up
@@ -19,7 +26,7 @@ from typing import Callable
 
 logger = logging.getLogger(__name__)
 
-_MAX_WORKERS = int(os.environ.get('PHASE3_MAX_PARALLEL_WORKERS', '8'))
+_MAX_WORKERS = int(os.environ.get('PHASE3_MAX_PARALLEL_WORKERS', '32'))
 _MAX_PASSES = int(os.environ.get('PHASE3_MAX_EXECUTOR_PASSES', '6'))
 
 

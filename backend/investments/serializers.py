@@ -22,13 +22,112 @@ class PortfolioCompanySerializer(serializers.ModelSerializer):
 
 
 class PortfolioCompanyListSerializer(serializers.ModelSerializer):
-    """Lightweight serializer for dropdowns and portfolio lists."""
+    """Lightweight serializer for dropdowns and portfolio lists.
+
+    Universal aggregates exposed (computed from Investment + ExitEvent rows
+    that already have per-investment IRR/MOIC populated by Phase 4):
+      • total_cost  — Σ Investment.total_invested in current fund context
+      • total_fv    — Σ (exit proceeds for exited + estimated FV for active)
+      • aggregate_irr_pct — XIRR over the combined cash-flow stream of all
+                           investments this company has in current fund context
+      • aggregate_moic   — total_fv / total_cost
+
+    Context `fund_id` (str, optional) restricts the aggregation to investments
+    in that single fund. Without context, aggregates span all funds the
+    company is in (works for org-wide views too).
+    """
+    total_cost = serializers.SerializerMethodField()
+    total_fv = serializers.SerializerMethodField()
+    aggregate_irr_pct = serializers.SerializerMethodField()
+    aggregate_moic = serializers.SerializerMethodField()
+
     class Meta:
         model = PortfolioCompany
         fields = ['id', 'name', 'sector', 'sub_sector',
                   'headquarters_city', 'headquarters_country',
                   'co_investors',
-                  'is_active', 'is_quoted', 'listing_exchange']
+                  'is_active', 'is_quoted', 'listing_exchange',
+                  'total_cost', 'total_fv',
+                  'aggregate_irr_pct', 'aggregate_moic']
+
+    # ---- Aggregation helpers (universal — no fund-specific logic) ----
+
+    def _company_invs(self, obj):
+        """Investments for this company, restricted to context['fund_id'] if set."""
+        qs = obj.investments.all()
+        fund_id = (self.context or {}).get('fund_id')
+        if fund_id:
+            qs = qs.filter(scheme__fund_id=fund_id)
+        return qs
+
+    def get_total_cost(self, obj):
+        from django.db.models import Sum
+        v = self._company_invs(obj).aggregate(s=Sum('total_invested'))['s']
+        return float(v) if v is not None else None
+
+    def get_total_fv(self, obj):
+        """Sum of (exit proceeds for exited) + (cost × fund_markup proxy for active).
+        Per-investment FV requires Valuation rows; when those exist, the Phase 4
+        derivation already used them. Here we approximate the company-level FV
+        the same way Phase 4 did, so dashboard numbers reconcile.
+        """
+        from decimal import Decimal
+        from investments.models import ExitEvent
+        total = Decimal('0')
+        any_value = False
+        for inv in self._company_invs(obj).prefetch_related('exit_scenarios'):
+            exits = ExitEvent.objects.filter(investment=inv)
+            if exits.exists():
+                for e in exits:
+                    p = e.net_exit_proceeds or e.proceeds
+                    if p is not None:
+                        total += Decimal(str(p))
+                        any_value = True
+            elif inv.moic is not None and inv.total_invested is not None:
+                total += Decimal(str(inv.moic)) * Decimal(str(inv.total_invested))
+                any_value = True
+        return float(total) if any_value else None
+
+    def get_aggregate_irr_pct(self, obj):
+        """Compute company-level IRR by combining cash flows across this
+        company's investments. Pure-Python XIRR (same algorithm as Phase 4).
+        """
+        from decimal import Decimal
+        from investments.models import ExitEvent
+        from dataimport.phase4_derivations import _xirr, _latest_fund_markup, _estimate_current_fv
+        from datetime import date as _date
+        invs = list(self._company_invs(obj).prefetch_related('tranches'))
+        if not invs:
+            return None
+        # Need a fund context to compute markup proxy for active investments
+        fund = invs[0].scheme.fund
+        markup = _latest_fund_markup(fund)
+        cashflows = []
+        today = _date.today()
+        for inv in invs:
+            for t in inv.tranches.all():
+                if t.amount is not None and t.date is not None:
+                    cashflows.append((t.date, -Decimal(str(t.amount))))
+            exits = ExitEvent.objects.filter(investment=inv)
+            had_exit = False
+            for e in exits:
+                amt = e.net_exit_proceeds or e.proceeds
+                if e.exit_date and amt:
+                    cashflows.append((e.exit_date, Decimal(str(amt))))
+                    had_exit = True
+            if not had_exit:
+                fv = _estimate_current_fv(inv, markup)
+                if fv:
+                    cashflows.append((today, fv))
+        irr = _xirr(cashflows)
+        return float(irr) if irr is not None else None
+
+    def get_aggregate_moic(self, obj):
+        cost = self.get_total_cost(obj)
+        fv = self.get_total_fv(obj)
+        if cost and cost > 0 and fv is not None:
+            return round(fv / cost, 4)
+        return None
 
 
 # ── Investment & Tranche ─────���───────────────────────────────
@@ -71,7 +170,8 @@ class InvestmentListSerializer(serializers.ModelSerializer):
             'exceeds_10pct_threshold', 'threshold_breach_date',
             'total_invested', 'investment_date',
             'currency', 'status', 'status_display',
-            'sector', 'stage', 'irr_pct', 'board_seat', 'is_lead_investor',
+            'sector', 'stage', 'irr_pct', 'moic',
+            'board_seat', 'is_lead_investor',
             'tranche_count', 'latest_valuation',
             'created_at',
         ]
@@ -100,7 +200,8 @@ class InvestmentDetailSerializer(serializers.ModelSerializer):
             'exceeds_10pct_threshold', 'threshold_breach_date',
             'total_invested', 'investment_date',
             'currency', 'status', 'status_display',
-            'sector', 'description', 'board_seat', 'is_lead_investor',
+            'sector', 'stage', 'irr_pct', 'moic',
+            'description', 'board_seat', 'is_lead_investor',
             'write_off_date',
             'tranches',
             'created_by', 'created_at', 'updated_at',

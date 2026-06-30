@@ -118,14 +118,19 @@ def _normalise(text) -> str:
     return s.replace('_', ' ').replace('-', ' ').replace('.', ' ')
 
 
-def _header_text_of_sheet(ws, scan_rows: int = 12) -> str:
+def _header_text_of_rows(rows: list, scan_rows: int = 12) -> str:
     """Concatenate the first `scan_rows` rows' cell text. Lowercased.
+
+    Only scans the header area (first 12 rows) — that's all the classifier
+    needs to decide which layer a sheet belongs to. The full sheet content
+    is still in the cache for downstream extraction; this is classification
+    metadata only, not data extraction.
 
     Scans 12 rows instead of 6 to survive banner / merged-cell / title-band
     layouts where the real header sits at row 7-10 (common in MIS files).
     """
     parts = []
-    for i, row in enumerate(ws.iter_rows(values_only=True)):
+    for i, row in enumerate(rows):
         if i >= scan_rows:
             break
         for v in row:
@@ -135,9 +140,9 @@ def _header_text_of_sheet(ws, scan_rows: int = 12) -> str:
     return ' | '.join(parts)
 
 
-def _count_date_headers(ws, scan_rows: int = 12) -> int:
+def _count_date_headers_in_rows(rows: list, scan_rows: int = 12) -> int:
     """How many date-like tokens appear in the header rows? > 3 → time-series."""
-    text = _header_text_of_sheet(ws, scan_rows=scan_rows)
+    text = _header_text_of_rows(rows, scan_rows=scan_rows)
     return len(_DATE_HEADER_RE.findall(text))
 
 
@@ -172,18 +177,24 @@ def classify_workbook(filepath: str) -> dict:
                                                  'time_series_hint': bool}}
         }
     """
-    wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
+    # Read through the shared in-memory cache — this is the FIRST consumer
+    # in the import pipeline, so it triggers the one-and-only disk read.
+    # Every Phase 3 module downstream reads from the same cache, so the file
+    # on disk is irrelevant after this point.
+    from .workbook_cache import load_workbook
+    cached = load_workbook(filepath)
     routing = {'L1': [], 'L2': [], 'L3': []}
     detail = {}
 
-    for sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
-        rows = ws.max_row or 0
-        cols = ws.max_column or 0
+    for sheet_name in cached['sheets']:
+        sheet_data = cached['data'][sheet_name]
+        rows_count = sheet_data['max_row']
+        cols_count = sheet_data['max_col']
+        all_rows = sheet_data['rows']
 
-        header_text = _header_text_of_sheet(ws)
-        date_hits = _count_date_headers(ws)
-        time_series_hint = date_hits >= 3 and rows >= 10
+        header_text = _header_text_of_rows(all_rows)
+        date_hits = _count_date_headers_in_rows(all_rows)
+        time_series_hint = date_hits >= 3 and rows_count >= 10
 
         domain = _classify_domain(sheet_name, header_text)
         layer = DOMAIN_TO_LAYER.get(domain, 'L1')   # safe default
@@ -216,12 +227,10 @@ def classify_workbook(filepath: str) -> dict:
         detail[sheet_name] = {
             'domain': domain,
             'layer': layer,
-            'rows': rows,
-            'cols': cols,
+            'rows': rows_count,
+            'cols': cols_count,
             'time_series_hint': time_series_hint,
         }
-
-    wb.close()
 
     n = sum(len(v) for v in routing.values())
     logger.info(

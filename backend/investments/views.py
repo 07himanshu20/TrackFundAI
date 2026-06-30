@@ -1628,7 +1628,12 @@ def portfolio_company_list(request):
         active = request.query_params.get('active')
         if active is not None:
             qs = qs.filter(is_active=active.lower() == 'true')
-        return Response(PortfolioCompanyListSerializer(qs, many=True).data)
+        # Pass fund_id into the serializer context so per-company
+        # IRR/MOIC aggregates are restricted to the active fund.
+        ser_ctx = {'fund_id': fund_id} if fund_id else {}
+        return Response(PortfolioCompanyListSerializer(
+            qs, many=True, context=ser_ctx,
+        ).data)
 
     ser = PortfolioCompanySerializer(data=request.data)
     ser.is_valid(raise_exception=True)

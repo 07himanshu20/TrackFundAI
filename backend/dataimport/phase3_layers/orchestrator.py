@@ -3,7 +3,8 @@ Phase 3 Orchestrator — main entry point: run_phase3_import(import_file, progre
 
 Pipeline:
   1. Open workbook (encrypted-file guard); classify sheets via workbook_router
-  2. Plan chunks per layer — bin-pack + row-range split for huge sheets
+  2. Plan chunks per layer — ONE chunk per populated sheet; row-range split
+     only when a single sheet alone exceeds the per-call output budget
   3. Build identity context (Cover + Fund_Master raw text → replicated to L2/L3)
   4. Multi-pass parallel execution. Failed chunks get auto-split and resubmitted
      to the SAME ThreadPool (C7). Sub-chunks are produced by halving the row
@@ -96,77 +97,78 @@ def _serialize_sheets(filepath: str, sheet_names: list[str],
         return '(no sheets routed to this layer)', {}
 
     row_ranges = row_ranges or {}
-    wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
+    # Read through the shared in-memory cache — no disk access. File can be
+    # gone, the cache is authoritative.
+    from .workbook_cache import load_workbook
+    cached = load_workbook(filepath)
     parts: list[str] = []
     meta: dict = {}
 
     want = set(sheet_names)
-    try:
-        for sh in wb.sheetnames:
-            if sh not in want:
-                continue
-            ws = wb[sh]
-            nrows = ws.max_row or 0
-            ncols = ws.max_column or 0
+    for sh in cached['sheets']:
+        if sh not in want:
+            continue
+        sheet_data = cached['data'][sh]
+        nrows = sheet_data['max_row']
+        ncols = sheet_data['max_col']
+        all_rows = sheet_data['rows']
 
-            rrange = row_ranges.get(sh)
-            if rrange:
-                start, end = int(rrange[0]), int(rrange[1])
-                banner = (
-                    f'\n===== SHEET: {sh} (rows={nrows}, cols={ncols}, '
-                    f'CHUNK SLICE: populated-rows[{start}:{end}]) ====='
-                )
-            else:
-                start, end = None, None
-                banner = f'\n===== SHEET: {sh} (rows={nrows}, cols={ncols}) ====='
+        rrange = row_ranges.get(sh)
+        if rrange:
+            start, end = int(rrange[0]), int(rrange[1])
+            banner = (
+                f'\n===== SHEET: {sh} (rows={nrows}, cols={ncols}, '
+                f'CHUNK SLICE: populated-rows[{start}:{end}]) ====='
+            )
+        else:
+            start, end = None, None
+            banner = f'\n===== SHEET: {sh} (rows={nrows}, cols={ncols}) ====='
 
-            parts.append(banner)
+        parts.append(banner)
 
-            # First pass: collect header preview (first N populated rows)
-            # when we're serving a sub-range that doesn't already include row 0.
-            header_lines: list[str] = []
-            need_header = (start is not None and start > 0)
-            if need_header:
-                header_collected = 0
-                for r_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
-                    cells = [_cell(v) for v in row]
-                    if not any(c for c in cells):
-                        continue
-                    header_lines.append(f'  R{r_idx}: ' + ' | '.join(cells))
-                    header_collected += 1
-                    if header_collected >= _HEADER_PREVIEW_ROWS:
-                        break
-
-            if header_lines:
-                parts.append('  [HEADER PREVIEW — column schema, do not re-emit as data]')
-                parts.extend(header_lines)
-                parts.append('  [DATA SLICE BEGINS]')
-
-            # Second pass: emit the actual row slice.
-            emitted = 0
-            populated_idx = 0
-            for r_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+        # First pass: collect header preview (first N populated rows)
+        # when we're serving a sub-range that doesn't already include row 0.
+        header_lines: list[str] = []
+        need_header = (start is not None and start > 0)
+        if need_header:
+            header_collected = 0
+            for r_idx, row in enumerate(all_rows, start=1):
                 cells = [_cell(v) for v in row]
                 if not any(c for c in cells):
                     continue
-                if start is not None:
-                    if populated_idx < start:
-                        populated_idx += 1
-                        continue
-                    if populated_idx >= end:
-                        break
-                parts.append(f'  R{r_idx}: ' + ' | '.join(cells))
-                emitted += 1
-                populated_idx += 1
+                header_lines.append(f'  R{r_idx}: ' + ' | '.join(cells))
+                header_collected += 1
+                if header_collected >= _HEADER_PREVIEW_ROWS:
+                    break
 
-            meta[sh] = {
-                'rows': nrows, 'cols': ncols,
-                'emitted_rows': emitted,
-                'header_preview_rows': len(header_lines),
-                'row_range': [start, end] if rrange else None,
-            }
-    finally:
-        wb.close()
+        if header_lines:
+            parts.append('  [HEADER PREVIEW — column schema, do not re-emit as data]')
+            parts.extend(header_lines)
+            parts.append('  [DATA SLICE BEGINS]')
+
+        # Second pass: emit the actual row slice.
+        emitted = 0
+        populated_idx = 0
+        for r_idx, row in enumerate(all_rows, start=1):
+            cells = [_cell(v) for v in row]
+            if not any(c for c in cells):
+                continue
+            if start is not None:
+                if populated_idx < start:
+                    populated_idx += 1
+                    continue
+                if populated_idx >= end:
+                    break
+            parts.append(f'  R{r_idx}: ' + ' | '.join(cells))
+            emitted += 1
+            populated_idx += 1
+
+        meta[sh] = {
+            'rows': nrows, 'cols': ncols,
+            'emitted_rows': emitted,
+            'header_preview_rows': len(header_lines),
+            'row_range': [start, end] if rrange else None,
+        }
     return '\n'.join(parts), meta
 
 
@@ -228,21 +230,19 @@ def _split_chunk(chunk: dict) -> list[dict]:
     layer = chunk['layer']
 
     if not row_ranges:
-        # Need to derive row counts to halve. Count populated rows per sheet.
-        wb = openpyxl.load_workbook(
-            chunk['_filepath'], data_only=True, read_only=True,
-        )
-        try:
-            for sname in sheets:
-                if sname not in wb.sheetnames:
-                    continue
-                count = 0
-                for row in wb[sname].iter_rows(values_only=True):
-                    if any(v is not None and v != '' for v in row):
-                        count += 1
-                row_ranges[sname] = (0, count)
-        finally:
-            wb.close()
+        # Need to derive row counts to halve. Count populated rows per sheet
+        # from the in-memory cache — no disk access; file can be gone.
+        from .workbook_cache import load_workbook
+        cached = load_workbook(chunk['_filepath'])
+        available = set(cached['sheets'])
+        for sname in sheets:
+            if sname not in available:
+                continue
+            count = sum(
+                1 for row in cached['data'][sname]['rows']
+                if any(v is not None and v != '' for v in row)
+            )
+            row_ranges[sname] = (0, count)
 
     half_a: dict = {}
     half_b: dict = {}
@@ -422,11 +422,93 @@ def _run_chunk(chunk_with_filepath: dict) -> dict:
             '_ok': False,
             '_error': f'non_dict_top_level: {type(data).__name__}',
         }
+
+    # ── Online completeness check (universal) ────────────────────────────
+    # Even when Gemini returns a syntactically valid JSON, it sometimes
+    # silently drops rows (e.g. PC025 SoilSense skipped mid-list, or sheet
+    # truncated as Gemini self-reports). Trigger the SAME row-range split
+    # path used by GeminiTruncated. This catches both:
+    #   (a) explicit self-report:  sheet_completeness[].truncated_in_prompt = true
+    #   (b) implicit drop:         rows_extracted < 0.95 * source rows
+    # Only sheets owned by THIS chunk are evaluated — other chunks own the rest.
+    dropped = _chunk_dropped_sheets(data, chunk, filepath)
+    if dropped and depth < _MAX_SPLIT_DEPTH:
+        sub_chunks = _split_chunk(chunk)
+        for sc in sub_chunks:
+            sc['_filepath'] = filepath
+            sc['_identity_context'] = identity_ctx
+        logger.warning(
+            f'[phase3.runner] {chunk["chunk_id"]} silently dropped rows on '
+            f'{len(dropped)} sheet(s) ({dropped}) — resubmitting '
+            f'{len(sub_chunks)} sub-chunks (depth={depth})'
+        )
+        return {
+            'chunk_id': chunk['chunk_id'],
+            'layer': chunk['layer'],
+            'data': {},
+            '_resubmit': sub_chunks,
+        }
+    if dropped and depth >= _MAX_SPLIT_DEPTH:
+        # Surface but accept — at max depth, taking what we have is better
+        # than infinite splitting. The post-import audit logs this too.
+        logger.error(
+            f'[phase3.runner] {chunk["chunk_id"]} at max split depth '
+            f'{depth} still missing rows on {dropped} — accepting partial'
+        )
+
     return {
         'chunk_id': chunk['chunk_id'],
         'layer': chunk['layer'],
         'data': data,
     }
+
+
+def _chunk_dropped_sheets(data: dict, chunk: dict, filepath: str) -> list:
+    """Return list of sheet names in this chunk where Gemini ran out of output
+    budget and explicitly self-reported truncation.
+
+    Universal across any sheet/fund.
+
+    SINGLE SIGNAL — trust Gemini's explicit truncated_in_prompt flag only.
+
+    Why this is the right approach (validated 2026-06-30 on Bharatcrest):
+      • The ROW PRESERVATION RULE in JSON_OUTPUT_CONTRACT instructs Gemini to
+        set sheet_completeness[].truncated_in_prompt = true whenever it cannot
+        fit all rows in its output budget. Gemini honours this reliably.
+      • The previous implicit ratio check (rows_extracted < 0.95 × source rows)
+        produced systematic false positives because:
+          – Gemini's rows_extracted counts ONLY data rows it emitted as records
+            (correctly excluding headers, banners, subtotals, blank separators).
+          – The denominator (source populated rows) counts ALL non-empty rows
+            including those very headers / banners / subtotals.
+          – Ratio is therefore always < 1.0 on row-dense sheets even when 100%
+            of data was captured. Investment_Register at 22.2K input → 21.5K
+            output flagged "dropped" with this rule, then cascaded through 5
+            executor passes and ~200 Gemini calls.
+      • Trusting the explicit flag is universal, simple, and matches the
+        contract we already enforce in the prompt.
+    """
+    chunk_sheets = chunk.get('sheets') or []
+    if not chunk_sheets:
+        return []
+
+    completeness = data.get('sheet_completeness') or []
+    if not isinstance(completeness, list):
+        completeness = []
+    by_name = {}
+    for rec in completeness:
+        if not isinstance(rec, dict):
+            continue
+        sn = rec.get('sheet_name')
+        if sn:
+            by_name[sn] = rec
+
+    dropped = []
+    for sname in chunk_sheets:
+        rec = by_name.get(sname, {})
+        if rec.get('truncated_in_prompt') is True:
+            dropped.append(sname)
+    return dropped
 
 
 # ── I2: Row-completeness audit ───────────────────────────────────────────────
@@ -523,10 +605,14 @@ def run_phase3_import(import_file, progress_cb: Optional[Callable] = None):
         _p(3, 'Phase 3: opening workbook…')
         filepath = import_file.file.path
 
-        # ── Step 0: encrypted-file guard (J8) ────────────────────────────
+        # ── Step 0: encrypted-file guard + EAGER load into in-memory cache ─
+        # This is the ONLY place Phase 3 reads the file on disk. Every
+        # downstream consumer (router, chunker, prompt builder, completeness
+        # validator) reads from workbook_cache. After this point the file
+        # on disk can vanish without breaking the import.
         try:
-            wb_probe = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
-            wb_probe.close()
+            from .workbook_cache import load_workbook as _eager_load
+            _eager_load(filepath)
         except Exception as e:
             err = f'workbook open failed: {type(e).__name__}: {e}'
             if any(t in str(e).lower() for t in ('encrypted', 'password', 'invalid', 'badzipfile')):
@@ -545,7 +631,7 @@ def run_phase3_import(import_file, progress_cb: Optional[Callable] = None):
         _p(10, f'Phase 3: routed {len(l1_sheets)} → L1, {len(l2_sheets)} → L2, {len(l3_sheets)} → L3')
 
         # ── Step 2: plan chunks per layer ────────────────────────────────
-        _p(12, 'Phase 3: planning chunks (bin-pack + row-range for huge sheets)…')
+        _p(12, 'Phase 3: planning chunks (one-sheet-per-call; row-range split for huge sheets)…')
         jobs: list[dict] = []
         jobs += plan_chunks(filepath, 'L1', l1_sheets)
         jobs += plan_chunks(filepath, 'L2', l2_sheets)
@@ -670,30 +756,14 @@ def run_phase3_import(import_file, progress_cb: Optional[Callable] = None):
         except Exception as e:
             logger.warning(f'[Phase 3] could not save unified JSON: {e}')
 
-        # ── Step 10: XIRR safety net ─────────────────────────────────────
-        _p(82, 'Phase 3: computing precise XIRR from LP cashflows…')
-        try:
-            from ..single_call_extractor import _compute_xirr_from_cashflows
-            fp_block = unified.setdefault('fund_performance', {})
-            cashflows = list(fp_block.get('net_irr_cashflows') or [])
-            if cashflows:
-                nav_latest = fp_block.get('fund_nav_latest') or fp_block.get('total_unrealised_fv_holding')
-                as_of_date = fp_block.get('as_of_date')
-                last = cashflows[-1] if cashflows else None
-                if (nav_latest and as_of_date
-                        and (not last or last.get('type') != 'distribution'
-                             or str(last.get('date')) != str(as_of_date))):
-                    cashflows.append({
-                        'date': as_of_date,
-                        'amount': float(nav_latest),
-                        'type': 'distribution',
-                    })
-                    fp_block['net_irr_cashflows'] = cashflows
-                irr = _compute_xirr_from_cashflows(cashflows)
-                if irr is not None:
-                    fp_block['net_irr_computed'] = irr
-        except Exception as e:
-            logger.warning(f'[Phase 3] XIRR computation skipped: {e}')
+        # ── Step 10: Net IRR — DELIBERATELY moved to the Phase 4 aggregator.
+        # The previous safety net here appended a synthetic "terminal NAV"
+        # cashflow entry (using fund_nav_latest OR total_unrealised_fv_holding)
+        # which inflated Net IRR whenever Gemini fabricated the NAV. Net IRR
+        # is now computed downstream by compute_all_fund_aggregates() from
+        # ONLY real ledger events: CapitalCall (negative) + Distribution
+        # (positive) + terminal NAV (only when extracted from a real cell).
+        # Same DB rows → same IRR every re-import. ────────────────────────
 
         # ── Step 11: persist ─────────────────────────────────────────────
         _p(85, 'Phase 3: persisting to database…')
@@ -747,3 +817,11 @@ def run_phase3_import(import_file, progress_cb: Optional[Callable] = None):
         }
     finally:
         _delete_sentinel()
+        # Free the in-memory workbook cache for this import. Always runs,
+        # regardless of success / failure / exception path. Universal.
+        try:
+            from .workbook_cache import evict as _evict_cache
+            # filepath may not be bound if we failed before line 628.
+            _evict_cache(locals().get('filepath') or '')
+        except Exception:
+            pass

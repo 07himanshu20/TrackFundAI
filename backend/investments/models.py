@@ -162,6 +162,11 @@ class Investment(models.Model):
         max_digits=8, decimal_places=2, null=True, blank=True,
         help_text='Gross IRR % for this investment (e.g. 45.92 means 45.92%)',
     )
+    moic = models.DecimalField(
+        max_digits=10, decimal_places=4, null=True, blank=True,
+        help_text='Multiple on Invested Capital (e.g. 2.7500 means 2.75x). '
+                  'Computed in Phase 4 from tranches + exits + current FV.',
+    )
     description = models.TextField(blank=True)
 
     # Governance

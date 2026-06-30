@@ -490,14 +490,27 @@ def persist_phase2(data: dict, import_file, organization, user,
         _p(93, 'Phase 2: NAV walk…')
         counts['nav_records'] = _persist_nav_records(scheme, data.get('nav_records') or [])
 
-        # ---- CarriedInterest + FundMetrics ----
-        _p(95, 'Phase 2: Carry + fund metrics…')
-        _persist_carried_interest(scheme, data.get('waterfall') or {}, fp)
+        # ---- UNIVERSAL aggregator: deterministic fund-level metrics ----
+        # Single source of truth — runs ONCE on persisted atomic ledger
+        # rows + extracted LPA terms + Gemini's cell-ref-extracted overrides.
+        # Both CarriedInterest and FundMetric write from the same dict so
+        # they cannot diverge. Re-importing the same file MUST yield the
+        # same numbers because all inputs are deterministic.
+        _p(95, 'Phase 2: Aggregating fund-level metrics (deterministic Python)…')
+        from .phase4_derivations import compute_all_fund_aggregates
+        aggregates = compute_all_fund_aggregates(fund, scheme, data)
+        if aggregates.get('reasons'):
+            for k, why in aggregates['reasons'].items():
+                logger.info(f'[phase4.aggregator] {k}: {why}')
+
+        _p(96, 'Phase 2: Carry + fund metrics…')
+        _persist_carried_interest(scheme, aggregates, data.get('waterfall') or {}, fp)
         counts['fund_metrics'] = _persist_fund_metrics(
             organization, scheme, fp, data.get('waterfall') or {},
             data.get('valuations') or [], import_file,
             reconciliation=data.get('__reconciliation__') or None,
             fm=fm,
+            aggregates=aggregates,
         )
 
         # ---- Per-company periodic KPIs ----
@@ -522,13 +535,33 @@ def persist_phase2(data: dict, import_file, organization, user,
             organization, fund, data.get('budget_vs_actual') or []
         )
 
+    # ---- Phase 4: per-investment IRR + MOIC derivation (post-commit) ----
+    # Universal across funds/sectors. Pure Python math, no Gemini call.
+    # Runs OUTSIDE the transaction so derivation failures never roll back
+    # the persisted base records. ~70ms for a 70-investment fund.
+    try:
+        _p(99, 'Phase 4: Per-investment IRR + MOIC derivation…')
+        from .phase4_derivations import derive_fund_investment_metrics
+        deriv = derive_fund_investment_metrics(fund)
+        counts['phase4_irr_set'] = deriv.get('irr_set', 0)
+        counts['phase4_moic_set'] = deriv.get('moic_set', 0)
+        counts['phase4_exit_irr_set'] = deriv.get('exit_irr_set', 0)
+    except Exception as e:
+        logger.warning(f'Phase 4 derivation failed (non-fatal): {e}')
+
+    # NOTE: Phase 4 waterfall computation now happens INSIDE persist_phase2
+    # at progress 95-96% via compute_all_fund_aggregates(). This block is
+    # intentionally removed — both CarriedInterest and FundMetric are
+    # written from the same aggregator output so they cannot diverge.
+
     summary = (
         f'F:{counts.get("portfolio_companies",0)} I:{counts.get("investments",0)} '
         f'T:{counts.get("tranches",0)} V:{counts.get("valuations",0)} '
         f'LP:{counts.get("investors",0)} C:{counts.get("commitments",0)} '
         f'CC:{counts.get("capital_calls",0)} D:{counts.get("distributions",0)} '
         f'E:{counts.get("exits",0)} NAV:{counts.get("nav_records",0)} '
-        f'KPI:{counts.get("portfolio_kpis",0)}'
+        f'KPI:{counts.get("portfolio_kpis",0)} '
+        f'IRR4:{counts.get("phase4_irr_set",0)} MOIC4:{counts.get("phase4_moic_set",0)}'
     )
     return {
         'counts': counts,
@@ -1366,22 +1399,99 @@ def _persist_nav_records(scheme, rows: list) -> int:
     return count
 
 
-def _persist_carried_interest(scheme, wf: dict, fp: dict):
+_PROVENANCE_SYNTHETIC_MARKERS = (
+    'assumed', 'computed', 'synthetic', 'not_found_in_workbook',
+    'not found in workbook', 'estimate', 'derived from', 'fabricated',
+)
+
+
+def _provenance_is_extracted(prov_value) -> bool:
+    """True iff this provenance string looks like a real cell reference
+    ('Sheet!A1' or 'Sheet!A1:B3' or 'Sheet R12'). Returns False for any
+    formula (starts with '='), any '(assumed …)' tag, any 'computed …'
+    marker, or anything that doesn't include a cell-like token.
+
+    Universal — applies the same rule to every fund/sheet/field. Strict by
+    design: when in doubt, treat as non-extracted so Phase 4 can run a
+    deterministic Python computation instead of trusting Gemini's math.
+    """
+    if prov_value is None:
+        return False
+    s = str(prov_value).strip().lower()
+    if not s:
+        return False
+    if s.startswith('='):
+        return False                          # formula
+    for marker in _PROVENANCE_SYNTHETIC_MARKERS:
+        if marker in s:
+            return False                      # explicit synthetic
+    # A real cell-ref looks like "sheet!a1" — contains '!' followed by a
+    # letter+digit. Or "sheet r12" / "row 12 col B".
+    import re as _re
+    if _re.search(r'![a-z]+\d+', s):
+        return True
+    if _re.search(r'\br\d+\b', s):             # "R12"
+        return True
+    if _re.search(r'\brow\s*\d+', s):
+        return True
+    return False
+
+
+def _extracted_only(wf: dict, value_key: str, *prov_keys):
+    """Return wf[value_key] ONLY if its provenance entry looks like a real
+    cell reference. Otherwise return None — Phase 4 will compute it.
+
+    Provenance can be keyed under the value's own name or any of the
+    additional `prov_keys` (used when extraction wrote the value under a
+    different name than the provenance entry — e.g. 'step_2_preferred_return'
+    value alongside 'preferred_return_amount' provenance).
+    """
+    val = wf.get(value_key)
+    if val is None or val == '':
+        return None
+    prov_block = wf.get('provenance') or {}
+    if not isinstance(prov_block, dict):
+        return None
+    candidate_keys = (value_key,) + prov_keys
+    for k in candidate_keys:
+        if k in prov_block and _provenance_is_extracted(prov_block.get(k)):
+            return val
+    return None
+
+
+def _persist_carried_interest(scheme, aggregates: dict, wf: dict, fp: dict):
+    """Persist Carried Interest from the UNIVERSAL aggregator's output.
+
+    `aggregates` is the dict returned by compute_all_fund_aggregates() —
+    the single deterministic source consumed by both this writer and
+    _persist_fund_metrics. Same DB → same numbers, every run.
+
+    `wf` / `fp` are kept only for the calculation_status flag and as a
+    last-resort cell-extracted fallback for fields the aggregator could
+    not produce (e.g. when LPA terms missing and Gemini extracted a value
+    directly from a Carry_Clawback cell that the aggregator's override
+    detection missed).
+    """
     from accounting.models import CarriedInterest
 
-    cdate = _date(fp.get('as_of_date')) or date.today()
+    cdate = (aggregates or {}).get('as_of_date') if aggregates else None
+    cdate = cdate or _date(fp.get('as_of_date')) or date.today()
     defaults = {}
-    # Use _first_present (not `or`) so a literal 0 from Gemini persists.
-    # For ROC-phase funds, gross/net/clawback are legitimately 0 and must show
-    # as ₹0 on the dashboard, not "—".
-    _set_if(defaults, 'total_distributions', _d(_first_present(wf.get('total_distributions'), fp.get('total_distributions'))))
-    _set_if(defaults, 'total_called_capital', _d(_first_present(wf.get('total_capital_called'), fp.get('total_called_capital'))))
-    _set_if(defaults, 'preferred_return_amount', _d(_first_present(wf.get('preferred_return_amount'), wf.get('step_2_preferred_return'))))
-    _set_if(defaults, 'carry_base', _d(_first_present(wf.get('carry_base'), wf.get('available_after_roc_and_pref'))))
-    _set_if(defaults, 'carry_amount_gross', _d(_first_present(wf.get('carry_amount_gross'), fp.get('carry_amount_gross'))))
-    _set_if(defaults, 'carry_amount_net', _d(_first_present(wf.get('net_carry'), wf.get('carry_amount_net'), fp.get('carry_amount_net'))))
-    _set_if(defaults, 'gp_clawback_provision', _d(_first_present(wf.get('clawback_provision'), fp.get('gp_clawback_provision'))))
-    status = _str(wf.get('carry_status'), 16).lower()
+
+    def _take(field, agg_key):
+        v = (aggregates or {}).get(agg_key)
+        if v is not None:
+            _set_if(defaults, field, _d(v))
+
+    _take('total_distributions',     'total_distributions')
+    _take('total_called_capital',    'total_capital_called')
+    _take('preferred_return_amount', 'preferred_return_amount')
+    _take('carry_base',              'carry_base')
+    _take('carry_amount_gross',      'carry_amount_gross')
+    _take('carry_amount_net',        'carry_amount_net')
+    _take('gp_clawback_provision',   'gp_clawback_provision')
+
+    status = _str((wf or {}).get('carry_status'), 16).lower()
     if status in ('indicative', 'crystallised', 'paid'):
         defaults['calculation_status'] = status
 
@@ -1394,7 +1504,8 @@ def _persist_carried_interest(scheme, wf: dict, fp: dict):
 def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
                           valuation_rows: list, import_file,
                           reconciliation: dict | None = None,
-                          fm: dict | None = None) -> int:
+                          fm: dict | None = None,
+                          aggregates: dict | None = None) -> int:
     """Write canonical fund metrics into FundMetric model.
 
     Three universal fixes baked in:
@@ -1417,6 +1528,22 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
     from investments.models import Valuation, Investment
     from django.db.models import Subquery, OuterRef
     from django.db.models.functions import Coalesce
+
+    # ── STALE-ROW CLEANUP (universal) ─────────────────────────────────
+    # Every import re-derives every aggregate from scratch via the Phase 4
+    # aggregator. If a metric is no longer derivable (e.g. Commitment table
+    # empty this run → committed_capital = None), the persister loop below
+    # silently skips it — which would leave a wrong value from a PREVIOUS
+    # import sitting on the dashboard. Wipe the slate so only the current
+    # import's values survive. Universal across any fund / re-import.
+    stale_deleted, _ = FundMetric.objects.filter(
+        organization=organization, scheme=scheme,
+    ).delete()
+    if stale_deleted:
+        logger.info(
+            f'[persist_fund_metrics] cleared {stale_deleted} stale FundMetric '
+            f'row(s) for {scheme.name} before writing this import\'s values'
+        )
 
     # ── (a) Authoritative FV total: sum of latest persisted Valuation per
     #        Investment, preferring fair_value_of_holding. With Rule 26 fixed
@@ -1699,31 +1826,42 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
     else:
         dpi_value = _d(fp.get('dpi'))
 
-    # ── (b) Resolution with _first_present so 0 persists ───────────────
+    # ── (b) UNIVERSAL SOURCE OF TRUTH — aggregator output ──────────────
+    # Every aggregate below comes from compute_all_fund_aggregates() (Phase
+    # 4 deterministic aggregator). Same DB rows + same LPA terms = same
+    # numbers on every re-import. Gemini's stochastic computed values are
+    # already filtered out at the aggregator level (only cell-ref-extracted
+    # values pass through as overrides). Pre-aggregator wf/fp fallbacks
+    # remain only for the small set of fields the aggregator doesn't yet
+    # produce (LPA terms, accrued mgmt fees, step_1_return_of_capital).
+    agg = aggregates or {}
     metric_map = {
-        'moic':                     _first_present(fp.get('moic_portfolio'), fp.get('moic')),
-        'tvpi':                     fp.get('tvpi'),
-        'dpi':                      dpi_value,
-        'rvpi':                     fp.get('rvpi'),
-        'net_irr':                  _first_present(fp.get('net_irr_computed'), fp.get('net_irr_stated')),
-        'committed_capital':        fp.get('total_committed_capital'),
-        'called_capital':           called_capital_value,
-        'uncalled_capital':         uncalled_capital_value,
-        'invested_cost':            fp.get('total_invested_capital'),
-        'realized_proceeds':        fp.get('total_realised_proceeds'),
-        'lp_distributions':         lp_distributions_value,
-        'active_fair_value':        active_fv,
-        'fund_nav':                 fp.get('fund_nav_latest'),
-        'carry_amount_gross':       _zero_if_roc(_first_present(wf.get('carry_amount_gross'), fp.get('carry_amount_gross'))),
-        'carry_amount_net':         _zero_if_roc(_first_present(wf.get('net_carry'), wf.get('carry_amount_net'), fp.get('carry_amount_net'))),
-        'gp_clawback_provision':    _zero_if_roc(_first_present(wf.get('clawback_provision'), fp.get('gp_clawback_provision'))),
-        'gp_catchup_amount':        _zero_if_roc(_first_present(wf.get('step_3_catchup_amount'), wf.get('gp_catchup_amount'))),
-        'preferred_return_amount':  _first_present(wf.get('step_2_preferred_return'), wf.get('preferred_return_amount')),
-        'return_of_capital_amount': wf.get('step_1_return_of_capital'),
-        'carry_base':               _zero_if_roc(_first_present(wf.get('carry_base'), wf.get('available_after_roc_and_pref'))),
-        'lp_total_return':          _first_present(wf.get('lp_share'), wf.get('step_4a_lp_residual')),
-        'gp_total_distribution':    wf.get('gp_share'),
-        'accrued_management_fees':  fp.get('accrued_management_fees'),
+        # Performance ratios — aggregator-derived from atomic ledgers
+        'moic':                     agg.get('moic'),
+        'tvpi':                     agg.get('tvpi'),
+        'dpi':                      agg.get('dpi'),
+        'rvpi':                     agg.get('rvpi'),
+        'net_irr':                  agg.get('net_irr'),
+        # Totals — aggregator-derived
+        'committed_capital':        agg.get('total_committed_capital'),
+        'called_capital':           agg.get('total_capital_called'),
+        'uncalled_capital':         agg.get('total_uncalled_capital'),
+        'invested_cost':            agg.get('total_invested_capital'),
+        'realized_proceeds':        agg.get('total_realised_proceeds'),
+        'lp_distributions':         agg.get('total_distributions'),
+        'active_fair_value':        agg.get('total_unrealised_fv_holding') or active_fv,
+        'fund_nav':                 agg.get('fund_nav_latest'),
+        # Waterfall — aggregator-derived (extracted-first, else Python)
+        'carry_amount_gross':       _zero_if_roc(agg.get('carry_amount_gross')),
+        'carry_amount_net':         _zero_if_roc(agg.get('carry_amount_net')),
+        'gp_clawback_provision':    _zero_if_roc(agg.get('gp_clawback_provision')),
+        'gp_catchup_amount':        _zero_if_roc(agg.get('gp_catchup_amount')),
+        'preferred_return_amount':  agg.get('preferred_return_amount'),
+        'return_of_capital_amount': (wf or {}).get('step_1_return_of_capital'),
+        'carry_base':               _zero_if_roc(agg.get('carry_base')),
+        'lp_total_return':          _first_present((wf or {}).get('lp_share'), (wf or {}).get('step_4a_lp_residual')),
+        'gp_total_distribution':    (wf or {}).get('gp_share'),
+        'accrued_management_fees':  (fp or {}).get('accrued_management_fees'),
         # Scheme terms — dashboard reads these via FundMetric (not Scheme model)
         # to show "X% Hurdle · Y% Carry · Z% Mgmt Fee" in the Waterfall header.
         'hurdle_rate':              (fm or {}).get('hurdle_rate_pct'),
@@ -2045,6 +2183,12 @@ def _persist_portfolio_kpis(organization, scheme, rows: list) -> int:
         if not co:
             continue
         inv = Investment.objects.filter(scheme=scheme, portfolio_company=co).first()
+        if inv is None:
+            # PortfolioKPI.investment is a required FK. Skip rows where no
+            # Investment exists for this (scheme, company) — happens when the
+            # KPI sheet covers a company whose investment row was not
+            # extracted (rare) or doesn't exist in source. Universal.
+            continue
 
         for fname in kpi_fields:
             val = _d(row.get(fname))
