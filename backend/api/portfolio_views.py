@@ -25,6 +25,7 @@ from rest_framework import status
 from accounts.permissions import IsGPUser
 from api.portfolio import service as portfolio_service
 from api.portfolio import compare as compare_module
+from config.cache_utils import cached_api_view
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,7 @@ def _get_org_id(request):
 
 @api_view(["GET"])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=900)
 def portfolio_root(request):
     org_id = _get_org_id(request)
     if not org_id:
@@ -79,6 +81,7 @@ def portfolio_root(request):
 
 @api_view(["GET"])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=900)
 def portfolio_node(request, node_id: str):
     org_id = _get_org_id(request)
     if not org_id:

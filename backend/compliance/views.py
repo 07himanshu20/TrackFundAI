@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from accounts.audit import log_audit
 from accounts.fund_access_helpers import get_accessible_fund_ids, user_has_fund_access
 from accounts.permissions import IsGPUser
+from config.cache_utils import cached_api_view
 from .models import (
     SEBIReport, AMLDueDiligence, ComplianceTestReport,
     CTRChecklistItem, EquityThresholdAlert, ComplianceCalendar,
@@ -28,6 +29,7 @@ from .serializers import (
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def sebi_report_list(request):
     org = request.organization
     if not org:
@@ -90,6 +92,7 @@ def sebi_report_detail(request, report_id):
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def aml_list(request):
     org = request.organization
     if not org:
@@ -143,6 +146,7 @@ def aml_detail(request, aml_id):
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def ctr_list(request):
     org = request.organization
     if not org:
@@ -258,6 +262,7 @@ def ctr_checklist_detail(request, item_id):
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def threshold_alert_list(request):
     org = request.organization
     if not org:
@@ -318,6 +323,7 @@ def threshold_alert_detail(request, alert_id):
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def calendar_list(request):
     org = request.organization
     if not org:

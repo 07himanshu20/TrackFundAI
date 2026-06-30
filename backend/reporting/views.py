@@ -6,11 +6,13 @@ from rest_framework import status
 
 from accounts.permissions import IsGPUser
 from accounts.fund_access_helpers import get_accessible_fund_ids
+from config.cache_utils import cached_api_view
 from .models import ReportingCalendar, GeneratedReport
 
 
 @api_view(['GET'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=600)
 def calendar_list(request):
     """
     List reporting calendar obligations for the user's accessible funds.
@@ -140,6 +142,7 @@ def generate_report(request, obligation_id):
 
 @api_view(['GET'])
 @permission_classes([IsGPUser])
+@cached_api_view(timeout=300)
 def generated_reports_list(request):
     """List generated reports for the org."""
     org = request.organization

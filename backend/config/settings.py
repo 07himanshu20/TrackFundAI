@@ -5,7 +5,19 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-load_dotenv(BASE_DIR / '.env')
+# Environment-aware .env loading.
+#   TFAI_ENV=local  -> .env.local   (your Mac)
+#   TFAI_ENV=dev    -> .env.dev     (staging on the EC2 web server)
+#   TFAI_ENV=prod   -> .env.prod    (production on the EC2 web server)
+#   TFAI_ENV unset  -> .env         (legacy; current tunneled config)
+TFAI_ENV = os.getenv('TFAI_ENV', '').strip()
+if TFAI_ENV:
+    _env_file = BASE_DIR / f'.env.{TFAI_ENV}'
+    if not _env_file.exists():
+        raise RuntimeError(f'TFAI_ENV={TFAI_ENV} requested but {_env_file} not found')
+    load_dotenv(_env_file)
+else:
+    load_dotenv(BASE_DIR / '.env')
 
 SECRET_KEY = os.getenv('SECRET_KEY', 'fallback-secret-key-change-in-production')
 DEBUG = os.getenv('DEBUG', 'True') == 'True'

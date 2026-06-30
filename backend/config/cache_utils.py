@@ -30,9 +30,20 @@ _API_PREFIX = 'api'
 _REGISTRY_PREFIX = 'reg'
 
 
-def _make_view_key(org_id, view_name, query_string):
-    """Build a deterministic cache key for an API response."""
-    qs_hash = hashlib.md5(query_string.encode()).hexdigest()[:12]
+def _make_view_key(org_id, view_name, query_string, path_kwargs=None):
+    """Build a deterministic cache key for an API response.
+
+    Includes URL path kwargs (e.g. node_id, company_id, scheme_id) so views
+    like /api/portfolio/node/<id>/ get distinct cache entries per id.
+    Without this, all calls to the same view share one entry — silently
+    returning the wrong row.
+    """
+    parts = [query_string]
+    if path_kwargs:
+        for k in sorted(path_kwargs):
+            parts.append(f'{k}={path_kwargs[k]}')
+    key_material = '|'.join(parts)
+    qs_hash = hashlib.md5(key_material.encode()).hexdigest()[:12]
     return f'{_API_PREFIX}:{org_id}:{view_name}:{qs_hash}'
 
 
@@ -77,7 +88,7 @@ def cached_api_view(timeout=300):
             org_id = str(org.id)
             view_name = view_func.__name__
             query_string = request.META.get('QUERY_STRING', '')
-            cache_key = _make_view_key(org_id, view_name, query_string)
+            cache_key = _make_view_key(org_id, view_name, query_string, kwargs)
 
             # Check cache — gracefully skip if Redis is unavailable
             try:

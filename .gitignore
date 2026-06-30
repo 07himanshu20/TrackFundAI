@@ -1,0 +1,145 @@
+# =============================================================================
+# TrackFundAI — .gitignore
+# =============================================================================
+# NEVER commit: secrets (.env), databases (sqlite/dumps), user data (media/),
+# logs, OS junk, IDE settings, venvs, build artifacts, ML/AI artifacts.
+
+# ---- Secrets & environment ----
+# IMPORTANT: real credentials live here. .env.example IS committed as a template.
+.env
+.env.*
+!.env.example
+
+# ---- Databases ----
+# Local SQLite (pre-Postgres migration) and any future dumps.
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3.bak
+db.sqlite3.pre_*
+*.dump
+*.sql.gz
+
+# ---- User-uploaded files & ML/AI outputs ----
+# media/ contains real LP names, fund Excel uploads, KYC docs — never commit.
+backend/media/
+backend/static_collected/
+backend/staticfiles/
+
+# ---- Logs ----
+*.log
+*.log.*
+server.log*
+import_audit.log
+import_log.txt
+celerybeat-schedule*
+celerybeat.pid
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+MANIFEST
+
+# ---- Virtual environments ----
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ---- Test / coverage ----
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.pytest_cache/
+.cache/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# ---- Type checkers / linters ----
+.mypy_cache/
+.pytype/
+.pyre/
+.ruff_cache/
+
+# ---- Django ----
+# Migrations ARE committed — they're part of the schema definition.
+# Do NOT add migrations/ here.
+local_settings.py
+
+# ---- Frontend (vanilla JS, no build step today, but future-proof) ----
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.parcel-cache/
+.next/
+out/
+
+# ---- OS / editor ----
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+._*
+
+# ---- IDE ----
+.idea/
+.vscode/
+*.swp
+*.swo
+*.swn
+*~
+*.sublime-project
+*.sublime-workspace
+
+# ---- Claude Code session state ----
+# CLAUDE.md (project instructions) IS committed.
+# .claude/agents/ and .claude/commands/ MAY be committed (team-shared).
+# Per-user / per-machine state stays out.
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/debug/
+.claude/projects/
+
+# ---- Misc temp / scratch ----
+*.tmp
+*.bak
+*.orig
+*.rej
+*.pid
+*.seed
+*.pid.lock
+
+# ---- Mock / sample data that may contain real LP/PII ----
+# These directories exist locally for testing but should NOT be pushed —
+# they often contain real names lifted from prod files for QA purposes.
+# Move sanitised fixtures into a tracked tests/fixtures/ folder if needed.
+Mock V.3/
+Updated Mock FIles/

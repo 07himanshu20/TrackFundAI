@@ -312,7 +312,7 @@ class Valuation(models.Model):
     valuation_date = models.DateField(
         help_text='SEBI: Quarterly valuation required',
     )
-    methodology = models.CharField(max_length=20, choices=METHOD_CHOICES)
+    methodology = models.CharField(max_length=100, choices=METHOD_CHOICES)
 
     # Value fields
     fair_value = models.DecimalField(
