@@ -13,13 +13,12 @@
 
 (() => {
   const API_BASE = (() => {
+    if (window.APP_CONFIG && window.APP_CONFIG.API_BASE) {
+      return window.APP_CONFIG.API_BASE;
+    }
     const p = window.location.port;
-    // If running directly from Django (port 8000) use relative path.
-    // Otherwise (live-server / http.server on 5500/5501/3000/etc) point at Django.
     const same = (p === '8000' || p === '' || p === '80' || p === '443');
     if (same) return '/api';
-    // Read the backend port from localStorage so it can be overridden at runtime,
-    // fallback to 8000 (the canonical Django dev port for this project).
     const backendPort = localStorage.getItem('tfai_backend_port') || '8000';
     return `http://127.0.0.1:${backendPort}/api`;
   })();

@@ -5,10 +5,12 @@
 # logs, OS junk, IDE settings, venvs, build artifacts, ML/AI artifacts.
 
 # ---- Secrets & environment ----
-# IMPORTANT: real credentials live here. .env.example IS committed as a template.
+# Every .env-format file is ignored, including .env.example.
+# If you need a template, share it out-of-band (Notion / 1Password / docs/).
 .env
 .env.*
-!.env.example
+*.env
+*.env.*
 
 # ---- Databases ----
 # Local SQLite (pre-Postgres migration) and any future dumps.
