@@ -179,7 +179,19 @@ LOGGING = {
 # -- Redis Cache --
 # Uses the same Redis instance as Celery but a different DB (db=1 for cache, db=0 for Celery)
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
-_redis_cache_url = REDIS_URL.rsplit('/', 1)[0] + '/1'  # Use db=1 for cache
+
+def _redis_url_with_db(url, db_num):
+    """Return `url` with its path component replaced by `/db_num`.
+
+    Robust to URLs written with OR without a trailing `/db`.
+    Naive `.rsplit('/', 1)` splits inside `redis://` when no db is present,
+    producing a malformed `redis://<db>` that hangs on connect.
+    """
+    from urllib.parse import urlparse, urlunparse
+    p = urlparse(url)
+    return urlunparse(p._replace(path=f'/{db_num}'))
+
+_redis_cache_url = _redis_url_with_db(REDIS_URL, 1)  # Use db=1 for cache
 
 CACHES = {
     'default': {
@@ -189,6 +201,9 @@ CACHES = {
         'KEY_PREFIX': 'tfai',
         'OPTIONS': {
             'db': 1,
+            'socket_timeout': 1.5,
+            'socket_connect_timeout': 1.5,
+            'retry_on_timeout': False,
         },
     }
 }
