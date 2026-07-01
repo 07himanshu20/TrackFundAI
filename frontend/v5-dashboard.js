@@ -4882,8 +4882,9 @@ function _showReportModal(report) {
   const flagsHtml = (report.risk_flags || []).map(f => `<div class="v5-insight-card red" style="margin-bottom:6px;font-size:11px">${esc(f)}</div>`).join('');
 
   // PDF download button
+  const _apiOrigin = (window.APP_CONFIG && window.APP_CONFIG.API_ORIGIN) || '';
   const pdfBtnHtml = report.report_id
-    ? `<button class="v5-btn v5-btn-ghost" style="font-size:11px;padding:6px 14px;margin-right:8px;background:rgba(5,150,105,0.1);color:#059669;border-color:#059669" onclick="window.open('/api/download-report/${esc(report.report_id)}/','_blank')">&#128229; Download PDF</button>`
+    ? `<button class="v5-btn v5-btn-ghost" style="font-size:11px;padding:6px 14px;margin-right:8px;background:rgba(5,150,105,0.1);color:#059669;border-color:#059669" onclick="window.open('${_apiOrigin}/api/download-report/${esc(report.report_id)}/','_blank')">&#128229; Download PDF</button>`
     : '';
 
   const overlay = document.createElement('div');
@@ -5572,7 +5573,7 @@ function startNewConversation() {
 async function deleteConversation(convId) {
   try {
     const token = Auth.getToken();
-    const apiBase = (window.location.port === '8000' || !window.location.port) ? '' : 'http://127.0.0.1:8000';
+    const apiBase = (window.APP_CONFIG && window.APP_CONFIG.API_ORIGIN) || '';
     await fetch(`${apiBase}/api/chatbot/conversations/${convId}/delete/`, {
       method: 'DELETE',
       headers: { 'Authorization': `Bearer ${token}` },
@@ -5617,7 +5618,7 @@ async function sendAIChat(text) {
 
   try {
     const token  = Auth.getToken();
-    const apiBase = (window.location.port === '8000' || !window.location.port) ? '' : 'http://127.0.0.1:8000';
+    const apiBase = (window.APP_CONFIG && window.APP_CONFIG.API_ORIGIN) || '';
     const payload = { query: q };
     if (_ctx.fundId) {
       payload.fund_id = _ctx.fundId;

@@ -20,13 +20,7 @@
   return;
   // eslint-disable-next-line no-unreachable
 
-  const API = (() => {
-    const p = window.location.port;
-    const same = (p === '8000' || p === '' || p === '80' || p === '443');
-    if (same) return '/api';
-    const backendPort = localStorage.getItem('tfai_backend_port') || '8000';
-    return `http://127.0.0.1:${backendPort}/api`;
-  })();
+  const API = (window.APP_CONFIG && window.APP_CONFIG.API_BASE) || '/api';
 
   /* ── Inject styles ────────────────────────────────────────── */
   const style = document.createElement('style');

@@ -1668,9 +1668,32 @@ def _auto_create_valuations(scheme) -> int:
                 cost_sum += cost
                 have_val_ids.add(inv.id)
 
+    # Universal fallback path: when no per-investment Valuation rows exist
+    # at all, the scheme markup is not derivable from valuations. Use the
+    # LATEST NAVRecord's investments_at_fair_value ÷ total invested cost.
+    # Works for any fund whose workbook has a NAV walk (Bharatcrest-style).
+    # If neither valuations nor NAV FMV data are available, return 0.
     if cost_sum <= 0:
-        return 0
-    markup = (fv_sum / cost_sum)
+        from accounting.models import NAVRecord as _NAV
+        latest_nav = (_NAV.objects.filter(scheme=scheme)
+                      .exclude(investments_at_fair_value__isnull=True)
+                      .order_by('-nav_date').first())
+        if latest_nav and latest_nav.investments_at_fair_value:
+            total_cost_across_invs = _D('0')
+            for inv in invs:
+                if inv.total_invested and inv.total_invested > 0:
+                    total_cost_across_invs += inv.total_invested
+            if total_cost_across_invs > 0:
+                markup = latest_nav.investments_at_fair_value / total_cost_across_invs
+                logger.info(f'[auto_valuation] no per-inv valuations — using NAV '
+                            f'FMV fallback: fund_fmv={latest_nav.investments_at_fair_value} '
+                            f'/ total_cost={total_cost_across_invs} = markup={markup:.4f}')
+            else:
+                return 0
+        else:
+            return 0
+    else:
+        markup = (fv_sum / cost_sum)
 
     today = _date_cls.today()
     created = 0
@@ -1886,7 +1909,14 @@ def _persist_nav_records(scheme, rows: list) -> int:
     for row in rows:
         if not isinstance(row, dict):
             continue
-        nd = _date(row.get('nav_date') or row.get('date') or row.get('period_end'))
+        # Universal NAV date: accept the canonical `nav_date`, or any of the
+        # common publication labels: `quarter` (Mar-20), `period` (Q1 FY22),
+        # `period_end`, `financial_year` (FY 2019-20), plain `date`.
+        # Fall back through _period_to_date() so Indian FY strings resolve.
+        raw = (row.get('nav_date') or row.get('date') or row.get('period_end')
+               or row.get('period') or row.get('quarter')
+               or row.get('financial_year') or row.get('fy'))
+        nd = _date(raw) or _period_to_date(raw)
         if not nd:
             continue
         # NOT-NULL on NAVRecord: total_nav, total_units_outstanding, nav_per_unit.
@@ -2104,12 +2134,18 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
     # tiles reflect only real source-reported valuations. The per-investment
     # FV column still shows synthetic estimates (read directly from Valuation).
     # Universal — synthetic rows are tagged at creation time.
+    # FV precedence: prefer `fair_value` (what the Cover/Summary sheet
+    # reports and what Excel-generating fund managers show as "Total FV"),
+    # fall back to `fair_value_of_holding`. For workbooks that populate only
+    # one column, the persister mirrors it into both — so both funds
+    # (equity-reporting like Multiples and holding-only like AI_Trivesta)
+    # yield the same authoritative number here.
     latest_per_inv = Valuation.objects.filter(
         investment=OuterRef('pk'),
     ).exclude(
         methodology='derived_from_cost_x_scheme_markup',
     ).order_by('-valuation_date').annotate(
-        holding_or_equity=Coalesce('fair_value_of_holding', 'fair_value'),
+        holding_or_equity=Coalesce('fair_value', 'fair_value_of_holding'),
     ).values('holding_or_equity')[:1]
     inv_qs = Investment.objects.filter(scheme=scheme).annotate(
         latest_fv=Subquery(latest_per_inv),
@@ -2436,7 +2472,14 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
         'invested_cost':            agg.get('total_invested_capital'),
         'realized_proceeds':        agg.get('total_realised_proceeds'),
         'lp_distributions':         agg.get('total_distributions'),
-        'active_fair_value':        agg.get('total_unrealised_fv_holding') or active_fv,
+        # Universal FV tile: prefer real-source aggregate → then any
+        # DB Valuation FV sum (includes synthetic) → then the fund's NAV FMV.
+        # This guarantees the dashboard tile shows a number for every fund,
+        # even those whose workbook has no dedicated Valuations sheet — the
+        # NAV walk's Unrealised FMV column is authoritative in that case.
+        'active_fair_value':        (agg.get('total_unrealised_fv_holding')
+                                     or active_fv
+                                     or agg.get('fund_nav_latest')),
         'fund_nav':                 agg.get('fund_nav_latest'),
         # Waterfall — aggregator-derived (extracted-first, else Python)
         # Waterfall metrics with Phase-3 wf-block fallback (Gemini-extracted
@@ -2741,6 +2784,7 @@ def _persist_portfolio_kpis(organization, scheme, rows: list) -> int:
         'ebitda', 'ebitda_margin_pct', 'pat', 'headcount',
         'gmv', 'orders', 'aov', 'returns_pct', 'repeat_pct',
         'mrr', 'arr', 'nrr', 'churn_rate', 'cac', 'ltv', 'ltv_cac_ratio',
+        'customers', 'new_customers',
         'burn_rate', 'runway_months', 'nim_pct', 'gnpa_pct', 'nnpa_pct',
         'roe_pct', 'capacity_utilization', 'export_pct', 'bed_occupancy',
         'arpob', 'cap_rate_pct', 'aum_value', 'cost_to_income', 'debt_to_ebitda',
@@ -2764,7 +2808,18 @@ def _persist_portfolio_kpis(organization, scheme, rows: list) -> int:
         if not isinstance(row, dict):
             continue
         co_name = _str(row.get('company_name'), 255)
-        period_label = _str(row.get('period'), 32)
+        # Universal period source: `period` is the canonical field, but sheet
+        # authors often publish just `financial_year` / `fy` / `year` when a
+        # KPI is annual, or `period_end` / `period_start` for BS-style rows.
+        period_label = _str(
+            row.get('period')
+            or row.get('financial_year')
+            or row.get('fy')
+            or row.get('year')
+            or row.get('period_end')
+            or row.get('period_start'),
+            32,
+        )
         if not co_name or not period_label:
             continue
         # PortfolioKPI.period is a DateField; convert label → date universally
@@ -2779,6 +2834,78 @@ def _persist_portfolio_kpis(organization, scheme, rows: list) -> int:
             # KPI sheet covers a company whose investment row was not
             # extracted (rare) or doesn't exist in source. Universal.
             continue
+
+        # ── Universal per-row derivations ──────────────────────────────
+        # Fund workbooks publish RAW P&L line items (Revenue, COGS, R&D,
+        # S&M, G&A, D&A) plus SaaS metrics (MRR, ARR, Churn, Customers,
+        # New Customers). The dashboard shows DERIVED ratios (Gross Margin
+        # %, EBITDA %, CAC, LTV, LTV/CAC) that don't appear as columns.
+        # Compute them here so the KPI matrix has values wherever the
+        # inputs exist. Universal across every fund's P&L sheet — only
+        # sets a field when it is currently missing.
+        # Universal input aliases — every fund's P&L sheet uses slightly
+        # different column names for the same concept. _first_present
+        # preserves a literal 0 (unlike Python's `or`).
+        _rev  = _d(_first_present(
+            row.get('revenue'), row.get('total_revenue'),
+            row.get('net_sales'), row.get('turnover'), row.get('top_line')))
+        _cogs = _d(_first_present(
+            row.get('cogs'), row.get('cost_of_revenue'),
+            row.get('cost_of_sales'), row.get('direct_cost')))
+        _rd   = _d(_first_present(
+            row.get('rd_cost'), row.get('rd_expense'),
+            row.get('research_and_development'))) or Decimal('0')
+        _mktg = _d(_first_present(
+            row.get('marketing_cost'), row.get('sales_and_marketing'),
+            row.get('sales_marketing'), row.get('sm_cost'))) or Decimal('0')
+        _ga   = _d(_first_present(
+            row.get('g_and_a'), row.get('ga_expense'),
+            row.get('general_and_admin'), row.get('sga'))) or Decimal('0')
+        _dep  = _d(_first_present(
+            row.get('depreciation'), row.get('depreciation_and_amortisation'),
+            row.get('d_and_a'))) or Decimal('0')
+        _nc   = _d(_first_present(
+            row.get('new_customers'), row.get('newly_acquired_customers'),
+            row.get('new_signups'), row.get('new_subscribers'),
+            row.get('new_users'), row.get('newly_added_customers')))
+        _cust = _d(_first_present(
+            row.get('customers'), row.get('total_customers'),
+            row.get('active_customers'), row.get('subscribers'),
+            row.get('users_count'), row.get('paying_customers'),
+            row.get('clients'), row.get('end_users')))
+        _arr  = _d(row.get('arr'))
+        _churn = _d(row.get('churn_rate'))
+
+        if _rev and _rev > 0 and _cogs is not None:
+            gp = _rev - _cogs
+            row.setdefault('gross_profit', gp)
+            row.setdefault('gross_margin_pct', (gp / _rev) * Decimal('100'))
+            # EBITDA = Revenue - COGS - OpEx (R&D + S&M + G&A). Excludes D&A.
+            ebitda = _rev - _cogs - _rd - _mktg - _ga
+            row.setdefault('ebitda', ebitda)
+            row.setdefault('ebitda_margin_pct', (ebitda / _rev) * Decimal('100'))
+
+        # CAC = S&M spend / new customers acquired. Convert Cr → INR
+        # (₹1 Cr = ₹1,00,00,000) so the tile shows a real per-customer cost.
+        if _mktg and _mktg > 0 and _nc and _nc > 0:
+            row.setdefault('cac',
+                (_mktg * Decimal('10000000')) / _nc)
+
+        # LTV ≈ ARPU × Gross Margin / Churn (SaaS textbook formula).
+        # ARPU = ARR / customers, all in Cr; convert final to INR.
+        if (_arr and _arr > 0 and _cust and _cust > 0
+                and _churn and _churn > 0
+                and _rev and _rev > 0 and _cogs is not None):
+            arpu_cr = _arr / _cust
+            gm = (_rev - _cogs) / _rev
+            row.setdefault('ltv',
+                (arpu_cr * gm / _churn) * Decimal('10000000'))
+
+        # LTV/CAC — universally computed once both are in the row.
+        _ltv = _d(row.get('ltv'))
+        _cac = _d(row.get('cac'))
+        if _ltv and _cac and _cac > 0:
+            row.setdefault('ltv_cac_ratio', _ltv / _cac)
 
         for fname in kpi_fields:
             val = _d(row.get(fname))

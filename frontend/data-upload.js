@@ -450,13 +450,7 @@
 
   function connectSSE(jobId) {
     const token = Auth.getToken();
-    const API_BASE = (() => {
-      const p = window.location.port;
-      const same = (p === '8000' || p === '' || p === '80' || p === '443');
-      if (same) return '';
-      const backendPort = localStorage.getItem('tfai_backend_port') || '8000';
-      return `http://127.0.0.1:${backendPort}`;
-    })();
+    const API_BASE = (window.APP_CONFIG && window.APP_CONFIG.API_ORIGIN) || '';
 
     const url = `${API_BASE}/api/dataimport/jobs/${jobId}/stream/?token=${token}`;
 

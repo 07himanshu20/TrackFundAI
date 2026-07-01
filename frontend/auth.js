@@ -12,16 +12,7 @@
 ============================================================ */
 
 (() => {
-  const API_BASE = (() => {
-    if (window.APP_CONFIG && window.APP_CONFIG.API_BASE) {
-      return window.APP_CONFIG.API_BASE;
-    }
-    const p = window.location.port;
-    const same = (p === '8000' || p === '' || p === '80' || p === '443');
-    if (same) return '/api';
-    const backendPort = localStorage.getItem('tfai_backend_port') || '8000';
-    return `http://127.0.0.1:${backendPort}/api`;
-  })();
+  const API_BASE = (window.APP_CONFIG && window.APP_CONFIG.API_BASE) || '/api';
 
   const KEYS = {
     access: 'tfai_access',

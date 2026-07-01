@@ -391,7 +391,7 @@
   // Fund Intelligence — Main JS
   // ─────────────────────────────────────────────────────────
 
-  const API = '/api';
+  const API = (window.APP_CONFIG && window.APP_CONFIG.API_BASE) || '/api';
   let currentFundId = null;
   let currentFundData = null;
   let gaugeCharts = {};

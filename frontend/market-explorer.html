@@ -410,7 +410,7 @@
   // Market Explorer — Main JS
   // ─────────────────────────────────────────────────────────
 
-  const API = '/api/market';
+  const API = ((window.APP_CONFIG && window.APP_CONFIG.API_BASE) || '/api') + '/market';
   let allOpportunities = [];
   let filteredOpportunities = [];
   let studiesMap = {};          // oppId → study

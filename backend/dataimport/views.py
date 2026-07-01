@@ -60,16 +60,22 @@ logger = logging.getLogger(__name__)
 # Startup banner — emitted once at import time so the active extractor path
 # and Gemini model are visible in every server log.
 import os as _os_boot
+_boot_phase6 = _os_boot.environ.get('USE_PHASE6', 'false').lower() in ('true', '1', 'yes')
 _boot_phase3 = _os_boot.environ.get('USE_PHASE3', 'true').lower() in ('true', '1', 'yes')
 _boot_model = _os_boot.environ.get('GEMINI_MODEL', 'gemini-2.5-flash')
 _boot_vertex = _os_boot.environ.get('GOOGLE_GENAI_USE_VERTEXAI', 'False').lower() in ('true', '1', 'yes')
 _boot_backend = 'Vertex AI (ADC)' if _boot_vertex else 'AI Studio (api_key)'
+if _boot_phase6:
+    _boot_extractor_desc = 'Phase 6 (single-call semantic classify + deterministic Python rows)'
+elif _boot_phase3:
+    _boot_extractor_desc = 'Phase 3 (Flavor A + B parallel layers)'
+else:
+    _boot_extractor_desc = 'single-call fallback'
 logger.info(
-    f'[BOOT] dataimport ready — extractor='
-    f'{"Phase 3 (Flavor A + B parallel layers)" if _boot_phase3 else "single-call fallback"}, '
+    f'[BOOT] dataimport ready — extractor={_boot_extractor_desc}, '
     f'model={_boot_model}, backend={_boot_backend}'
 )
-del _os_boot, _boot_phase3, _boot_model, _boot_vertex, _boot_backend
+del _os_boot, _boot_phase6, _boot_phase3, _boot_model, _boot_vertex, _boot_backend, _boot_extractor_desc
 
 
 # ---------------------------------------------------------------------------
@@ -272,9 +278,11 @@ def _import_event_generator(job, user):
     """
     import django.db
     import os as _os
-    # Phase 3 (Flavor A + Flavor B) — DEFAULT-ON. Always runs 3 parallel Gemini
-    # calls; Flavor B chunks any layer whose estimated output > 50K tokens.
-    # Set USE_PHASE3=false to fall back to the single-call extractor (emergency only).
+    # Phase 6 (semantic classify + deterministic Python rows) — takes priority
+    # when USE_PHASE6=true. Otherwise Phase 3 (Flavor A+B parallel layers) —
+    # DEFAULT-ON. Set USE_PHASE3=false to fall back to the single-call extractor
+    # (emergency only).
+    _USE_PHASE6 = _os.environ.get('USE_PHASE6', 'false').lower() in ('true', '1', 'yes')
     _USE_PHASE3 = _os.environ.get('USE_PHASE3', 'true').lower() in ('true', '1', 'yes')
 
     pending_files = list(job.files.filter(status='pending'))
@@ -333,10 +341,14 @@ def _import_event_generator(job, user):
         def _run_import(_rf=import_file, _pcb=progress_cb,
                         _q=event_queue,
                         _rh=result_holder, _eh=error_holder,
-                        _phase3=_USE_PHASE3):
+                        _phase6=_USE_PHASE6, _phase3=_USE_PHASE3):
             try:
                 django.db.close_old_connections()
-                if _phase3:
+                if _phase6:
+                    from .phase6_extractor import run_phase6_import
+                    logger.info(f'Phase 6 (semantic + Python rows) for {_rf.original_filename}')
+                    _rh[0] = run_phase6_import(_rf, _pcb)
+                elif _phase3:
                     from .phase3_layers.orchestrator import run_phase3_import
                     logger.info(f'Phase 3 (Flavor A+B) for {_rf.original_filename}')
                     _rh[0] = run_phase3_import(_rf, _pcb)

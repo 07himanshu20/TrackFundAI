@@ -313,7 +313,7 @@
   async function downloadDoc(docId) {
     try {
       const token = Auth.getToken();
-      const base = window.location.port === '8000' || window.location.port === '' ? '' : 'http://127.0.0.1:8000';
+      const base = (window.APP_CONFIG && window.APP_CONFIG.API_ORIGIN) || '';
       const r = await fetch(`${base}/api/documents/${docId}/download/`, {
         headers: {'Authorization': `Bearer ${token}`},
       });

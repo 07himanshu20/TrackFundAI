@@ -410,6 +410,8 @@ VALUATIONS_KPIS_FIELDS = {
     'cac': 'Customer Acquisition Cost — CAC, Customer Acquisition Cost, Blended CAC, Cost to Acquire',
     'ltv': 'Customer Lifetime Value — LTV, CLV, Customer LTV, Lifetime Value, Customer Value',
     'ltv_cac_ratio': 'LTV to CAC ratio — LTV/CAC, LTV:CAC, LTV CAC Ratio, Payback Multiple',
+    'customers': 'Active Customers / Users / Clients / Subscribers count — appears as Customers, Total Customers, Active Users, Subscribers, Users, Clients, Paying Customers, Customers / Clients / Units, End Users. UNIVERSAL: applies to any customer-count column on P&L/KPI sheets.',
+    'new_customers': 'New Customers Acquired in the period — appears as New Customers, New Signups, New Subscribers, New Users, New Clients, Newly Acquired, Acquisitions, New Additions. UNIVERSAL: needed to derive CAC = Sales & Marketing spend / New Customers.',
     # Sector-specific KPIs (Consumer, NBFC, Manufacturing, Real Estate, Healthcare)
     'gmv': 'Gross Merchandise Value — GMV, GMV (Cr), GMV in Crore, GMV (Lakhs), Gross Merch Value, Total GMV, Gross Sales Value',
     'revenue': 'Revenue / Net Sales — Revenue, Rev, Net Sales, Revenue (Cr), Rev(Cr), Net Revenue, Turnover, Top Line, Total Revenue',

@@ -13,7 +13,7 @@
  */
 
 const FundSelector = (() => {
-  const API_BASE = 'http://127.0.0.1:8000/api';
+  const API_BASE = (window.APP_CONFIG && window.APP_CONFIG.API_BASE) || '/api';
 
   // Persisted context across navigation
   const STORAGE_KEY_FUND   = 'tfai_selected_fund_id';

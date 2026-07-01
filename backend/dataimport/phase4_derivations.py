@@ -842,12 +842,17 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
     # per-investment FV column on the dashboard. Including them would pollute
     # IRR/MOIC/TVPI/RVPI by double-counting marked-up cost as fair value.
     # Universal across funds — synthetic rows are tagged at creation time.
+    # FV precedence: prefer `fair_value` (Cover/Summary "Total FV" column)
+    # over `fair_value_of_holding`. Universal: workbooks that expose only
+    # one FV column have both fields mirrored by the persister, so the
+    # coalesce is a no-op for them. Workbooks with distinct equity vs.
+    # holding columns (Multiples-style) get the value the Cover displays.
     latest_per_inv = Valuation.objects.filter(
         investment=OuterRef('pk'),
     ).exclude(
         methodology='derived_from_cost_x_scheme_markup',
     ).order_by('-valuation_date').annotate(
-        holding_or_equity=Coalesce('fair_value_of_holding', 'fair_value'),
+        holding_or_equity=Coalesce('fair_value', 'fair_value_of_holding'),
     ).values('holding_or_equity')[:1]
     inv_qs = Investment.objects.filter(scheme=scheme).annotate(
         latest_fv=Subquery(latest_per_inv),
