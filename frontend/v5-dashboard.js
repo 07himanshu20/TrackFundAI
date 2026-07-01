@@ -739,6 +739,20 @@ const _METRIC_COPY = {
     label: 'Net IRR — Net Internal Rate of Return',
     meaning: 'The annualised return LPs are earning, after fees and carry. Time-weighted so early returns count more.',
     formula: 'XIRR over LP cashflows: capital calls (out) + distributions (in) + ending NAV',
+    // Universal 3-tier priority ladder. The backend picks the highest-tier
+    // computation whose data is complete; the FundMetric.inputs_used carries
+    // `net_irr_method` so the panel can highlight which tier was chosen.
+    priority_ladder: [
+      { code: 'capitalcall_distribution_xirr',
+        label: 'Priority 1: Fund-level XIRR on CapitalCall + Distribution',
+        detail: 'ILPA-standard Net IRR. Used when the workbook publishes a full LP call/distribution ledger.' },
+      { code: 'cost_weighted_per_investment_irr',
+        label: 'Priority 2: Cost-weighted average of per-investment IRR (Gross)',
+        detail: 'Aggregates the manager-reported per-deal IRR%(Gross) column, weighted by invested cost. Used when calls are sparse but per-deal IRRs are provided.' },
+      { code: 'investment_cashflow_xirr',
+        label: 'Priority 3: Fund-level XIRR on Investment cashflows → LP terminal (Gross approx)',
+        detail: 'Last-resort XIRR from Investment.cost outflows to LP-holding terminal FV. Used when neither of the above data sources is available.' },
+    ],
   },
   active_fair_value: {
     label: 'Total Fair Value of Holdings',
@@ -923,6 +937,45 @@ function openProvenancePanel(metricKey) {
         ${principlesList}
         ${skippedBlock}
         ${disagreeBlock}
+      </div>`;
+  }
+
+  // ── Section 1.7: Net IRR priority-ladder — highlights which of the 3
+  // computation tiers was picked, with the full ladder for context.
+  // Rendered only for the net_irr metric when the backend passes the
+  // method tag through FundMetric.inputs_used.
+  if (metricKey === 'net_irr' && copy.priority_ladder) {
+    const chosenCode = rawInputs.net_irr_method || '';
+    const chosenLabel = rawInputs.net_irr_method_label || '';
+    const ladderRows = copy.priority_ladder.map(item => {
+      const isChosen = item.code === chosenCode;
+      const badge = isChosen
+        ? `<span style="display:inline-block;background:#dcfce7;color:#166534;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;margin-left:8px;">✓ used</span>`
+        : `<span style="display:inline-block;background:#f1f5f9;color:#64748b;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500;margin-left:8px;">skipped</span>`;
+      const rowStyle = isChosen
+        ? 'padding:10px;background:#f0fdf4;border-left:3px solid #16a34a;border-radius:4px;margin-bottom:6px;'
+        : 'padding:10px;background:#f8fafc;border-left:3px solid #cbd5e1;border-radius:4px;margin-bottom:6px;';
+      return `
+        <div style="${rowStyle}">
+          <div style="font-size:13px;color:#0f172a;font-weight:${isChosen ? 700 : 500};">
+            ${esc(item.label)}${badge}
+          </div>
+          <div style="font-size:11px;color:#64748b;margin-top:4px;line-height:1.5;">
+            ${esc(item.detail)}
+          </div>
+        </div>`;
+    }).join('');
+    html += `
+      <div class="prov-section">
+        <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600;">
+          Net IRR Priority Ladder
+        </div>
+        <div style="font-size:12px;color:#475569;line-height:1.5;margin-bottom:10px;">
+          Three computations are attempted in order. The first tier whose source data is
+          complete is used; the others are skipped.${chosenLabel
+            ? ` This fund used <b style="color:#0f172a;">${esc(chosenLabel)}</b>.` : ''}
+        </div>
+        ${ladderRows}
       </div>`;
   }
 
@@ -1163,11 +1216,22 @@ async function loadOverview() {
       { net_irr_source: 'FundMetric (single source of truth)' }
     ));
     // Net IRR card subtitle — real hurdle % from funds_scheme, not hardcoded "8%"
+    // Plus method-tag: shows which priority tier produced the IRR value so the
+    // user knows if it's ILPA Net (Tier 1), Cost-weighted Gross (Tier 2), or
+    // Investment-cashflow Gross approx (Tier 3). Universal for any fund.
     const _irrSub = $('ks-irr');
     if (_irrSub) {
       const _sch = await getSchemeForFund(_ctx.fundId);
       const _h = _sch ? _fmtSchemePct(_sch.hurdle_rate_pct) : null;
-      _irrSub.textContent = _h ? `vs Hurdle ${_h}` : 'vs Hurdle —';
+      const _irrRec = _derivedMetrics['net_irr'];
+      const _method = _irrRec && _irrRec.inputs_used && _irrRec.inputs_used.net_irr_method;
+      const _methodShort = ({
+        capitalcall_distribution_xirr:    'ILPA Net (Tier 1)',
+        cost_weighted_per_investment_irr: 'Gross · Cost-weighted (Tier 2)',
+        investment_cashflow_xirr:         'Gross · XIRR (Tier 3)',
+      })[_method] || null;
+      const _hurdleTxt = _h ? `vs Hurdle ${_h}` : 'vs Hurdle —';
+      _irrSub.textContent = _methodShort ? `${_hurdleTxt}  ·  ${_methodShort}` : _hurdleTxt;
     }
     if ($('kv-dep'))  $('kv-dep').textContent  = fmtCr(costCr);
     const corpus = _ctx.corpusTarget;

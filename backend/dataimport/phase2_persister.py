@@ -1208,6 +1208,15 @@ def _persist_portfolio(organization, scheme, rows: list, valuation_rows: list, u
             term = latest_fv_by_company.get(name)
             if tcf and term:
                 gemini_irr = _compute_investment_irr(tcf, term[1], term[0])
+        # Universal scale-normalisation: Excel stores percentages as
+        # decimal fractions (0.3329 = 33.29%). Gemini + Python read the raw
+        # fraction. All downstream code (Phase 4 XIRR, dashboard display,
+        # weighted-avg aggregation) treats irr_pct as PERCENT scale (e.g.,
+        # 33.29). Detect fraction-shape values (|v| < 5) and rescale.
+        # A real fund IRR is essentially never in the [-5%, +5%] range and
+        # then formatted as 5 not 0.05 — the choice is deterministic.
+        if gemini_irr is not None and abs(gemini_irr) < Decimal('5'):
+            gemini_irr = gemini_irr * Decimal('100')
         # Use update_or_create on irr_pct directly so a legitimate computed 0
         # (or negative) IRR overwrites stale data. _set_if skips 0 — wrong here.
         if gemini_irr is not None:
@@ -2357,14 +2366,44 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
             return ('(Total Distributions + Atomic FV) / Total Invested Capital',
                     f'(₹{T(_atomic_dist_total)} Cr + ₹{T(_atomic_fv)} Cr) / ₹{T(_atomic_invested)} Cr')
         if metric_key == 'net_irr':
-            # Show ACTUAL cash-flow inputs that the XIRR solver consumed:
-            # N calls totalling ₹X (out), N distributions totalling ₹Y (in),
-            # terminal FV ₹Z (in). Per user request — every value visible.
+            # Method-aware formula display. Net IRR is computed via a 3-tier
+            # priority ladder in phase4; the description shown here reflects
+            # which tier actually produced the current value + a small note
+            # of the fallback order so the user understands the choice.
+            _method = agg.get('net_irr_method')
+            _ladder_note = (
+                'Priority order: 1) Fund-level XIRR on CapitalCall + Distribution '
+                '(ILPA Net IRR)  →  2) Cost-weighted average of per-investment IRR '
+                '(Gross)  →  3) Fund-level XIRR on Investment cashflows → LP terminal '
+                '(Gross approx).'
+            )
+            if _method == 'capitalcall_distribution_xirr':
+                return (
+                    'Priority 1 (chosen): Fund-level XIRR on CapitalCall + Distribution. ' + _ladder_note,
+                    f'XIRR over {{ {_atomic_call_count} calls totalling −₹{T(_atomic_call_total)} Cr, '
+                    f'{_atomic_dist_count} distributions totalling +₹{T(_atomic_dist_total)} Cr, '
+                    f'terminal Atomic FV +₹{T(_atomic_fv)} Cr at as_of_date }}'
+                )
+            if _method == 'cost_weighted_per_investment_irr':
+                _cw_num = agg.get('total_invested_capital') or Decimal('0')
+                return (
+                    'Priority 2 (chosen): Cost-weighted average of per-investment IRR (Gross). ' + _ladder_note,
+                    f'SUM(Investment.total_invested × Investment.irr_pct) / SUM(Investment.total_invested), '
+                    f'across {_cw_num} Cr of workbook-reported IRRs'
+                )
+            if _method == 'investment_cashflow_xirr':
+                return (
+                    'Priority 3 (chosen): Fund-level XIRR on Investment cashflows → LP terminal (Gross approx). ' + _ladder_note,
+                    f'XIRR over {{ Investment cost outflows totalling '
+                    f'−₹{T(agg.get("total_invested_capital"))} Cr, '
+                    f'{_atomic_dist_count} distributions totalling +₹{T(_atomic_dist_total)} Cr, '
+                    f'terminal Atomic FV +₹{T(_atomic_fv)} Cr at as_of_date }}'
+                )
+            # No tier produced a value — surface why in the description
             return (
-                'XIRR over LP cashflows: capital calls (out) + distributions (in) + terminal Atomic FV (in)',
-                f'XIRR over {{ {_atomic_call_count} calls totalling −₹{T(_atomic_call_total)} Cr, '
-                f'{_atomic_dist_count} distributions totalling +₹{T(_atomic_dist_total)} Cr, '
-                f'terminal Atomic FV +₹{T(_atomic_fv)} Cr at as_of_date }}'
+                'Net IRR unavailable: no priority tier produced a plausible value. ' + _ladder_note,
+                'No valid cashflow series could be constructed from CapitalCall, '
+                'per-investment IRR, or Investment cost + terminal FV.'
             )
         return (None, None)
 
@@ -2465,6 +2504,11 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
         'dpi':                      agg.get('dpi'),
         'rvpi':                     agg.get('rvpi'),
         'net_irr':                  agg.get('net_irr'),
+        # Universal Net-IRR method tag — passes the tier used (Priority 1/2/3)
+        # into FundMetric.notes so the frontend can display which computation
+        # produced the value. Values: 'capitalcall_distribution_xirr',
+        # 'cost_weighted_per_investment_irr', 'investment_cashflow_xirr'.
+        'net_irr_method':           agg.get('net_irr_method'),
         # Totals — aggregator-derived
         'committed_capital':        agg.get('total_committed_capital'),
         'called_capital':           agg.get('total_capital_called'),
@@ -2477,7 +2521,11 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
         # This guarantees the dashboard tile shows a number for every fund,
         # even those whose workbook has no dedicated Valuations sheet — the
         # NAV walk's Unrealised FMV column is authoritative in that case.
-        'active_fair_value':        (agg.get('total_unrealised_fv_holding')
+        # Prefer the portfolio-equity FV (matches Cover Total Fair Value on
+        # workbooks with FV Holding vs Equity Val distinction). Falls back
+        # to LP-holding FV, then live-DB FV sum, then extracted NAV. Universal.
+        'active_fair_value':        (agg.get('total_portfolio_fv')
+                                     or agg.get('total_unrealised_fv_holding')
                                      or active_fv
                                      or agg.get('fund_nav_latest')),
         'fund_nav':                 agg.get('fund_nav_latest'),
@@ -2504,11 +2552,35 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
     }
 
     count = 0
+    _NET_IRR_METHOD_LABELS = {
+        'capitalcall_distribution_xirr': 'Priority 1: Fund-level XIRR on CapitalCall + Distribution',
+        'cost_weighted_per_investment_irr': 'Priority 2: Cost-weighted average of per-investment IRR',
+        'investment_cashflow_xirr': 'Priority 3: Fund-level XIRR on Investment cashflows → LP terminal',
+    }
     for key, raw_value in metric_map.items():
+        # net_irr_method is metadata (routes through the metric_map so the
+        # frontend can read it via FundMetric.inputs_used), not a metric.
+        # Skip its own FundMetric row.
+        if key == 'net_irr_method':
+            continue
         val = _d(raw_value)
         if val is None:
             continue
         prov = _provenance_for(key, raw_value)
+        # For net_irr: attach the priority-tier method used, and a human label
+        # so the frontend can print "Method used: Priority X — <label>".
+        if key == 'net_irr':
+            _method_code = agg.get('net_irr_method')
+            if _method_code:
+                prov['net_irr_method'] = _method_code
+                prov['net_irr_method_label'] = _NET_IRR_METHOD_LABELS.get(
+                    _method_code, _method_code
+                )
+                prov['net_irr_priority_ladder'] = [
+                    'Priority 1: Fund-level XIRR on CapitalCall + Distribution (ILPA Net IRR)',
+                    'Priority 2: Cost-weighted average of per-investment IRR (Gross)',
+                    'Priority 3: Fund-level XIRR on Investment cashflows → LP terminal (Gross approx)',
+                ]
         # For active_fair_value, supplement with the live DB breakdown so
         # the panel can show "= co1 + co2 + ..." with real numbers.
         if key == 'active_fair_value' and contributing_companies:
@@ -2699,11 +2771,35 @@ def _persist_budget_vs_actual(organization, fund, rows: list) -> int:
     labels and any line-item synonym in _BVA_LINE_ITEM_MAP. Skips rows with no
     matching PortfolioCompany or unrecognised line_item — both are logged at
     debug level so they don't crash the run.
+
+    Fund-context period fallback (universal): when the BvA sheet ships as a
+    single-period snapshot with NO period column (e.g. Multiples IV format:
+    Company / Line Item / Actual / Budget only), rows arrive with period=None.
+    Rather than dropping them all, we fall back to the fund's latest-reported
+    period — inferred from the newest NAVRecord's FY. This is deterministic
+    from DB state (no calendar guess) and applies to every fund whose BvA
+    sheet skips the period column. Universal.
     """
     from mis_consolidation.models import BudgetVsActual
     from investments.models import PortfolioCompany
+    from accounting.models import NAVRecord
     if not fund:
         return 0
+
+    fallback_period = None
+    if any(isinstance(r, dict) and not r.get('period') for r in rows):
+        latest_nav = (NAVRecord.objects.filter(scheme__fund=fund)
+                      .order_by('-nav_date').first())
+        if latest_nav and latest_nav.nav_date:
+            y, m = latest_nav.nav_date.year, latest_nav.nav_date.month
+            fy_end = y + 1 if m > 3 else y   # Indian FY ends 31 March
+            fallback_period = {'period_year': fy_end, 'period_type': 'annual'}
+            logger.info(
+                f'[phase2.bva] period fallback: no period column in sheet — '
+                f'using FY {fy_end - 1}-{str(fy_end)[-2:]} (from latest NAV '
+                f'{latest_nav.nav_date.isoformat()})'
+            )
+
     count = 0
     skipped_no_co = 0
     skipped_no_line = 0
@@ -2723,7 +2819,7 @@ def _persist_budget_vs_actual(organization, fund, rows: list) -> int:
         if not line_item_key:
             skipped_no_line += 1
             continue
-        period_dict = _bva_parse_period(row.get('period'))
+        period_dict = _bva_parse_period(row.get('period')) or fallback_period
         if not period_dict:
             skipped_no_period += 1
             continue
@@ -2768,8 +2864,15 @@ def _persist_portfolio_kpis(organization, scheme, rows: list) -> int:
     PortfolioKPI uses kpi_definition (FK) + period as natural key. For Phase 2
     MVP we store using a lookup-by-name on KPIDefinition, creating definitions
     on demand. Skips rows with no value.
+
+    Fund-context period fallback (universal): SaaS Metrics / KPI-snapshot
+    sheets often ship without a period column — every row carries current-
+    period values. To keep those rows, we fall back to the fund's latest
+    NAVRecord date. Deterministic from DB state, not calendar-based, so it
+    applies uniformly across every fund that ships period-less KPI sheets.
     """
     from investments.models import PortfolioCompany, Investment, PortfolioKPI
+    from accounting.models import NAVRecord
 
     # Lazy import — KPIDefinition might be in a separate module
     try:
@@ -2778,6 +2881,13 @@ def _persist_portfolio_kpis(organization, scheme, rows: list) -> int:
         logger.warning('Phase 2: KPIDefinition not importable — skipping periodic KPI persistence')
         return 0
 
+    fallback_period_date = None
+    if scheme:
+        latest_nav = (NAVRecord.objects.filter(scheme=scheme)
+                      .order_by('-nav_date').first())
+        if latest_nav and latest_nav.nav_date:
+            fallback_period_date = latest_nav.nav_date
+
     # Fields to project from each row
     kpi_fields = [
         'revenue', 'cogs', 'gross_profit', 'gross_margin_pct',
@@ -2785,7 +2895,8 @@ def _persist_portfolio_kpis(organization, scheme, rows: list) -> int:
         'gmv', 'orders', 'aov', 'returns_pct', 'repeat_pct',
         'mrr', 'arr', 'nrr', 'churn_rate', 'cac', 'ltv', 'ltv_cac_ratio',
         'customers', 'new_customers',
-        'burn_rate', 'runway_months', 'nim_pct', 'gnpa_pct', 'nnpa_pct',
+        'burn_rate', 'gross_burn', 'net_burn', 'cash_balance',
+        'runway_months', 'nim_pct', 'gnpa_pct', 'nnpa_pct',
         'roe_pct', 'capacity_utilization', 'export_pct', 'bed_occupancy',
         'arpob', 'cap_rate_pct', 'aum_value', 'cost_to_income', 'debt_to_ebitda',
     ]
@@ -2820,10 +2931,20 @@ def _persist_portfolio_kpis(organization, scheme, rows: list) -> int:
             or row.get('period_start'),
             32,
         )
-        if not co_name or not period_label:
+        if not co_name:
             continue
-        # PortfolioKPI.period is a DateField; convert label → date universally
-        period_date = _period_to_date(period_label) or date.today()
+        # PortfolioKPI.period is a DateField; convert label → date universally.
+        # Universal fund-context fallback: rows without any period label (e.g.
+        # SaaS Metrics single-snapshot sheets) inherit the fund's latest-NAV
+        # date. Skipping them means the SaaS tab stays blank; using today()
+        # would be non-deterministic. Latest NAV is deterministic + fund-scoped.
+        period_date = None
+        if period_label:
+            period_date = _period_to_date(period_label)
+        if period_date is None:
+            period_date = fallback_period_date
+        if period_date is None:
+            continue
         co = PortfolioCompany.objects.filter(organization=organization, name=co_name).first()
         if not co:
             continue

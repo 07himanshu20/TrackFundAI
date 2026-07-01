@@ -311,7 +311,49 @@ def build_unified_json(per_sheet: dict, workbook_data: dict) -> dict:
     exit_rows = by_dom.get('exits_distributions', [])
     exits = [r for r in exit_rows if r.get('exit_date')]
 
-    valuations = list(by_dom.get('valuations_kpis', []))
+    # Universal shape-based split for the valuations_kpis domain.
+    #
+    # This domain is a bag holding rows from THREE different consumers:
+    #   1. Valuations (IPEV) sheets — rows carry fair_value / enterprise_value
+    #      / methodology / cost_basis / valuer_name. These are Valuation records.
+    #   2. SaaS Metrics / KPI sheets — rows carry arr / mrr / nrr / churn_rate /
+    #      cac / ltv / gross_burn / runway_months / gross_margin_pct / headcount.
+    #      These are PortfolioKPI records.
+    #   3. Wide-period KPI matrix sheets — rows carry kpi_name / period_value.
+    #      These are also PortfolioKPI records (long-format).
+    # If we route the whole bag into `valuations`, the persister writes them
+    # all as Valuation records — losing every SaaS metric (Multiples IV bug).
+    # Solve by row-shape: a valuation-shaped row has any of the IPEV keys;
+    # a kpi-shaped row has any of the SaaS/KPI keys; kpi rows get sent
+    # downstream to portfolio_kpis_periodic. Universal — no sheet-name
+    # hardcoding, works for any fund that ships SaaS Metrics or KPI matrix
+    # sheets under this domain.
+    _VAL_SIG_KEYS = ('fair_value', 'fair_value_of_holding', 'enterprise_value',
+                     'cost_basis', 'methodology', 'valuer_name',
+                     'valuer_reg_number', 'valuation_status',
+                     'unrealized_gain_loss', 'discount_rate', 'multiple')
+    _KPI_SIG_KEYS = ('arr', 'mrr', 'nrr', 'churn_rate', 'cac', 'ltv',
+                     'ltv_cac_ratio', 'gross_burn', 'net_burn',
+                     'runway_months', 'cash_balance', 'gross_margin_pct',
+                     'ebitda_margin_pct', 'headcount', 'customers',
+                     'new_customers', 'gmv', 'orders', 'aov', 'returns_pct',
+                     'repeat_pct', 'kpi_name', 'kpi_value', 'period_value')
+    valuations: list[dict] = []
+    valuations_kpi_rows: list[dict] = []
+    for row in by_dom.get('valuations_kpis', []):
+        if not isinstance(row, dict):
+            continue
+        has_val = any(k in row for k in _VAL_SIG_KEYS)
+        has_kpi = any(k in row for k in _KPI_SIG_KEYS)
+        # A row can carry BOTH shapes on hybrid sheets (rare). Send to both
+        # arrays so neither consumer loses data. Ambiguous rows (neither
+        # shape) default to valuations for backward compatibility.
+        if has_val:
+            valuations.append(row)
+        if has_kpi:
+            valuations_kpi_rows.append(row)
+        if not has_val and not has_kpi:
+            valuations.append(row)
 
     # Universal NAV vs Fund-ledger split. Sheets classified as
     # `nav_accounting` can be one of two very different things:
@@ -342,21 +384,46 @@ def build_unified_json(per_sheet: dict, workbook_data: dict) -> dict:
         else:
             nav_records.append(row)
 
-    # Per-company P&L / KPIs. The financials_pl_bva domain often carries
-    # rows with company_name + revenue + MRR / ARR / NRR / churn / headcount.
-    # These fan out into TWO consumers:
-    #   1. monthly_pl_rows  → CompanyFinancials (P&L display)
-    #   2. portfolio_kpis_periodic → PortfolioKPI (KPI matrix / SaaS dashboard)
-    # We include EVERY row in both streams — the persister filters what it
-    # can use (a row without company_name is skipped by KPI persister, etc.).
+    # Per-company P&L / KPIs / BvA. The financials_pl_bva domain is a bag
+    # holding rows from P&L / BS / CF / KPI / SaaS Metrics / Budget vs
+    # Actual sheets. Row-shape decides where each one goes:
+    #   • budget/actual keys present   → budget_vs_actual  (BudgetVsActual persister)
+    #   • else, company_name present   → portfolio_kpis_periodic (KPI persister)
+    # A row without company_name is dropped from KPI stream but still passed
+    # through monthly_pl_rows so P&L extractors can pick it up if useful.
+    # Universal — no sheet-name hardcoding.
     pl_all = list(by_dom.get('financials_pl_bva', []))
-    portfolio_kpis_periodic = [r for r in pl_all if r.get('company_name')]
-    # Universal: normalise the period field. Persister expects `period`,
-    # but Portfolio_Financials-style sheets publish `financial_year` or `fy`.
-    for r in portfolio_kpis_periodic:
+
+    def _is_bva_row(r: dict) -> bool:
+        return r.get('budget') is not None or r.get('actual') is not None
+
+    portfolio_kpis_periodic: list[dict] = []
+    budget_vs_actual_rows: list[dict] = []
+    for r in pl_all:
+        if not r.get('company_name'):
+            continue
+        # Universal: normalise the period field. Persister expects `period`,
+        # but Portfolio_Financials-style sheets publish `financial_year` or `fy`.
         if 'period' not in r:
             r['period'] = (r.get('financial_year') or r.get('fy')
                            or r.get('period_end') or r.get('period_start'))
+        if _is_bva_row(r):
+            budget_vs_actual_rows.append(r)
+        else:
+            portfolio_kpis_periodic.append(r)
+
+    # Universal merge: KPI-shape rows extracted from the valuations_kpis domain
+    # (SaaS Metrics sheets, KPI matrix wide-period unpivots) join the periodic
+    # KPI stream so the persister can create PortfolioKPI records for
+    # mrr / arr / churn_rate / cac / ltv / headcount / etc.
+    for r in valuations_kpi_rows:
+        if not r.get('company_name'):
+            continue
+        if 'period' not in r:
+            r['period'] = (r.get('financial_year') or r.get('fy')
+                           or r.get('period_end') or r.get('period_start')
+                           or r.get('valuation_date'))
+        portfolio_kpis_periodic.append(r)
 
     commitments = _merge_lp_line_items_into_commitments(
         commitments,
@@ -438,7 +505,7 @@ def build_unified_json(per_sheet: dict, workbook_data: dict) -> dict:
         'monthly_pl_rows': pl_all,
         'monthly_bs_rows': [],
         'monthly_cf_rows': [],
-        'budget_vs_actual': [],
+        'budget_vs_actual': budget_vs_actual_rows,
         'burn_runway': list(by_dom.get('burn_runway', [])),
         'entities': [],
         'sheet_completeness': [

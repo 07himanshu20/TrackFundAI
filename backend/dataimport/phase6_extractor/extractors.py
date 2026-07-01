@@ -11,6 +11,7 @@ import re
 from decimal import Decimal
 from typing import Any
 
+from ..canonical_schema import DOMAIN_FIELDS
 from .coercers import coerce_by_canonical, to_date, to_decimal, to_str
 from .helpers import (
     _cell_str, find_header_row, is_entity_id_header, is_junk_row,
@@ -21,6 +22,107 @@ from .helpers import (
 def _norm_map(column_map: dict[str, str]) -> dict[str, str]:
     return {re.sub(r'\s+', ' ', str(k).strip().lower()): v
             for k, v in column_map.items()}
+
+
+# ── Universal alias index — Python-side safety net for sparse Gemini column
+# maps. Every canonical field's DOMAIN_FIELDS description string is parsed
+# for aliases; any header cell that Gemini didn't map is looked up here as
+# a fallback. Universal across every sheet layout and every fund format.
+_ALIAS_INDEX_CACHE: dict[str, dict[str, str]] = {}
+_ALIAS_ALPHA_RE = re.compile(r'[^a-z0-9\s]+')
+
+
+def _normalize_alias(text: str) -> tuple[str, str]:
+    """Return (space_form, compact_form) for a header / alias string.
+
+    Universal normalisation — strips parenthesised suffixes ("(₹Cr)",
+    "(Cr)"), unit suffixes ("%", "/mo", "/yr"), currency symbols and
+    every non-alphanumeric character. Two forms are returned:
+      space_form   — words preserved ("ltv cac ratio")
+      compact_form — no separators   ("ltvcacratio")
+    Matching either form catches "LTV/CAC" and "LTV:CAC" and "LTV CAC".
+    """
+    if not text:
+        return '', ''
+    s = str(text).lower()
+    s = re.sub(r'\([^)]*\)', ' ', s)                       # (₹Cr) etc.
+    s = re.sub(r'/\s*(mo|month|yr|year|qtr|quarter|day|week|wk)\b', ' ', s)
+    s = _ALIAS_ALPHA_RE.sub(' ', s)                        # keep letters/digits/spaces
+    s = ' '.join(s.split())
+    return s, s.replace(' ', '')
+
+
+# Strip these leading English phrases from alias tokens before registering,
+# so "may appear as Gross Burn" becomes "Gross Burn". Universal — schema
+# authors use several equivalent phrasings.
+_ALIAS_LEAD_STRIP_RE = re.compile(
+    r'^\s*(may\s+appear\s+as|appears?\s+as|also\s+(?:seen|written|known)\s+as|'
+    r'look\s+for|seen\s+as|written\s+as|e\.?g\.?[,\s]|such\s+as|'
+    r'for\s+example|i\.e\.?[,\s]+|number\s+of|count\s+of)\s+',
+    re.I,
+)
+
+
+def _register_alias(index: dict[str, str], token: str, canon: str) -> None:
+    token = _ALIAS_LEAD_STRIP_RE.sub('', token or '').strip()
+    space_form, compact_form = _normalize_alias(token)
+    for form in (space_form, compact_form):
+        if form and 1 < len(form) <= 40 and form not in index:
+            index[form] = canon
+
+
+def _build_alias_index(domain: str) -> dict[str, str]:
+    """Build (and cache) {normalized_alias: canonical_field} for a domain.
+
+    Extraction rules (universal, description-format-agnostic):
+      1. Canonical key is always an alias.
+      2. Parenthesised segments are stripped everywhere first — authors
+         use "(₹Cr)", "(examples like X, Y, Z)", "(SaaS)" etc. as annotations,
+         never as alias lists.
+      3. Description split at em-dash / en-dash yields (head_phrase, tail_list).
+         • head is registered whole (it's the primary human name)
+         • head is also split on '/' since "Net Retention / NDR" is a common shape
+      4. tail is a comma-separated alias list — each token registered as an alias.
+      5. Leading English phrases like "may appear as", "e.g.", "look for"
+         are stripped from every candidate before normalisation.
+    Canonical keys win collisions — a field's own key is never replaced
+    by another field's alias.
+    """
+    if domain in _ALIAS_INDEX_CACHE:
+        return _ALIAS_INDEX_CACHE[domain]
+    field_map = DOMAIN_FIELDS.get(domain, {}) or {}
+    index: dict[str, str] = {}
+    # Pass 1: register EVERY canonical key first so their forms are locked in
+    # before any description-derived alias can claim the slot.
+    for canon in field_map:
+        _register_alias(index, canon, canon)
+    # Pass 2: description-derived aliases fill remaining gaps.
+    for canon, desc in field_map.items():
+        if not isinstance(desc, str):
+            continue
+        cleaned = re.sub(r'\([^)]*\)', ' ', desc)   # strip parens content
+        parts = re.split(r'\s+[—–]\s+', cleaned, maxsplit=1)
+        head = parts[0].strip()
+        tail = parts[1].strip() if len(parts) > 1 else ''
+        if 2 <= len(head) <= 80:
+            _register_alias(index, head, canon)
+            for token in head.split('/'):
+                token = token.strip()
+                if 2 <= len(token) <= 60:
+                    _register_alias(index, token, canon)
+        for token in tail.split(','):
+            token = token.strip()
+            if 2 <= len(token) <= 60:
+                _register_alias(index, token, canon)
+    _ALIAS_INDEX_CACHE[domain] = index
+    return index
+
+
+def _resolve_via_alias_index(header_cell: Any, alias_idx: dict[str, str]) -> str | None:
+    if not alias_idx:
+        return None
+    space_form, compact_form = _normalize_alias(_cell_str(header_cell))
+    return alias_idx.get(space_form) or alias_idx.get(compact_form)
 
 
 # Header keywords that identify a period column universally.
@@ -80,20 +182,40 @@ def _auto_detect_period_col(header: tuple, sample_rows: list[tuple]) -> int:
 # tabular
 # ─────────────────────────────────────────────────────────────────────────────
 
-def extract_tabular(sheet_rows: list[tuple], column_map: dict[str, str]) -> list[dict]:
+def extract_tabular(sheet_rows: list[tuple], column_map: dict[str, str],
+                    domain: str = '') -> list[dict]:
     hdr_idx = find_header_row(sheet_rows)
     if hdr_idx < 0:
         return []
     header = sheet_rows[hdr_idx]
     norm_map = _norm_map(column_map)
 
-    # Collect candidates per canonical field
+    # Universal Python-side alias fallback. Gemini's Stage 1 sometimes maps
+    # only a subset of a sheet's columns (e.g. only 2 of 15 on the
+    # "SaaS Metrics & Burn" sheet on Multiples IV — missing every ARR /
+    # MRR / NRR / Churn / CAC / LTV column, and mis-mapping Sector →
+    # company_name). The alias index built from DOMAIN_FIELDS descriptions
+    # fills the gap.
+    #
+    # Precedence rule: an alias-index hit is an EXACT header→canonical
+    # match ("Company Name" literally alias for company_name). Gemini's
+    # column_map is a NATURAL-LANGUAGE guess. So when both propose a column
+    # for the same canonical but disagree on WHICH column, the alias-index
+    # column wins. Universal — the alias hit is deterministic; Gemini isn't.
+    alias_idx = _build_alias_index(domain)
+
     candidates: dict[str, list[int]] = {}
+    alias_forced_ci: dict[str, int] = {}   # canon -> preferred column from alias hit
     for ci, hv in enumerate(header):
         key = re.sub(r'\s+', ' ', _cell_str(hv).lower())
-        canon = norm_map.get(key)
-        if canon:
-            candidates.setdefault(canon, []).append(ci)
+        gemini_canon = norm_map.get(key)
+        if gemini_canon:
+            candidates.setdefault(gemini_canon, []).append(ci)
+            continue
+        alias_canon = _resolve_via_alias_index(hv, alias_idx)
+        if alias_canon:
+            candidates.setdefault(alias_canon, []).append(ci)
+            alias_forced_ci.setdefault(alias_canon, ci)
 
     # Sample the first few data rows so we can score column candidates
     sample_rows: list[tuple] = []
@@ -125,6 +247,11 @@ def extract_tabular(sheet_rows: list[tuple], column_map: dict[str, str]) -> list
 
     canon_cols: dict[str, int] = {}
     for canon, cols in candidates.items():
+        # Universal precedence: an alias-index hit is an EXACT header→canonical
+        # match. When it disagrees with Gemini's guess, alias always wins.
+        if canon in alias_forced_ci and alias_forced_ci[canon] in cols:
+            canon_cols[canon] = alias_forced_ci[canon]
+            continue
         if len(cols) == 1:
             canon_cols[canon] = cols[0]
             continue
@@ -265,12 +392,14 @@ def extract_key_value(sheet_rows: list[tuple]) -> dict[str, Any]:
 # wide_period — entity rows × period columns
 # ─────────────────────────────────────────────────────────────────────────────
 
-def extract_wide_period(sheet_rows: list[tuple], column_map: dict[str, str]) -> list[dict]:
+def extract_wide_period(sheet_rows: list[tuple], column_map: dict[str, str],
+                        domain: str = '') -> list[dict]:
     hdr_idx = find_header_row(sheet_rows)
     if hdr_idx < 0:
         return []
     header = sheet_rows[hdr_idx]
     norm_map = _norm_map(column_map)
+    alias_idx = _build_alias_index(domain)
 
     entity_cols: dict[str, int] = {}
     period_cols: dict[int, str] = {}
@@ -282,6 +411,8 @@ def extract_wide_period(sheet_rows: list[tuple], column_map: dict[str, str]) -> 
             continue
         key = re.sub(r'\s+', ' ', text.lower())
         canon = norm_map.get(key)
+        if not canon:
+            canon = _resolve_via_alias_index(hv, alias_idx)
         if is_period_header(text):
             period_cols[ci] = text
             if canon:
@@ -292,7 +423,7 @@ def extract_wide_period(sheet_rows: list[tuple], column_map: dict[str, str]) -> 
 
     if not period_cols or not entity_cols:
         # No periods detected — fall back to tabular so we don't lose the rows
-        return extract_tabular(sheet_rows, column_map)
+        return extract_tabular(sheet_rows, column_map, domain=domain)
 
     out: list[dict] = []
     for ri in range(hdr_idx + 1, len(sheet_rows)):
@@ -424,9 +555,9 @@ def extract_sheet(sheet_rows: list[tuple], layout: str,
     elif layout == 'key_value':
         result = {'kv': extract_key_value(sheet_rows)}
     elif layout == 'wide_period':
-        result = {'rows': extract_wide_period(sheet_rows, column_map)}
+        result = {'rows': extract_wide_period(sheet_rows, column_map, domain=domain)}
     else:
-        result = {'rows': extract_tabular(sheet_rows, column_map)}
+        result = {'rows': extract_tabular(sheet_rows, column_map, domain=domain)}
 
     # Universal booster: waterfall sheets nearly always contain KV pairs
     # ("Carry Base | 1430.60", "Clawback Provision | 10") — extract both

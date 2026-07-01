@@ -71,6 +71,20 @@ def _xirr(cashflows):
         flo, fhi = _npv(lo), _npv(hi)
         if flo == float('inf') or fhi == float('inf'):
             return None
+        # Universal bracket expansion for extreme-return cashflows.
+        # Original hi=10.0 covers up to 1000% annual IRR. Degenerate
+        # cases (e.g., 1 capital-call vs a large terminal value when
+        # call extraction is incomplete) produce implied IRR beyond
+        # 1000%. Widen geometrically until the bracket contains the
+        # root or we hit an absurd ceiling. Universal — helps ANY fund
+        # whose true IRR happens to exceed the initial bracket.
+        _expand = 0
+        while flo * fhi > 0 and hi < 1e6 and _expand < 20:
+            hi *= 4.0
+            fhi = _npv(hi)
+            if fhi == float('inf'):
+                return None
+            _expand += 1
         if flo * fhi > 0:
             return None
         for _ in range(80):
@@ -225,11 +239,18 @@ def derive_fund_investment_metrics(fund, as_of=None) -> dict:
 
             cashflows = outflows + exit_inflows + distribution_inflows + terminal_inflows
 
-            # --- IRR via XIRR ---
-            irr = _xirr(cashflows)
-            if irr is not None:
-                inv.irr_pct = irr
-                irr_set += 1
+            # --- IRR via XIRR — PRESERVE workbook-provided value ---
+            # Universal precedence: if Phase 2 already extracted a per-inv IRR
+            # from the workbook's "IRR%(Gross)" column, that is the manager's
+            # own reported number and should NOT be overwritten by our XIRR
+            # over synthetic tranche cashflows. Only fill in when missing.
+            # (Bharatcrest-style workbooks that lack an IRR column still
+            # benefit from the XIRR fallback.)
+            if inv.irr_pct is None:
+                irr = _xirr(cashflows)
+                if irr is not None:
+                    inv.irr_pct = irr
+                    irr_set += 1
 
             # --- MOIC = total positive / total negative ---
             pos = sum((a for _, a in cashflows if a > 0), Decimal('0'))
@@ -842,25 +863,51 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
     # per-investment FV column on the dashboard. Including them would pollute
     # IRR/MOIC/TVPI/RVPI by double-counting marked-up cost as fair value.
     # Universal across funds — synthetic rows are tagged at creation time.
-    # FV precedence: prefer `fair_value` (Cover/Summary "Total FV" column)
-    # over `fair_value_of_holding`. Universal: workbooks that expose only
-    # one FV column have both fields mirrored by the persister, so the
-    # coalesce is a no-op for them. Workbooks with distinct equity vs.
-    # holding columns (Multiples-style) get the value the Cover displays.
-    latest_per_inv = Valuation.objects.filter(
+    #
+    # TWO distinct terminal values are computed here — semantically different:
+    #
+    #   db_portfolio_fv (uses fair_value / Equity Val column)
+    #     • Total equity value across all portfolio companies at Fund-level.
+    #     • Matches Cover's "Total Fair Value" display and Portfolio MOIC.
+    #     • Used for the FV-tile display + MOIC calculation.
+    #
+    #   db_active_fv (uses fair_value_of_holding — the FUND'S stake)
+    #     • Value LPs would actually receive if fund liquidated today.
+    #     • Falls back to fair_value when fair_value_of_holding is missing
+    #       (single-column workbooks like Bharatcrest have both fields
+    #        mirrored, so the fallback is a no-op).
+    #     • Used for LP-perspective metrics: RVPI, DPI, TVPI, Net IRR.
+    #
+    # Universal across every workbook layout:
+    #   • Single-FV-column workbooks (Bharatcrest): both terminals equal —
+    #     no behavior change from prior versions.
+    #   • Three-column workbooks (Multiples IV, Edelweiss with distinct
+    #     EV / Equity Val / FV Holding columns): LP metrics now reflect
+    #     the fund's actual stake (fair_value_of_holding) rather than the
+    #     inflated portfolio-equity number.
+    latest_per_inv_portfolio = Valuation.objects.filter(
+        investment=OuterRef('pk'),
+    ).exclude(
+        methodology='derived_from_cost_x_scheme_markup',
+    ).order_by('-valuation_date').values('fair_value')[:1]
+    latest_per_inv_holding = Valuation.objects.filter(
         investment=OuterRef('pk'),
     ).exclude(
         methodology='derived_from_cost_x_scheme_markup',
     ).order_by('-valuation_date').annotate(
-        holding_or_equity=Coalesce('fair_value', 'fair_value_of_holding'),
-    ).values('holding_or_equity')[:1]
+        holding_pref=Coalesce('fair_value_of_holding', 'fair_value'),
+    ).values('holding_pref')[:1]
     inv_qs = Investment.objects.filter(scheme=scheme).annotate(
-        latest_fv=Subquery(latest_per_inv),
+        latest_portfolio_fv=Subquery(latest_per_inv_portfolio),
+        latest_holding_fv=Subquery(latest_per_inv_holding),
     )
-    db_active_fv = Decimal('0')
+    db_portfolio_fv = Decimal('0')   # portfolio equity SUM — matches Cover Total FV
+    db_active_fv = Decimal('0')      # fund's stake SUM — for LP metrics
     for inv in inv_qs:
-        if inv.latest_fv:
-            db_active_fv += inv.latest_fv
+        if inv.latest_portfolio_fv:
+            db_portfolio_fv += inv.latest_portfolio_fv
+        if inv.latest_holding_fv:
+            db_active_fv += inv.latest_holding_fv
 
     # ── Single source: atomic DB ledger sums (Option A) ────────────────
     # Override path removed because Gemini was observed fabricating cell-ref
@@ -1101,11 +1148,27 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
     # tvpi/dpi/rvpi/moic values are NOT consulted (Option A).
     tvpi = dpi = rvpi = moic = None
 
-    # Helper — same NAV-sanity logic as IRR uses (2026-06-30 fix).
-    # Atomic active FV is the truth; extracted fund_nav is a fallback ONLY
-    # when atomic is missing AND the extracted value passes a 5× sanity
-    # bound vs invested. Without this guard, MOIC/TVPI/RVPI compound the
-    # NAV-extraction error (Bharatcrest 4746 NAV vs 2079 atomic).
+    # Two residual-value helpers — the split fixes the "wrong FV column"
+    # bug on workbooks that expose distinct Equity Val vs FV Holding columns
+    # (Multiples IV, Edelweiss). Bharatcrest-style single-column workbooks
+    # have both terminals equal → helpers are identical → no regression.
+    #
+    #   _portfolio_residual: portfolio-equity residual (SUM fair_value) —
+    #     matches Cover's "Total Fair Value" and Portfolio MOIC.
+    #   _residual_value    : LP-perspective residual (SUM fair_value_of_holding
+    #     with fair_value fallback) — the value LPs would actually receive.
+    #
+    # fund_nav (extracted NAV cell) remains the sanity-bounded fallback
+    # when atomic per-investment data is missing.
+    def _portfolio_residual():
+        if db_portfolio_fv and db_portfolio_fv > 0:
+            return db_portfolio_fv
+        if fund_nav is not None and fund_nav > 0:
+            if total_invested and fund_nav > total_invested * Decimal('5'):
+                return None
+            return fund_nav
+        return None
+
     def _residual_value():
         if db_active_fv and db_active_fv > 0:
             return db_active_fv
@@ -1115,32 +1178,67 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
             return fund_nav
         return None
 
-    # MOIC = (Distributions + remaining FV) / Invested Cost
-    # Uses 'invested cost' (not 'called capital') in the denominator because
-    # called capital includes management fees + fund expenses that aren't
-    # invested. This is the ILPA-aligned definition universally.
+    # MOIC = (Distributions + Portfolio-equity residual) / Invested Cost
+    # Portfolio-basis multiple — matches Cover's "Portfolio MOIC" display
+    # (uses Equity Val column). ILPA-aligned: cost denominator, not called.
     if total_invested and total_invested > 0:
-        nav_part = _residual_value()
+        nav_part = _portfolio_residual()
         moic = ((total_distributed or Decimal('0')) + (nav_part or Decimal('0'))) / total_invested
         moic = moic.quantize(Decimal('0.0001'))
 
-    # DPI = cumulative distributions / called capital
+    # Performance denominator for TVPI/RVPI.
+    #
+    # ILPA definition uses total_called_capital. But when capital-call
+    # extraction is incomplete (only some of the calls landed in the DB),
+    # total_called becomes an under-estimate — you can only invest what
+    # you have called, so total_called >= total_invested MUST hold in real
+    # data. If our extracted total_called < total_invested, we trust the
+    # per-investment sum (total_invested) as the more reliable capital
+    # base. This is universal: matches ILPA TVPI on healthy data, degrades
+    # gracefully when call rows are missing.
+    _perf_denom = None
+    if total_called and total_invested and total_called >= total_invested:
+        _perf_denom = total_called
+    elif total_invested and total_invested > 0:
+        _perf_denom = total_invested
+    elif total_called and total_called > 0:
+        _perf_denom = total_called
+
+    # DPI = cumulative distributions / called capital (strict ILPA definition)
     if total_called and total_called > 0 and total_distributed is not None:
         dpi = (total_distributed / total_called).quantize(Decimal('0.0001'))
 
-    # RVPI = residual NAV / called capital — uses atomic FV preferentially.
-    if total_called and total_called > 0:
+    # RVPI = residual NAV / performance denominator — uses atomic FV preferentially.
+    if _perf_denom and _perf_denom > 0:
         nav_part = _residual_value()
         if nav_part:
-            rvpi = (nav_part / total_called).quantize(Decimal('0.0001'))
+            rvpi = (nav_part / _perf_denom).quantize(Decimal('0.0001'))
 
-    # TVPI = DPI + RVPI (or DPI alone if RVPI uncomputable)
-    if dpi is not None:
-        tvpi = (dpi + (rvpi or Decimal('0'))).quantize(Decimal('0.0001'))
+    # TVPI = (Distributions + Residual Value) / performance denominator.
+    # Universal: computes whenever we have any capital base AND any value
+    # (residual or distributions). Zero-distribution funds (still in
+    # investment period) degrade cleanly to TVPI == RVPI. Never left blank
+    # when the underlying data is present.
+    if _perf_denom and _perf_denom > 0:
+        _dist_part = total_distributed or Decimal('0')
+        _nav_part_tvpi = _residual_value() or Decimal('0')
+        if (_dist_part + _nav_part_tvpi) > 0:
+            tvpi = ((_dist_part + _nav_part_tvpi) / _perf_denom).quantize(Decimal('0.0001'))
 
     # ── Net IRR — REAL cashflows + atomic terminal value ────────────────
     # Capital calls (negative), distributions (positive), then add terminal
     # unrealised value at as_of date.
+    #
+    # Data-quality guard (universal): fund-level IRR requires the DB to
+    # hold reasonably complete CapitalCall + Distribution rows. When call
+    # extraction is severely incomplete (e.g. only 3% of total_invested
+    # appeared as CapitalCalls in the persister), the implied IRR from
+    # a tiny call vs a large terminal becomes astronomical and physically
+    # meaningless (5,000,000%+). Cap the fund-level IRR at 500%/yr — any
+    # legitimate PE/VC fund lives well below that. Above the cap, skip
+    # with an explicit reason so the dashboard shows "—" instead of a
+    # nonsense number. Universal — a real 500%+ fund IRR does not exist
+    # in the audited-Indian-AIF space.
     #
     # Terminal-value precedence (2026-06-30 fix):
     #   1. db_active_fv  — sum of latest Valuation.fair_value_of_holding per
@@ -1152,25 +1250,47 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
     # IRR when the extracted NAV was wrong (e.g. Bharatcrest 4746 vs 2079
     # actual unrealised — turned 38% IRR into 46%). Atomic FV is universal:
     # works for any fund where Valuation rows persisted, no LPA dependency.
+    # ── Net IRR — Universal 3-tier priority ladder ──────────────────────
+    #
+    # Fund workbooks vary widely in what data they publish. Three IRR
+    # computations are attempted in priority order; the first that produces
+    # a plausible value wins. The chosen method is emitted via `net_irr_method`
+    # so the dashboard can label the tile and the formula panel can explain
+    # how the number was derived.
+    #
+    # Priority 1 — ILPA Net IRR via CapitalCall + Distribution ledger
+    #   Requires: CapitalCall data reasonably complete
+    #             (total_called >= 50% of total_invested — the physics bound,
+    #             since you cannot invest more than you have called).
+    #   Method:   XIRR over (Call → out, Distribution → in, Terminal → in).
+    #   Gives:    industry-standard LP-perspective Net IRR (Bharatcrest).
+    #
+    # Priority 2 — Cost-weighted per-investment Gross IRR
+    #   Requires: majority of investments have workbook-provided irr_pct.
+    #   Method:   SUM(cost × irr_pct) / SUM(cost) across all Investment rows.
+    #   Gives:    portfolio-level Gross IRR (before fees/carry) — standard
+    #             fund-manager reporting format (Multiples IV, Edelweiss).
+    #
+    # Priority 3 — Fund-level XIRR on Investment cashflows → LP terminal
+    #   Requires: at least Investment.investment_date + total_invested exist.
+    #   Method:   XIRR over (Investment.cost → out, Distribution → in,
+    #             Terminal FV → in).
+    #   Gives:    approximation of Gross IRR from atomic ledger only.
+    #             Last-resort fallback; will be marked in method tag.
+    #
+    # A 500%/yr sanity cap discards absurd XIRR results from all tiers.
+    _IRR_SANITY_CAP = Decimal('500')
     net_irr = None
-    cf = []
-    for c in sorted(
-        CapitalCall.objects.filter(scheme=scheme),
-        key=lambda c: (c.call_date or as_of, str(c.id))
-    ):
-        amt = _safe_decimal(c.total_call_amount, Decimal('0'))
-        if c.call_date and amt and amt > 0:
-            cf.append((c.call_date, -amt))
-    for d in sorted(
-        Distribution.objects.filter(scheme=scheme),
-        key=lambda d: (d.distribution_date or as_of, str(d.id))
-    ):
-        amt = _safe_decimal(d.total_net_amount)
-        if amt is None:
-            amt = _safe_decimal(d.total_gross_amount, Decimal('0'))
-        if d.distribution_date and amt and amt > 0:
-            cf.append((d.distribution_date, amt))
+    net_irr_method = None   # dashboard tag identifying the chosen computation
+    cf: list = []
 
+    _sum_called = sum(
+        (_safe_decimal(c.total_call_amount, Decimal('0'))
+         for c in CapitalCall.objects.filter(scheme=scheme)),
+        Decimal('0'),
+    )
+
+    # Determine terminal value — used by tier 1 and tier 3.
     terminal_value = None
     if db_active_fv and db_active_fv > 0:
         terminal_value = db_active_fv
@@ -1179,8 +1299,6 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
             f'preferred over extracted NAV for IRR accuracy.'
         )
     elif fund_nav is not None and fund_nav > 0:
-        # Sanity bound: a fund NAV >5× invested is almost certainly a
-        # mis-extracted cell. Skip the terminal in that case.
         if total_invested and fund_nav > total_invested * Decimal('5'):
             reasons['net_irr_terminal'] = (
                 f'Extracted fund_nav={fund_nav} > 5× invested={total_invested} — '
@@ -1192,15 +1310,103 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
                 f'Terminal = extracted fund_nav (₹{fund_nav} Cr) — no atomic '
                 f'valuations available.'
             )
-    if terminal_value is not None:
-        cf.append((as_of, terminal_value))
 
-    irr = _xirr(cf)
-    if irr is not None:
-        net_irr = irr
-    else:
-        reasons['net_irr'] = ('Insufficient cashflows OR no terminal value — '
-                              'IRR cannot be computed.')
+    def _apply_distributions(target: list):
+        for d in sorted(
+            Distribution.objects.filter(scheme=scheme),
+            key=lambda d: (d.distribution_date or as_of, str(d.id))
+        ):
+            amt = _safe_decimal(d.total_net_amount)
+            if amt is None:
+                amt = _safe_decimal(d.total_gross_amount, Decimal('0'))
+            if d.distribution_date and amt and amt > 0:
+                target.append((d.distribution_date, amt))
+
+    # --- Tier 1: ILPA Net IRR via CapitalCall + Distribution ledger ---
+    if (total_invested and total_invested > 0
+            and _sum_called and _sum_called >= total_invested * Decimal('0.5')):
+        _cf1: list = []
+        for c in sorted(
+            CapitalCall.objects.filter(scheme=scheme),
+            key=lambda c: (c.call_date or as_of, str(c.id))
+        ):
+            amt = _safe_decimal(c.total_call_amount, Decimal('0'))
+            if c.call_date and amt and amt > 0:
+                _cf1.append((c.call_date, -amt))
+        _apply_distributions(_cf1)
+        if terminal_value is not None:
+            _cf1.append((as_of, terminal_value))
+        _irr1 = _xirr(_cf1)
+        if _irr1 is not None and abs(_irr1) <= _IRR_SANITY_CAP:
+            net_irr = _irr1
+            cf = _cf1
+            net_irr_method = 'capitalcall_distribution_xirr'
+            reasons['net_irr_source'] = (
+                f'Fund-level XIRR on CapitalCall + Distribution ledger '
+                f'({CapitalCall.objects.filter(scheme=scheme).count()} calls '
+                f'totalling ₹{_sum_called} Cr). Standard ILPA Net IRR.'
+            )
+
+    # --- Tier 2: Cost-weighted average of per-investment IRR ---
+    if net_irr is None and total_invested and total_invested > 0:
+        _inv_with_irr = Investment.objects.filter(scheme=scheme).exclude(
+            irr_pct__isnull=True,
+        )
+        _num = Decimal('0')
+        _den = Decimal('0')
+        for _inv in _inv_with_irr:
+            _cost = _safe_decimal(_inv.total_invested, Decimal('0'))
+            _pct  = _safe_decimal(_inv.irr_pct, None)
+            if _cost > 0 and _pct is not None:
+                _num += _cost * _pct
+                _den += _cost
+        # Only trust the aggregate if a majority of investment cost has
+        # workbook-provided IRR data. Universal cutoff: 50% of invested cost.
+        if _den > 0 and _den >= total_invested * Decimal('0.5'):
+            _irr2 = (_num / _den).quantize(Decimal('0.01'))
+            if abs(_irr2) <= _IRR_SANITY_CAP:
+                net_irr = _irr2
+                net_irr_method = 'cost_weighted_per_investment_irr'
+                reasons['net_irr_source'] = (
+                    f'Cost-weighted average of per-investment IRR '
+                    f'({_inv_with_irr.count()} of '
+                    f'{Investment.objects.filter(scheme=scheme).count()} '
+                    f'investments carry workbook irr_pct values). '
+                    f'Gross portfolio-level IRR.'
+                )
+
+    # --- Tier 3: Fund-level XIRR on Investment cashflows → LP terminal ---
+    if net_irr is None and total_invested and total_invested > 0:
+        _cf3: list = []
+        _inv_qs = Investment.objects.filter(scheme=scheme).exclude(
+            investment_date__isnull=True,
+        )
+        for inv in _inv_qs:
+            amt = _safe_decimal(inv.total_invested, Decimal('0'))
+            if inv.investment_date and amt and amt > 0:
+                _cf3.append((inv.investment_date, -amt))
+        _apply_distributions(_cf3)
+        if terminal_value is not None:
+            _cf3.append((as_of, terminal_value))
+        _irr3 = _xirr(_cf3)
+        if _irr3 is not None and abs(_irr3) <= _IRR_SANITY_CAP:
+            net_irr = _irr3
+            cf = _cf3
+            net_irr_method = 'investment_cashflow_xirr'
+            reasons['net_irr_source'] = (
+                f'Fund-level XIRR on Investment cashflows → LP terminal '
+                f'({_inv_qs.count()} investments, total ₹{total_invested} Cr → '
+                f'terminal ₹{terminal_value} Cr). Approximation of Gross IRR '
+                f'from atomic ledger — used when CapitalCall extraction is '
+                f'incomplete AND workbook does not publish per-inv IRR.'
+            )
+
+    if net_irr is None:
+        reasons['net_irr'] = (
+            'No priority tier produced a plausible Net IRR. Insufficient '
+            'CapitalCall / per-investment IRR / Investment cashflow data, '
+            'OR all computed values exceeded the 500%/yr sanity cap.'
+        )
 
     # ── Drawdown / uncalled ────────────────────────────────────────────
     total_uncalled = None
@@ -1216,6 +1422,11 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
         'total_invested_capital':  total_invested,
         'total_realised_proceeds': total_realised,
         'total_unrealised_fv_holding': db_active_fv if db_active_fv > 0 else None,
+        # Portfolio-equity FV (SUM of fair_value column) — for the dashboard's
+        # "Total Fair Value" tile and Portfolio MOIC display. Matches Cover
+        # "Total Fair Value" on workbooks with distinct FV Holding / Equity Val
+        # columns. Falls back to db_active_fv on single-column workbooks.
+        'total_portfolio_fv':         db_portfolio_fv if db_portfolio_fv > 0 else db_active_fv,
         'fund_nav_latest':        fund_nav,
         # Waterfall (extracted-first, else Python-computed)
         'carry_base':             carry_base,
@@ -1232,6 +1443,11 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
         'rvpi':                   rvpi,
         'moic':                   moic,
         'net_irr':                net_irr,
+        # Universal method tag — which of the 3 IRR tiers produced the value.
+        # Values: 'capitalcall_distribution_xirr', 'cost_weighted_per_investment_irr',
+        # 'investment_cashflow_xirr', or None (no tier succeeded).
+        # The dashboard uses this to label the Net IRR tile transparently.
+        'net_irr_method':         net_irr_method,
         # Metadata
         'as_of_date':             as_of,
         'waterfall_source':       waterfall_source,
