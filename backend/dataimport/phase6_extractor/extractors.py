@@ -401,7 +401,16 @@ def extract_wide_period(sheet_rows: list[tuple], column_map: dict[str, str],
     norm_map = _norm_map(column_map)
     alias_idx = _build_alias_index(domain)
 
-    entity_cols: dict[str, int] = {}
+    # Universal column-scoring for entity columns — mirrors extract_tabular.
+    # When multiple headers map to the same canonical (e.g. both "Co_ID" and
+    # "Company_Name" map to `company_name`), score each candidate column
+    # against sample data rows and pick the best one. Long text with spaces
+    # (real company names) beats short ID-shaped values (PC001). Without this,
+    # wide-period sheets emitted `company_name='PC001'` and the persister's
+    # `portfolio_company__name` FK lookup found nothing → auto-valuation
+    # fallback wrongly fired.
+    candidates: dict[str, list[int]] = {}
+    alias_forced_ci: dict[str, int] = {}
     period_cols: dict[int, str] = {}
     period_value_field = 'period_value'
 
@@ -410,16 +419,62 @@ def extract_wide_period(sheet_rows: list[tuple], column_map: dict[str, str],
         if not text:
             continue
         key = re.sub(r'\s+', ' ', text.lower())
-        canon = norm_map.get(key)
-        if not canon:
-            canon = _resolve_via_alias_index(hv, alias_idx)
         if is_period_header(text):
             period_cols[ci] = text
-            if canon:
-                period_value_field = canon
+            gemini_canon = norm_map.get(key)
+            if gemini_canon:
+                period_value_field = gemini_canon
             continue
-        if canon:
-            entity_cols.setdefault(canon, ci)
+        gemini_canon = norm_map.get(key)
+        if gemini_canon:
+            candidates.setdefault(gemini_canon, []).append(ci)
+            continue
+        alias_canon = _resolve_via_alias_index(hv, alias_idx)
+        if alias_canon:
+            candidates.setdefault(alias_canon, []).append(ci)
+            alias_forced_ci.setdefault(alias_canon, ci)
+
+    # Sample data rows to score column candidates (same 3-row window as tabular)
+    sample_rows: list[tuple] = []
+    for ri in range(hdr_idx + 1, min(hdr_idx + 8, len(sheet_rows))):
+        r = sheet_rows[ri]
+        if row_non_empty(r) and not is_junk_row(r):
+            sample_rows.append(r)
+        if len(sample_rows) >= 3:
+            break
+
+    def _score(ci: int) -> int:
+        score = 0
+        for r in sample_rows:
+            if ci >= len(r):
+                continue
+            v = r[ci]
+            if v is None:
+                continue
+            s = str(v).strip()
+            if not s:
+                continue
+            score += 1
+            score += min(len(s) // 10, 5)
+            if ' ' in s:
+                score += 3
+            if re.match(r'^(lp|pc|inv|co|d|cc|f\d*c)\-?\d+$', s.lower()):
+                score -= 5
+        return score
+
+    entity_cols: dict[str, int] = {}
+    for canon, cols in candidates.items():
+        if canon in alias_forced_ci and alias_forced_ci[canon] in cols:
+            entity_cols[canon] = alias_forced_ci[canon]
+            continue
+        if len(cols) == 1:
+            entity_cols[canon] = cols[0]
+            continue
+        # ID canonicals prefer short (low-score) col; everything else prefers rich text
+        if canon.endswith('_id') or canon in ('lp_id', 'company_id', 'entity_id'):
+            entity_cols[canon] = min(cols, key=_score)
+        else:
+            entity_cols[canon] = max(cols, key=_score)
 
     if not period_cols or not entity_cols:
         # No periods detected — fall back to tabular so we don't lose the rows

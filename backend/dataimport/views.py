@@ -478,7 +478,7 @@ def _import_event_generator(job, user):
 
     # Post-import: notify stakeholders of manual upload completion
     try:
-        from accounts.models import Notification
+        from notifications.models import Notification
         from accounts.models import User as _User
         org = user.organization
         completed_files = [pf for pf in pending_files if pf.status == 'completed']
@@ -491,15 +491,16 @@ def _import_event_generator(job, user):
             file_names = ', '.join(pf.original_filename for pf in completed_files)
             for su in stakeholders:
                 Notification.objects.create(
-                    user=su,
+                    organization=org,
+                    recipient=su,
                     title=f'New Data Import — {len(completed_files)} file(s) processed',
                     message=(
                         f'{user.get_full_name() or user.username} imported {len(completed_files)} file(s): '
                         f'{file_names}. '
                         f'Portfolio data has been updated.'
                     ),
-                    notification_type='mis_import',
-                    severity='low',
+                    category='system',
+                    priority='low',
                 )
     except Exception as e:
         logger.warning(f'Post-import stakeholder notification failed: {e}')

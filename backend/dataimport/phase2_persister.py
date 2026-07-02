@@ -2458,9 +2458,23 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
     # extraction in waterfall JSON), the persister previously left these keys
     # as None — the dashboard then rendered them as "—". Per Rule: a metric
     # whose value is mathematically zero MUST show as ₹0, not as missing.
-    # We surface that 0 explicitly when (and only when) the fund is in ROC
-    # phase so the cards render "₹0 Cr" rather than blank.
-    _fund_in_roc_phase = (lp_distributions_value or Decimal('0')) == Decimal('0')
+    # We surface that 0 explicitly when (and only when) the fund is in the
+    # pre-carry phase so the cards render "₹0 Cr" rather than blank.
+    #
+    # Universal ROC-phase detection: In European whole-fund waterfalls,
+    # GP earns ZERO carry until 100% of called capital is returned to LPs.
+    # A fund with partial distributions (interim dividends, partial exits)
+    # is still in the pre-carry phase if `total_distributions < called`.
+    # Detecting on "no distributions at all" was too strict — it caused
+    # clawback / gross carry / net carry to show "—" for funds that had
+    # any interim distribution even though carry was mathematically 0.
+    # Universal across every European-waterfall fund.
+    _lp_dist = lp_distributions_value or Decimal('0')
+    _called  = called_capital_value or Decimal('0')
+    _fund_in_roc_phase = (
+        _lp_dist == Decimal('0')           # no distributions at all
+        or _called > _lp_dist              # capital not yet fully returned
+    )
     _ZERO = Decimal('0')
 
     def _zero_if_roc(raw):
@@ -2955,6 +2969,30 @@ def _persist_portfolio_kpis(organization, scheme, rows: list) -> int:
             # KPI sheet covers a company whose investment row was not
             # extracted (rare) or doesn't exist in source. Universal.
             continue
+
+        # ── Universal kpi_name/kpi_value discriminator routing ──────────
+        # Some workbooks compress multiple SaaS metrics into ONE value
+        # column plus a `Metric_Type` discriminator column (e.g.
+        # "ARR / GMV / AUM (INR Cr)" + "Metric_Type (ARR/GMV/AUM)"). The
+        # extractor emits {kpi_name: 'ARR', kpi_value: 35} — routing this
+        # into the specific canonical field lets the SaaS Metrics dashboard
+        # populate. Only fires when a dedicated column wasn't already set.
+        # Universal across any workbook that ships this compressed pattern.
+        _kpi_name_raw = row.get('kpi_name')
+        _kpi_value = row.get('kpi_value')
+        if _kpi_name_raw and _kpi_value is not None:
+            _kpi_slug = str(_kpi_name_raw).strip().lower().replace(' ', '_').replace('-', '_')
+            _KPI_DISCRIMINATOR_MAP = {
+                'arr': 'arr', 'mrr': 'mrr', 'nrr': 'nrr',
+                'gmv': 'gmv', 'aum': 'aum_value',
+                'churn': 'churn_rate', 'churn_rate': 'churn_rate',
+                'cac': 'cac', 'ltv': 'ltv', 'ltv_cac': 'ltv_cac_ratio',
+                'burn_rate': 'burn_rate', 'gross_burn': 'gross_burn',
+                'net_burn': 'net_burn', 'runway': 'runway_months',
+            }
+            _target = _KPI_DISCRIMINATOR_MAP.get(_kpi_slug)
+            if _target:
+                row.setdefault(_target, _kpi_value)
 
         # ── Universal per-row derivations ──────────────────────────────
         # Fund workbooks publish RAW P&L line items (Revenue, COGS, R&D,
