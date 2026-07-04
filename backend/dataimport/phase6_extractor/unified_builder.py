@@ -13,7 +13,7 @@ This module is where all shape-translation happens — extractors emit domain-
 agnostic dicts; here we route them into the correct top-level bucket and
 translate label slugs → canonical persister field names.
 """
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from .coercers import extract_pct
@@ -68,17 +68,26 @@ _FUND_MASTER_SLUG_ALIAS: dict[str, str] = {
     # Terms
     'carried_interest_rate': 'carry_pct',
     'carried_interest': 'carry_pct',
+    'gp_carry_rate': 'carry_pct',
+    'gp_carry': 'carry_pct',
+    'carry_rate': 'carry_pct',
     'preferred_return_hurdle_rate': 'hurdle_rate_pct',
     'preferred_return': 'hurdle_rate_pct',
     'preferred_return_pct': 'hurdle_rate_pct',
     'preferred_return_rate': 'hurdle_rate_pct',
     'hurdle_rate': 'hurdle_rate_pct',
+    'hurdle_rate_p_a_compounded': 'hurdle_rate_pct',
     'hurdle': 'hurdle_rate_pct',
     'management_fee_investment_period': 'management_fee_pct',
+    'management_fee_rate_investment_period': 'management_fee_pct',
     'management_fee': 'management_fee_pct',
     'management_fee_post_inv_period': 'management_fee_pct_post',
+    'management_fee_rate_post_ip': 'management_fee_pct_post',
     'distribution_waterfall': 'waterfall_type',
     'waterfall_type': 'waterfall_type',
+    'fund_term_years': 'tenure_years',
+    'fund_term': 'tenure_years',
+    'fund_tenure_years': 'tenure_years',
     # Totals
     'total_lp_count': 'lp_count',
     'lp_count': 'lp_count',
@@ -359,6 +368,45 @@ def build_unified_json(per_sheet: dict, workbook_data: dict) -> dict:
         if not has_val and not has_kpi:
             valuations.append(row)
 
+    # ── Universal FV mirror from Portfolio Investments ─────────────────
+    # Many fund sheets publish a "FV (Cr)" column right on the Portfolio
+    # Investments master sheet (True North Healthcare Fund VI is one example).
+    # Without this mirror, that FV data never becomes a Valuation record —
+    # dashboard shows FV=0 for every company even though the source file has
+    # values. Universal across any fund whose Portfolio Investments sheet
+    # publishes fair_value per row. Only fires when fair_value is present;
+    # cost/date/sector inherit from the same row when available.
+    _fv_date_by_company: dict[str, object] = {}
+    for row in by_dom.get('portfolio_investments', []):
+        if not isinstance(row, dict):
+            continue
+        co = row.get('company_name')
+        fv = row.get('fair_value')
+        if co and fv is not None:
+            valuations.append({
+                'company_name': co,
+                'sector': row.get('sector'),
+                'fair_value': fv,
+                'fair_value_of_holding': row.get('fair_value_of_holding') or fv,
+                'cost_basis': row.get('total_invested') or row.get('cost_basis'),
+                'valuation_date': (row.get('valuation_date')
+                                   or row.get('as_of_date')
+                                   or row.get('val_date')),
+                'methodology': row.get('methodology'),
+            })
+            if row.get('valuation_date'):
+                _fv_date_by_company[str(co).strip().lower()] = row['valuation_date']
+
+    # Universal cross-sheet date backfill: when a Valuations (IPEV) row has
+    # no valuation_date (True North's IPEV sheet has no per-row date), borrow
+    # the "as of" date from the same company's Portfolio Investments row.
+    # Deterministic and file-scoped — no calendar guessing.
+    for row in valuations:
+        if not row.get('valuation_date') and row.get('company_name'):
+            borrowed = _fv_date_by_company.get(str(row['company_name']).strip().lower())
+            if borrowed:
+                row['valuation_date'] = borrowed
+
     # Universal NAV vs Fund-ledger split. Sheets classified as
     # `nav_accounting` can be one of two very different things:
     #   (a) a quarterly balance-sheet-style NAV walk (rows = periods, cols =
@@ -387,6 +435,74 @@ def build_unified_json(per_sheet: dict, workbook_data: dict) -> dict:
             fund_ledger_rows.append(row)
         else:
             nav_records.append(row)
+
+    # Universal multi-section rescue (added 2026-07-03): the nav_calculation
+    # domain covers sheets like NAV_CALC that have a KV composition table at
+    # the top AND a monthly NAV walk further down. The Stage-2 extractor now
+    # emits rows for the deeper walk with nav_accounting-shaped fields. Route
+    # any NAV-signature row from nav_calculation into nav_records so the
+    # persister creates NAVRecord entries. No sheet-name hardcoding.
+    for row in by_dom.get('nav_calculation', []):
+        if not isinstance(row, dict):
+            continue
+        if any(k in row for k in _NAV_SIGNATURE):
+            nav_records.append(row)
+
+    # Universal KV → single NAV record synthesis (added 2026-07-03).
+    # Some NAV Calculation sheets are 100% key-value (True North's NAV
+    # Calculation has 4 KV sections: Investable Funds, NAV Summary, QoQ Bridge,
+    # Per-Unit NAV — but NO tabular monthly walk). The KV extractor captures
+    # values like "NET ASSET VALUE (CLOSING NAV) = 2433.85" but nothing
+    # consumed them → NAV History stayed empty. Emit ONE synthetic NAV record
+    # from the KV so the dashboard's Total NAV tile populates. Persister's
+    # fund-context date fallback provides the nav_date. Only fires when the
+    # tabular rescue produced nothing — no double-writes.
+    _NAV_KV_SLUG_TO_FIELD = {
+        'net_asset_value': 'total_nav',
+        'net_asset_value_closing_nav': 'total_nav',
+        'closing_nav': 'total_nav',
+        'total_nav': 'total_nav',
+        'net_nav': 'total_nav',
+        'total_fund_nav': 'total_nav',
+        'total_fund_nav_inr_crores': 'total_nav',
+        'gross_nav': 'gross_nav',
+        'opening_nav': 'opening_nav',
+        'total_units_outstanding': 'total_units_outstanding',
+        'total_units_issued': 'total_units_outstanding',
+        'units_outstanding': 'total_units_outstanding',
+        'nav_per_unit': 'nav_per_unit',
+        'closing_nav_per_unit': 'nav_per_unit',
+        'nav_per_unit_inr_lakhs': 'nav_per_unit',
+        'portfolio_fair_value': 'investments_at_fair_value',
+        'portfolio_fair_value_ipev_certified': 'investments_at_fair_value',
+        'add_temporary_investments': 'investments_at_fair_value',
+        'cash_bank_balances': 'cash_and_equivalents',
+        'cash_and_bank_balances': 'cash_and_equivalents',
+        'add_cash_bank_balances': 'cash_and_equivalents',
+        'management_fees_payable': 'management_fee_payable',
+        'less_management_fees_payable': 'management_fee_payable',
+        'accrued_fees': 'management_fee_payable',
+    }
+    if not any(r.get('total_nav') for r in nav_records):
+        nav_calc_kv = kv_by_dom.get('nav_calculation') or {}
+        if nav_calc_kv:
+            synthetic: dict = {}
+            for src_slug, dst_field in _NAV_KV_SLUG_TO_FIELD.items():
+                v = nav_calc_kv.get(src_slug)
+                if v is None or isinstance(v, dict):
+                    continue
+                _num = None
+                try:
+                    if isinstance(v, (int, float, Decimal)):
+                        _num = Decimal(str(v))
+                    elif isinstance(v, str):
+                        _num = Decimal(v.replace(',', '').strip())
+                except (ValueError, InvalidOperation, AttributeError):
+                    _num = None
+                if _num is not None and dst_field not in synthetic:
+                    synthetic[dst_field] = _num
+            if synthetic.get('total_nav'):
+                nav_records.append(synthetic)
 
     # Per-company P&L / KPIs / BvA. The financials_pl_bva domain is a bag
     # holding rows from P&L / BS / CF / KPI / SaaS Metrics / Budget vs
@@ -420,9 +536,29 @@ def build_unified_json(per_sheet: dict, workbook_data: dict) -> dict:
     # (SaaS Metrics sheets, KPI matrix wide-period unpivots) join the periodic
     # KPI stream so the persister can create PortfolioKPI records for
     # mrr / arr / churn_rate / cac / ltv / headcount / etc.
+    #
+    # Universal canonical-field aliasing: Gemini frequently maps columns to
+    # the closest field name in the valuations_kpis schema (e.g. EBITDA →
+    # `ebitda_value`) even when the row is destined for the KPI persister,
+    # which reads `ebitda`. Apply a small, non-lossy alias set BEFORE the
+    # merge so the persister actually sees the values. Only added when the
+    # target field is absent — never clobbers a value that came in directly.
+    _KPI_CANONICAL_ALIASES = {
+        'ebitda_value': 'ebitda',
+        'ebitda_margin': 'ebitda_margin_pct',
+        'gross_margin': 'gross_margin_pct',
+        'net_burn_rate': 'net_burn',
+        'gross_burn_rate': 'gross_burn',
+        'monthly_burn': 'gross_burn',
+        'cash': 'cash_balance',
+        'runway': 'runway_months',
+    }
     for r in valuations_kpi_rows:
         if not r.get('company_name'):
             continue
+        for src, dst in _KPI_CANONICAL_ALIASES.items():
+            if src in r and r.get(dst) in (None, ''):
+                r[dst] = r[src]
         if 'period' not in r:
             r['period'] = (r.get('financial_year') or r.get('fy')
                            or r.get('period_end') or r.get('period_start')

@@ -589,6 +589,35 @@ def extract_entity_pivoted(
 # dispatch — call the right extractor for the given layout
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _find_deeper_table_start(sheet_rows: list[tuple],
+                             min_text_cells: int = 5) -> int:
+    """Universal: scan a sheet for a tabular section that starts AFTER the
+    first 20 rows. Returns the row index of the deeper table header, or -1
+    if none. Used to detect multi-section sheets (KV top + tabular bottom).
+
+    The row must have >= min_text_cells text cells and must not be a bare
+    section-title row.
+    """
+    start = 20
+    best = -1
+    best_score = 0
+    for ri in range(start, len(sheet_rows)):
+        cells = row_non_empty(sheet_rows[ri])
+        if len(cells) < min_text_cells:
+            continue
+        text_cells = sum(
+            1 for _, v in cells
+            if not isinstance(v, (int, float, Decimal))
+            and not hasattr(v, 'isoformat')
+            and _cell_str(v)
+        )
+        if text_cells >= min_text_cells and text_cells > best_score:
+            if not is_section_title_row(sheet_rows[ri]):
+                best_score = text_cells
+                best = ri
+    return best
+
+
 def extract_sheet(sheet_rows: list[tuple], layout: str,
                   column_map: dict[str, str], sheet_name: str,
                   domain: str = '') -> dict:
@@ -603,6 +632,14 @@ def extract_sheet(sheet_rows: list[tuple], layout: str,
     waterfall workings sheets are almost always label→value layouts even
     when they visually look like a table. Populates BOTH 'rows' and 'kv'
     so downstream consumers see whichever they expect.
+
+    Universal multi-section rescue (added 2026-07-03): when Gemini classifies
+    a long sheet as "key_value" but a proper tabular section exists further
+    down (e.g. NAV_CALC has "SECTION A — Line Item | Amount" as KV at rows
+    5-17 and "SECTION C — MONTHLY NAV HISTORY (36 Months)" as a table at
+    rows 31-67), also run the tabular extractor on the deeper slice so the
+    hidden history is recovered. This is additive — the KV output is
+    preserved unchanged; a new `rows` array carries the deeper rows.
     """
     if layout == 'entity_pivoted':
         events, line_items = extract_entity_pivoted(sheet_rows, column_map, sheet_name)
@@ -619,5 +656,28 @@ def extract_sheet(sheet_rows: list[tuple], layout: str,
     # forms so unified_builder can read whichever is populated.
     if domain == 'waterfall_carry' and 'kv' not in result:
         result['kv'] = extract_key_value(sheet_rows)
+
+    # Universal multi-section rescue for KV sheets with a hidden tabular tail.
+    # Only fires when the sheet is long (>=30 rows) and a deeper header exists.
+    # Uses domain-specific alias index by re-running tabular on the sliced tail.
+    # For nav_calculation sheets whose deeper section is a monthly NAV walk,
+    # temporarily use 'nav_accounting' as the alias-index domain so that "Fund
+    # NAV", "Portfolio FV", "Cash", "NAV/Unit" get aliased to total_nav,
+    # investments_at_fair_value, cash_and_equivalents, nav_per_unit fields.
+    if layout == 'key_value' and len(sheet_rows) >= 30 and 'rows' not in result:
+        deeper_idx = _find_deeper_table_start(sheet_rows)
+        if deeper_idx > 20:
+            # Effective alias-index domain for the deeper section:
+            # nav_calculation sheets almost always publish a NAV walk deep
+            # inside them; pretend it's a nav_accounting section so the
+            # alias index picks up total_nav / investments_at_fair_value.
+            _deeper_domain = 'nav_accounting' if domain == 'nav_calculation' else domain
+            deeper_rows = extract_tabular(
+                sheet_rows[deeper_idx:],
+                column_map={},          # empty — alias index handles it
+                domain=_deeper_domain,
+            )
+            if deeper_rows:
+                result['rows'] = deeper_rows
 
     return result

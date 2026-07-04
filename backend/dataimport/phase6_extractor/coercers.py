@@ -16,6 +16,21 @@ def to_decimal(v: Any) -> Optional[Decimal]:
         return None
     if isinstance(v, bool):
         return None
+    # Universal Excel 1900-date-system rescue: a number cell that got Date
+    # cell-formatting applied to it (very common in poorly-hygiened fund
+    # workbooks — True North's Investors sheet's Commitment/Drawdown columns
+    # store commitments like 260 Cr as datetime(1900, 9, 16)) is read by
+    # openpyxl as a datetime in year 1900. Convert it back to the underlying
+    # Excel day number so downstream numeric consumers see 260, not None.
+    # The Excel 1900 epoch is 1899-12-30 (accounts for the 1900-leap-year bug).
+    # No legitimate fund datum ever falls in year 1900 or 1901, so this is
+    # safe universally.
+    if isinstance(v, datetime) and v.year in (1900, 1901):
+        excel_epoch = datetime(1899, 12, 30)
+        return Decimal((v - excel_epoch).days)
+    if isinstance(v, date) and not isinstance(v, datetime) and v.year in (1900, 1901):
+        excel_epoch = date(1899, 12, 30)
+        return Decimal((v - excel_epoch).days)
     if isinstance(v, (int, float)):
         if isinstance(v, float) and v != v:
             return None

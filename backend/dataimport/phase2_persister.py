@@ -1300,6 +1300,13 @@ def _persist_valuations(scheme, rows: list) -> int:
     1 row and the dashboard loses (N−1) × fair_value_of_holding worth of FV.
     """
     from investments.models import Investment, Valuation
+    # Universal fund-context fallback for valuation_date: when a Valuations
+    # sheet publishes rows without a per-row date column (True North's IPEV
+    # sheet only puts the date in the sheet title), fall back to the scheme's
+    # final_close_date / first_close_date. Deterministic + fund-scoped. Prior
+    # behaviour dropped every dateless row silently — dashboard FV showed 0.
+    _fund_ctx_val_date = (getattr(scheme, 'final_close_date', None)
+                          or getattr(scheme, 'first_close_date', None))
     count = 0
     for row in rows:
         if not isinstance(row, dict):
@@ -1308,6 +1315,8 @@ def _persist_valuations(scheme, rows: list) -> int:
         if not co_name:
             continue
         vdate = _date(row.get('valuation_date'))
+        if not vdate:
+            vdate = _fund_ctx_val_date
         if not vdate:
             continue
 
@@ -1914,6 +1923,13 @@ def _compute_nav_fallback(row: dict) -> Optional[Decimal]:
 
 def _persist_nav_records(scheme, rows: list) -> int:
     from accounting.models import NAVRecord
+    # Universal fund-context fallback for NAV rows that arrived without a
+    # nav_date (e.g. the synthetic single-row NAV built from a KV-only
+    # NAV Calculation sheet — True North Healthcare Fund VI's NAV sheet is
+    # entirely key-value with no per-period date column). Falls back to the
+    # scheme's final_close_date / first_close_date deterministically.
+    _fund_ctx_nav_date = (getattr(scheme, 'final_close_date', None)
+                          or getattr(scheme, 'first_close_date', None))
     count = 0
     for row in rows:
         if not isinstance(row, dict):
@@ -1926,6 +1942,8 @@ def _persist_nav_records(scheme, rows: list) -> int:
                or row.get('period') or row.get('quarter')
                or row.get('financial_year') or row.get('fy'))
         nd = _date(raw) or _period_to_date(raw)
+        if not nd:
+            nd = _fund_ctx_nav_date
         if not nd:
             continue
         # NOT-NULL on NAVRecord: total_nav, total_units_outstanding, nav_per_unit.
@@ -2901,6 +2919,15 @@ def _persist_portfolio_kpis(organization, scheme, rows: list) -> int:
                       .order_by('-nav_date').first())
         if latest_nav and latest_nav.nav_date:
             fallback_period_date = latest_nav.nav_date
+        # Universal second-tier fallback: some funds ship KPI sheets without
+        # any period column AND without a NAV walk (or with a NAV walk that
+        # extracted zero rows because of a multi-section layout mismatch).
+        # Use scheme.final_close_date or first_close_date as a deterministic,
+        # fund-scoped date so KPI rows still persist. Otherwise the SaaS/KPI
+        # dashboard stays blank for the entire fund.
+        if fallback_period_date is None:
+            fallback_period_date = (getattr(scheme, 'final_close_date', None)
+                                    or getattr(scheme, 'first_close_date', None))
 
     # Fields to project from each row
     kpi_fields = [
