@@ -5,12 +5,29 @@
 # logs, OS junk, IDE settings, venvs, build artifacts, ML/AI artifacts.
 
 # ---- Secrets & environment ----
-# Every .env-format file is ignored, including .env.example.
-# If you need a template, share it out-of-band (Notion / 1Password / docs/).
+# Every .env-format file is ignored by default (they contain real secrets).
 .env
 .env.*
 *.env
 *.env.*
+
+# --- Explicit allowlist: files that are safe to commit ---
+# These carry NO secrets — only public URLs, feature flags, or CHANGEME-*
+# placeholders. Committing them makes environment setup reviewable in PRs.
+!backend/.env.example
+!backend/.env.staging.template
+!frontend/.env.example
+!frontend/.env.development
+!frontend/.env.production
+
+# --- Frontend runtime env.js (the ACTIVE per-machine copy) ---
+# env.js is NOT committed. Operators pick which environment by copying:
+#   Local dev:       cp frontend/env.local.js    frontend/env.js
+#   Staging deploy:  cp frontend/env.staging.js  frontend/env.js
+# The two source-of-truth files (env.local.js, env.staging.js) ARE committed.
+frontend/env.js
+!frontend/env.local.js
+!frontend/env.staging.js
 
 # ---- Databases ----
 # Local SQLite (pre-Postgres migration) and any future dumps.

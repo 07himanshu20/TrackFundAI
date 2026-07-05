@@ -23,6 +23,29 @@ SECRET_KEY = os.getenv('SECRET_KEY', 'fallback-secret-key-change-in-production')
 DEBUG = os.getenv('DEBUG', 'True') == 'True'
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
 
+# --- Fail-loud production guard ---
+# Refuse to boot when DEBUG=False AND critical env vars weren't set.
+# Catches the "operator forgot TFAI_ENV / forgot to inject secrets" class of
+# incidents: booting with a well-known SECRET_KEY forges all JWTs, booting
+# with the default ALLOWED_HOSTS rejects every real request as DisallowedHost.
+if not DEBUG:
+    if SECRET_KEY == 'fallback-secret-key-change-in-production':
+        raise RuntimeError(
+            'SECRET_KEY env var MUST be set when DEBUG=False. '
+            'Set TFAI_ENV=staging (or prod) and ensure the corresponding '
+            '.env.<env> file exports a strong SECRET_KEY.'
+        )
+    if ALLOWED_HOSTS == ['localhost', '127.0.0.1']:
+        raise RuntimeError(
+            'ALLOWED_HOSTS env var MUST be set when DEBUG=False. '
+            'Set it to the real production/staging domain(s), comma-separated.'
+        )
+
+# CSRF trusted origins — required by Django 4+ for HTTPS admin/POST.
+CSRF_TRUSTED_ORIGINS = [
+    o.strip() for o in os.getenv('CSRF_TRUSTED_ORIGINS', '').split(',') if o.strip()
+]
+
 # Gemini Configuration — dual-mode (Vertex AI for prod, AI Studio for dev).
 # See .env for the active backend. The SDK client construction lives in
 # api/gemini_service.py:get_client() and branches on GOOGLE_GENAI_USE_VERTEXAI.
@@ -246,4 +269,15 @@ MICROSOFT_CLIENT_SECRET = os.getenv('MICROSOFT_CLIENT_SECRET', '')
 MARKET_RESEARCH_AI_ENABLED = os.getenv('MARKET_RESEARCH_AI_ENABLED', 'True') == 'True'
 
 # -- Export Engine --
-EXPORT_BASE_URL = os.getenv('EXPORT_BASE_URL', 'http://localhost:8000')
+# The public base URL embedded in exported PDFs / emailed links. On staging
+# and prod this MUST be the real backend origin (e.g. https://staging-api...).
+# Only defaults to localhost when DEBUG=True (local dev only).
+EXPORT_BASE_URL = os.getenv(
+    'EXPORT_BASE_URL',
+    'http://localhost:8000' if DEBUG else ''
+)
+if not DEBUG and not EXPORT_BASE_URL:
+    raise RuntimeError(
+        'EXPORT_BASE_URL env var MUST be set when DEBUG=False. '
+        'Exported PDFs and emailed links would otherwise contain no origin.'
+    )
