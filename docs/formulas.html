@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>TrackFundAI — Formula Reference</title>
+<style>
+  :root {
+    --bg: #0b0f1a;
+    --card: #131828;
+    --text: #e6ebf5;
+    --muted: #8a94a7;
+    --accent: #4dabf7;
+    --green: #51cf66;
+    --amber: #ffd43b;
+    --code-bg: #0f1523;
+    --border: #1e2a3e;
+    --pill-bg: #1a2338;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    line-height: 1.55;
+    margin: 0;
+    padding: 40px 24px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  h1 {
+    font-size: 32px;
+    margin: 0 0 8px 0;
+    letter-spacing: -0.5px;
+  }
+  .subtitle { color: var(--muted); margin: 0 0 40px 0; font-size: 15px; }
+  .toc {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 24px;
+    margin-bottom: 40px;
+  }
+  .toc h3 { margin: 0 0 12px 0; font-size: 15px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.8px; }
+  .toc ul { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px 20px; }
+  .toc a { color: var(--accent); text-decoration: none; font-size: 14px; }
+  .toc a:hover { text-decoration: underline; }
+  section.field {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px 28px;
+    margin-bottom: 22px;
+  }
+  section.field h2 {
+    font-size: 22px;
+    margin: 0 0 6px 0;
+    letter-spacing: -0.3px;
+  }
+  .field-desc { color: var(--muted); font-size: 14px; margin: 0 0 18px 0; }
+  .formula {
+    border-left: 3px solid var(--accent);
+    padding: 12px 16px;
+    margin: 14px 0;
+    background: rgba(77, 171, 247, 0.05);
+    border-radius: 0 8px 8px 0;
+  }
+  .formula.priority-1 { border-left-color: var(--green); background: rgba(81, 207, 102, 0.06); }
+  .formula.priority-2 { border-left-color: var(--amber); background: rgba(255, 212, 59, 0.05); }
+  .formula.priority-3 { border-left-color: var(--muted); background: rgba(138, 148, 167, 0.05); }
+  .formula .title {
+    font-weight: 600;
+    font-size: 15px;
+    margin-bottom: 6px;
+  }
+  .formula .expr {
+    font-family: "SF Mono", "Menlo", monospace;
+    font-size: 14px;
+    background: var(--code-bg);
+    padding: 10px 14px;
+    border-radius: 6px;
+    margin: 8px 0;
+    overflow-x: auto;
+    display: block;
+    color: #d5e0f0;
+  }
+  .formula .expr .var { color: #ffa94d; }
+  .formula .expr .op { color: #74c0fc; }
+  .formula .meta {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 6px;
+  }
+  .formula .meta code {
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+  }
+  .pill {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: var(--pill-bg);
+    color: var(--accent);
+    margin-right: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .pill.p1 { background: rgba(81, 207, 102, 0.15); color: var(--green); }
+  .pill.p2 { background: rgba(255, 212, 59, 0.15); color: var(--amber); }
+  .pill.p3 { background: rgba(138, 148, 167, 0.15); color: var(--muted); }
+  .pill.tier { background: rgba(77, 171, 247, 0.15); color: var(--accent); }
+  .note {
+    font-size: 13px;
+    color: var(--muted);
+    padding: 10px 14px;
+    background: rgba(138, 148, 167, 0.06);
+    border-radius: 6px;
+    margin-top: 12px;
+    border-left: 2px solid var(--muted);
+  }
+  .kicker {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    background: rgba(81, 207, 102, 0.15);
+    color: var(--green);
+    margin-bottom: 8px;
+  }
+  .kicker.extracted { background: rgba(77, 171, 247, 0.15); color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>TrackFundAI — Formula Reference</h1>
+<p class="subtitle">
+  Every formula Python actually computes after Gemini finishes semantic
+  extraction. Nothing hypothetical — each entry cites the code location.
+  Green = primary/preferred path. Amber = secondary. Grey = last-resort fallback.
+</p>
+
+<div class="toc">
+  <h3>Fields covered</h3>
+  <ul>
+    <li><a href="#moic">MOIC (3 formulas)</a></li>
+    <li><a href="#net-irr">Net IRR % (3-tier ladder)</a></li>
+    <li><a href="#tvpi">TVPI</a></li>
+    <li><a href="#dpi">DPI</a></li>
+    <li><a href="#rvpi">RVPI</a></li>
+    <li><a href="#deployment">Deployment %</a></li>
+    <li><a href="#uncalled">Total Uncalled Capital</a></li>
+    <li><a href="#waterfall">Waterfall (RoC / Pref / Catch-up / Carry)</a></li>
+    <li><a href="#gross-profit">Gross Profit &amp; Gross Margin %</a></li>
+    <li><a href="#ebitda">EBITDA &amp; EBITDA %</a></li>
+    <li><a href="#cac">CAC (₹)</a></li>
+    <li><a href="#ltv">LTV (₹) &amp; LTV/CAC</a></li>
+    <li><a href="#arr">Portfolio MRR / ARR</a></li>
+    <li><a href="#extracted">GMV, REV, Orders, AOV, Returns %, Repeat %</a></li>
+    <li><a href="#terminal-fv">Terminal / Residual FV (helper)</a></li>
+  </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════ MOIC -->
+<section id="moic" class="field">
+  <h2>MOIC — Multiple on Invested Capital</h2>
+  <p class="field-desc">
+    Three MOIC formulas coexist because MOIC is asked in three different scopes
+    (per-investment, fund-level, per-company aggregate). Each has its own
+    inputs and rounding.
+  </p>
+
+  <div class="formula priority-1">
+    <div class="title">
+      <span class="pill p1">Fund-Level Portfolio MOIC</span>
+      Portfolio-basis multiple shown on the Cover tile
+    </div>
+    <code class="expr">
+      MOIC = (total_distributed + portfolio_residual) / total_invested
+    </code>
+    <div class="meta">
+      Where <code>portfolio_residual = SUM(Valuation.fair_value)</code> per active investment,
+      with <code>fund_nav</code> as sanity-bounded fallback (rejected if &gt;5× invested).<br>
+      Quantized to 4 decimals. <code>backend/dataimport/phase4_derivations.py:1181-1187</code>
+    </div>
+  </div>
+
+  <div class="formula priority-2">
+    <div class="title">
+      <span class="pill p2">Per-Investment MOIC</span>
+      Written to <code>Investment.moic</code> during Phase 4 derivation
+    </div>
+    <code class="expr">
+      MOIC = SUM(positive cashflows) / SUM(negative cashflows)
+    </code>
+    <div class="meta">
+      Where positive = exit_proceeds + distributions + terminal_FV (if active),
+      negative = tranche investments. Quantized to 4 decimals.<br>
+      <code>backend/dataimport/phase4_derivations.py:255-260</code>
+    </div>
+  </div>
+
+  <div class="formula priority-3">
+    <div class="title">
+      <span class="pill p3">Per-Company Aggregate MOIC</span>
+      Computed on-demand by the DRF serializer for the Companies grid
+    </div>
+    <code class="expr">
+      MOIC = total_fv / total_cost
+    </code>
+    <div class="meta">
+      Where <code>total_fv</code> = SUM(exit proceeds) when exited, else
+      SUM(inv.moic × inv.total_invested) for active investments; <code>total_cost</code>
+      = SUM(Investment.total_invested).<br>
+      <code>backend/investments/serializers.py:125-130</code>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════ NET IRR -->
+<section id="net-irr" class="field">
+  <h2>Net IRR % — Priority Ladder (3 tiers)</h2>
+  <p class="field-desc">
+    Fund workbooks vary widely in what data they publish. Python attempts three
+    IRR computations in priority order; the first that produces a plausible
+    value wins. A 500 %/yr sanity cap discards absurd XIRR outputs at every
+    tier. The chosen method is emitted via <code>net_irr_method</code> so the
+    dashboard tile can label the source.
+  </p>
+
+  <div class="formula priority-1">
+    <div class="title">
+      <span class="pill tier">Tier 1</span>
+      <span class="pill p1">Preferred</span>
+      ILPA Net IRR — XIRR over LP-perspective ledger
+    </div>
+    <code class="expr">
+      IRR = XIRR([<span class="var">−CapitalCall</span>, <span class="var">+Distribution</span>, <span class="var">+Terminal_FV</span>])
+    </code>
+    <div class="meta">
+      <b>Requires:</b> total_called ≥ 50 % of total_invested (physics bound —
+      you cannot invest more than you have called).<br>
+      <b>Gives:</b> industry-standard LP-perspective Net IRR.<br>
+      <code>backend/dataimport/phase4_derivations.py:1253-1330</code> (Tier 1 selector)
+    </div>
+  </div>
+
+  <div class="formula priority-2">
+    <div class="title">
+      <span class="pill tier">Tier 2</span>
+      <span class="pill p2">Fallback</span>
+      Cost-weighted per-investment Gross IRR
+    </div>
+    <code class="expr">
+      IRR = SUM(cost × irr_pct) / SUM(cost)
+    </code>
+    <div class="meta">
+      <b>Requires:</b> majority of investments have workbook-provided
+      <code>irr_pct</code>.<br>
+      <b>Gives:</b> portfolio-level Gross IRR (before fees/carry) — standard
+      fund-manager reporting format.<br>
+      <code>backend/dataimport/phase4_derivations.py:1330-1385</code>
+    </div>
+  </div>
+
+  <div class="formula priority-3">
+    <div class="title">
+      <span class="pill tier">Tier 3</span>
+      <span class="pill p3">Last resort</span>
+      Fund-level XIRR on Investment cashflows → LP terminal
+    </div>
+    <code class="expr">
+      IRR = XIRR([<span class="var">−Investment.cost</span>, <span class="var">+Distribution</span>, <span class="var">+Terminal_FV</span>])
+    </code>
+    <div class="meta">
+      <b>Requires:</b> at least <code>Investment.investment_date</code> +
+      <code>total_invested</code> exist.<br>
+      <b>Gives:</b> approximation of Gross IRR from atomic ledger only.
+      Used when call extraction is incomplete AND workbook doesn't publish
+      per-inv IRR.<br>
+      <code>backend/dataimport/phase4_derivations.py:1385-1409</code>
+    </div>
+  </div>
+
+  <div class="note">
+    <b>XIRR algorithm (common to all three tiers):</b> pure-Python bisection
+    over the annual rate. Bracket <code>[−0.99, +10.0]</code>, widened geometrically
+    (×4) up to 1e6 for extreme cashflows. 80 iterations → 1e-9 precision, ~1 ms
+    per call. No numpy/scipy dependency. Returns Decimal percent (e.g. 27.5 for 27.5 %).<br>
+    <code>backend/dataimport/phase4_derivations.py:32-102 (_xirr)</code>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ TVPI -->
+<section id="tvpi" class="field">
+  <h2>TVPI — Total Value to Paid-In</h2>
+  <div class="formula priority-1">
+    <div class="title"><span class="kicker">DETERMINISTIC</span></div>
+    <code class="expr">
+      TVPI = (total_distributed + residual_value) / perf_denom
+    </code>
+    <div class="meta">
+      <b>residual_value</b> = SUM(<code>Valuation.fair_value_of_holding</code>) per active investment,
+      with <code>fund_nav</code> as sanity-bounded fallback.<br>
+      <b>perf_denom</b> = <code>total_called</code> if <code>total_called ≥ total_invested</code>
+      else <code>total_invested</code> (graceful degradation when call rows missing).<br>
+      Never left blank if any capital base + any value present. Quantized to 4 decimals.<br>
+      <code>backend/dataimport/phase4_derivations.py:1217-1226</code>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ DPI -->
+<section id="dpi" class="field">
+  <h2>DPI — Distributed to Paid-In</h2>
+  <div class="formula priority-1">
+    <div class="title"><span class="kicker">DETERMINISTIC (STRICT ILPA)</span></div>
+    <code class="expr">
+      DPI = total_distributed / total_called
+    </code>
+    <div class="meta">
+      Strict ILPA definition — denominator is called capital, not invested.
+      Only computed when <code>total_called &gt; 0</code>. Quantized to 4 decimals.<br>
+      <code>backend/dataimport/phase4_derivations.py:1207-1209</code>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ RVPI -->
+<section id="rvpi" class="field">
+  <h2>RVPI — Residual Value to Paid-In</h2>
+  <div class="formula priority-1">
+    <div class="title"><span class="kicker">DETERMINISTIC</span></div>
+    <code class="expr">
+      RVPI = residual_value / perf_denom
+    </code>
+    <div class="meta">
+      Same <code>residual_value</code> and <code>perf_denom</code> definitions
+      as TVPI (see above).<br>
+      <code>backend/dataimport/phase4_derivations.py:1211-1215</code>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════ Deployment -->
+<section id="deployment" class="field">
+  <h2>Deployment %</h2>
+  <p class="field-desc">
+    Ratio of capital already drawn from LPs relative to what was committed. Emitted
+    by Gemini's compute step, then reconciled against extracted cell values.
+  </p>
+  <div class="formula priority-1">
+    <div class="title"><span class="kicker">DETERMINISTIC</span></div>
+    <code class="expr">
+      deployment_pct = (total_capital_called / total_committed_capital) × 100
+    </code>
+    <div class="meta">
+      <code>backend/dataimport/phase4_gemini_compute.py:119</code>
+    </div>
+  </div>
+</section>
+
+<!-- ═════════════════════════════════════════════════════════════ Uncalled -->
+<section id="uncalled" class="field">
+  <h2>Total Uncalled Capital</h2>
+  <div class="formula priority-1">
+    <div class="title"><span class="kicker">DETERMINISTIC</span></div>
+    <code class="expr">
+      total_uncalled = MAX(0, total_committed − total_called)
+    </code>
+    <div class="meta">
+      Floored at zero — over-called funds (rare, LPA violation) still display 0.<br>
+      <code>backend/dataimport/phase4_derivations.py:1414</code> and
+      <code>backend/dataimport/phase2_persister.py:2511</code>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════ Waterfall -->
+<section id="waterfall" class="field">
+  <h2>European Waterfall — RoC / Preferred Return / Catch-Up / Carry</h2>
+  <p class="field-desc">
+    Deterministic Python computation using extracted LPA terms
+    (<code>hurdle_rate_pct</code>, <code>carry_pct</code>) + CapitalCall + Distribution ledgers.
+    "Extracted-first, computed as fallback" — if the workbook's Carry_Clawback
+    sheet published a verified cell value, that wins over the formula.
+  </p>
+
+  <div class="formula priority-1">
+    <div class="title">Step 1 — Return of Capital</div>
+    <code class="expr">
+      step1_roc = MIN(total_called, total_distributed)
+    </code>
+    <div class="meta"><code>backend/dataimport/phase4_derivations.py:417</code></div>
+  </div>
+
+  <div class="formula priority-1">
+    <div class="title">Step 2 — Preferred Return (compounded, per-call accrual)</div>
+    <code class="expr">
+      preferred_return = SUM_over_calls[ call_amount × ((1 + hurdle_frac)^years − 1) ]
+    </code>
+    <div class="meta">
+      <code>years = (as_of − call_date).days / 365.25</code>, <code>hurdle_frac = hurdle_pct / 100</code>.
+      Industry-standard compounded pref return.<br>
+      <code>backend/dataimport/phase4_derivations.py:424-435</code>
+    </div>
+  </div>
+
+  <div class="formula priority-1">
+    <div class="title">Step 3 — GP Catch-Up (closed form)</div>
+    <code class="expr">
+      catchup = preferred_return × carry_frac / (1 − carry_frac)
+    </code>
+    <div class="meta">
+      Equivalent to "100 % to GP until GP receives carry_frac of (pref + catchup)".
+      Capped at remaining distributable after RoC + preferred return.<br>
+      <code>backend/dataimport/phase4_derivations.py:443-454</code>
+    </div>
+  </div>
+
+  <div class="formula priority-1">
+    <div class="title">Carry Base &amp; Gross Carry</div>
+    <code class="expr">
+      carry_base = MAX(0, total_distributed − total_called)
+      <br>carry_amount_gross = carry_frac × carry_base
+    </code>
+    <div class="meta">
+      <code>backend/dataimport/phase4_derivations.py:439, 457</code>
+    </div>
+  </div>
+
+  <div class="formula priority-1">
+    <div class="title">Step 4 — 80:20 Residual Split</div>
+    <code class="expr">
+      remainder = MAX(0, distributable_after_roc_pref − catchup)
+      <br>step4_lp = remainder × (1 − carry_frac)
+      <br>step4_gp = remainder × carry_frac
+    </code>
+    <div class="meta"><code>backend/dataimport/phase4_derivations.py:460-462</code></div>
+  </div>
+
+  <div class="formula priority-1">
+    <div class="title">GP Distributed, Clawback, Holdback, Net Carry</div>
+    <code class="expr">
+      gp_distributed = catchup + step4_gp
+      <br>gp_clawback  = MAX(0, gp_distributed − carry_amount_gross)
+      <br>gp_holdback  = 0.20 × gp_distributed
+      <br>carry_amount_net = carry_amount_gross − gp_clawback
+    </code>
+    <div class="meta">
+      Holdback default = 20 % of gp_distributed (SEBI/ILPA industry default;
+      overridable per Scheme.LPA when field exists).<br>
+      <code>backend/dataimport/phase4_derivations.py:464-475</code>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════ Gross Profit -->
+<section id="gross-profit" class="field">
+  <h2>Gross Profit &amp; Gross Margin %</h2>
+  <p class="field-desc">
+    Computed per portfolio company per period from the periodic KPI sheet.
+    Only computed when <code>Revenue &gt; 0</code> and COGS is present.
+  </p>
+  <div class="formula priority-1">
+    <div class="title">Gross Profit</div>
+    <code class="expr">
+      gross_profit = Revenue − COGS
+    </code>
+    <div class="meta"><code>backend/dataimport/phase2_persister.py:3066-3067</code></div>
+  </div>
+  <div class="formula priority-1">
+    <div class="title">Gross Margin %</div>
+    <code class="expr">
+      gross_margin_pct = (gross_profit / Revenue) × 100
+    </code>
+    <div class="meta">
+      Aliases mapped to <code>gross_margin_pct</code>: <code>gross_margin</code>,
+      <code>Gross M%</code>, <code>GM%</code>, <code>Gross Profit Margin</code>.<br>
+      <code>backend/dataimport/phase2_persister.py:3068</code>,
+      alias table in <code>canonical_schema.py:418</code>
+    </div>
+  </div>
+</section>
+
+<!-- ═════════════════════════════════════════════════════════════════ EBITDA -->
+<section id="ebitda" class="field">
+  <h2>EBITDA &amp; EBITDA %</h2>
+  <div class="formula priority-1">
+    <div class="title">EBITDA (excludes D&amp;A)</div>
+    <code class="expr">
+      EBITDA = Revenue − COGS − R&amp;D − Sales_and_Marketing − G&amp;A
+    </code>
+    <div class="meta"><code>backend/dataimport/phase2_persister.py:3070</code></div>
+  </div>
+  <div class="formula priority-1">
+    <div class="title">EBITDA %</div>
+    <code class="expr">
+      ebitda_margin_pct = (EBITDA / Revenue) × 100
+    </code>
+    <div class="meta">
+      Aliases mapped to <code>ebitda_margin_pct</code>: <code>ebitda_margin</code>,
+      <code>EBITDA %</code>, <code>Ebitda%</code>, <code>Operating Margin</code>.<br>
+      <code>backend/dataimport/phase2_persister.py:3072</code>,
+      alias table in <code>canonical_schema.py:420</code>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════════ CAC -->
+<section id="cac" class="field">
+  <h2>CAC — Customer Acquisition Cost (₹)</h2>
+  <div class="formula priority-1">
+    <div class="title"><span class="kicker">DETERMINISTIC</span></div>
+    <code class="expr">
+      CAC = (Sales_and_Marketing_spend × 10,000,000) / new_customers
+    </code>
+    <div class="meta">
+      Multiplied by <code>1e7</code> because financials arrive in Crore
+      (1 Cr = ₹1,00,00,000) but CAC is shown in raw INR (₹ per customer).
+      Only computed when both S&amp;M spend and <code>new_customers &gt; 0</code>.<br>
+      <code>backend/dataimport/phase2_persister.py:3076-3078</code>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════════ LTV -->
+<section id="ltv" class="field">
+  <h2>LTV — Customer Lifetime Value (₹) &amp; LTV/CAC</h2>
+  <div class="formula priority-1">
+    <div class="title">LTV (SaaS textbook formula)</div>
+    <code class="expr">
+      LTV = (ARPU_cr × GrossMargin_frac / Churn_rate) × 10,000,000
+    </code>
+    <div class="meta">
+      <code>ARPU_cr = ARR / customers</code> (in Cr), <code>GrossMargin_frac = (Revenue − COGS) / Revenue</code>.
+      Final ×1e7 converts Cr → INR.<br>
+      Requires all of ARR, customers, churn_rate, Revenue, COGS to be non-null and &gt; 0.<br>
+      <code>backend/dataimport/phase2_persister.py:3082-3088</code>
+    </div>
+  </div>
+  <div class="formula priority-1">
+    <div class="title">LTV/CAC Ratio</div>
+    <code class="expr">
+      ltv_cac_ratio = LTV / CAC
+    </code>
+    <div class="meta">
+      Universally computed the moment both LTV and CAC are populated.<br>
+      <code>backend/dataimport/phase2_persister.py:3091-3094</code>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════ Portfolio ARR -->
+<section id="arr" class="field">
+  <h2>Portfolio MRR &amp; ARR (₹ Cr)</h2>
+  <p class="field-desc">
+    Fund-level rollup of subscription revenue across SaaS portfolio companies.
+    Extracted per company from workbook first; aggregated deterministically after.
+  </p>
+  <div class="formula priority-1">
+    <div class="title">Portfolio MRR</div>
+    <code class="expr">
+      portfolio_mrr = SUM(latest MRR across SaaS portfolio companies)
+    </code>
+    <div class="meta"><code>backend/dataimport/phase4_gemini_compute.py:139</code></div>
+  </div>
+  <div class="formula priority-1">
+    <div class="title">Portfolio ARR</div>
+    <code class="expr">
+      portfolio_arr = portfolio_mrr × 12
+    </code>
+    <div class="meta">
+      Standard MRR × 12 annualisation.<br>
+      <code>backend/dataimport/phase4_gemini_compute.py:140</code>
+    </div>
+  </div>
+</section>
+
+<!-- ═════════════════════════════════════════════ Extracted-only KPI fields -->
+<section id="extracted" class="field">
+  <h2>GMV, REV, Orders, AOV, Returns %, Repeat %</h2>
+  <p class="field-desc">
+    <b>These fields are extracted directly from workbook cells — no Python formula computes them.</b>
+    The alias tables tell Gemini which raw column labels map to which canonical
+    field name; from that point on, the extracted value is written to
+    <code>PortfolioKPI</code> as-is.
+  </p>
+
+  <div class="formula priority-3">
+    <div class="title">
+      <span class="kicker extracted">EXTRACTED</span> GMV (Cr) — Gross Merchandise Value
+    </div>
+    <div class="meta">
+      Aliases: <code>GMV</code>, <code>GMV (Cr)</code>, <code>GMV in Crore</code>, <code>GMV (Lakhs)</code>, <code>Gross Merch Value</code>, <code>Total GMV</code>, <code>Gross Sales Value</code>.<br>
+      <code>backend/dataimport/canonical_schema.py:416</code>
+    </div>
+  </div>
+
+  <div class="formula priority-3">
+    <div class="title">
+      <span class="kicker extracted">EXTRACTED</span> REV (Cr) — Revenue
+    </div>
+    <div class="meta">
+      Extracted directly; also the denominator input to Gross Margin %, EBITDA %,
+      ARPU (see LTV formula).
+    </div>
+  </div>
+
+  <div class="formula priority-3">
+    <div class="title">
+      <span class="kicker extracted">EXTRACTED</span> Orders — Order Count
+    </div>
+    <div class="meta">
+      Aliases: <code>Order Count</code>, <code>Total Orders</code>, <code>No. of Orders</code>, <code># Orders</code>, <code>Transactions</code>.<br>
+      <code>backend/dataimport/canonical_schema.py:421</code>
+    </div>
+  </div>
+
+  <div class="formula priority-3">
+    <div class="title">
+      <span class="kicker extracted">EXTRACTED</span> AOV — Average Order Value
+    </div>
+    <div class="meta">
+      Aliases: <code>Avg Order Value</code>, <code>Avg Transaction Value</code>, <code>Average Ticket Size</code>.<br>
+      <code>backend/dataimport/canonical_schema.py:422</code>
+    </div>
+  </div>
+
+  <div class="formula priority-3">
+    <div class="title">
+      <span class="kicker extracted">EXTRACTED</span> Returns % — Return Rate
+    </div>
+    <div class="meta">
+      Aliases: <code>Return %</code>, <code>Return Rate</code>, <code>RTO %</code>, <code>Product Returns %</code>.<br>
+      <code>backend/dataimport/canonical_schema.py:423</code>
+    </div>
+  </div>
+
+  <div class="formula priority-3">
+    <div class="title">
+      <span class="kicker extracted">EXTRACTED</span> Repeat % — Repeat Customer Rate
+    </div>
+    <div class="meta">
+      Aliases: <code>Repeat %</code>, <code>Repeat Rate</code>, <code>Retention %</code>, <code>Customer Retention</code>.<br>
+      <code>backend/dataimport/canonical_schema.py:424</code>
+    </div>
+  </div>
+
+  <div class="note">
+    Why extracted, not computed: these commerce KPIs have no universal
+    single-source definition (GMV differs between marketplace/D2C models,
+    Returns % has RTO vs post-delivery variants). The manager's number in
+    the workbook is the truth; recomputing would introduce systematic drift.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════ Terminal FV -->
+<section id="terminal-fv" class="field">
+  <h2>Terminal / Residual FV — Fair-Value Estimation Chain (universal helper)</h2>
+  <p class="field-desc">
+    Used by TVPI, RVPI, MOIC, Net IRR whenever a per-investment terminal value
+    is needed. 3-step fallback chain — first hit wins.
+  </p>
+  <div class="formula priority-1">
+    <div class="title">Step 1 — Truth</div>
+    <code class="expr">
+      FV = latest Valuation.fair_value_of_holding
+    </code>
+    <div class="meta">
+      Direct read of per-investment valuation row. Best signal when present.
+    </div>
+  </div>
+  <div class="formula priority-2">
+    <div class="title">Step 2 — Post-money × Ownership × Markup</div>
+    <code class="expr">
+      FV = latest_tranche.post_money_valuation × ownership_fraction × fund_markup
+    </code>
+    <div class="meta">
+      <code>ownership_fraction = fully_diluted_pct / 100</code> if &gt; 1
+      (percent-vs-fraction detection).
+    </div>
+  </div>
+  <div class="formula priority-3">
+    <div class="title">Step 3 — Cost × Fund Markup</div>
+    <code class="expr">
+      FV = Investment.total_invested × fund_markup
+    </code>
+    <div class="meta">
+      Where <code>fund_markup = latest_NAV.investments_at_fair_value / SUM(Investment.total_invested)</code>.
+      Falls back to 1.0 when NAV/cost signals missing.<br>
+      <code>backend/dataimport/phase4_derivations.py:106-177</code>
+    </div>
+  </div>
+</section>
+
+<div class="note" style="margin-top: 40px; border-left-color: var(--accent);">
+  <b>Universality principle observed throughout:</b>
+  AI never generates numbers. Gemini classifies sheets and proposes candidate
+  formulas; Python evaluates them using values already persisted from the workbook.
+  Every formula above operates on <code>Decimal</code> types (no float drift)
+  and quantizes to 4 decimals for storage. No fund-specific or sheet-specific
+  logic — all formulas are format-agnostic and apply to any Indian AIF workbook.
+</div>
+
+</div>
+</body>
+</html>

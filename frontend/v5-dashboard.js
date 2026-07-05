@@ -462,18 +462,22 @@ async function onContextChange(detail) {
     schemeIds:    [],
   };
 
-  // Persist fund context to localStorage + dispatch event so chatbot widget
-  // (and any other listener) always knows the currently selected fund.
+  // Persist fund context to localStorage so any page that boots without an
+  // event (new tab, direct URL) can recover the current fund from storage.
   localStorage.setItem('tfai_selected_fund_id', newFundId || '');
   localStorage.setItem('tfai_selected_fund_name', _ctx.fundName);
-  document.dispatchEvent(new CustomEvent('tfai:context-change', {
-    detail: {
-      fundId:   newFundId,
-      fundName: _ctx.fundName,
-      period:   _ctx.period,
-    },
-    bubbles: true,
-  }));
+  //
+  // NOTE: previously this block also re-dispatched 'tfai:context-change'.
+  // That created an INFINITE RECURSION LOOP because this function is itself
+  // the handler for that event (see the addEventListener at ~line 5789):
+  //   fund-selector fires → onContextChange runs → dispatches same event →
+  //   handler fires → onContextChange runs → dispatches same event → ...
+  // → RangeError: Maximum call stack size exceeded, and the dashboard
+  //   "blinks" between fund values because each recursion clears the render
+  //   flags at lines 484-488 and kicks off a new async render pass.
+  //
+  // The chatbot-widget already listens to the ORIGINAL event dispatched by
+  // fund-selector.js:85, so removing this re-dispatch loses no functionality.
 
   // Resolve scheme IDs for new fund
   if (newFundId) {
