@@ -742,20 +742,27 @@ const _METRIC_COPY = {
   net_irr: {
     label: 'Net IRR — Net Internal Rate of Return',
     meaning: 'The annualised return LPs are earning, after fees and carry. Time-weighted so early returns count more.',
-    formula: 'XIRR over LP cashflows: capital calls (out) + distributions (in) + ending NAV',
-    // Universal 3-tier priority ladder. The backend picks the highest-tier
-    // computation whose data is complete; the FundMetric.inputs_used carries
-    // `net_irr_method` so the panel can highlight which tier was chosen.
+    formula: 'XIRR bisection over LP cashflows: capital calls as outflows, distributions as inflows, terminal NAV as final positive flow at the as-of date.',
+    // 4-case decision matrix (2026-07-07). Two probes always run:
+    //   Probe A: Priority 1 XIRR (calculated) — needs dated calls +
+    //            dated distributions + terminal NAV.
+    //   Probe B: Extracted stated value — either Gemini's
+    //            fund_performance.net_irr_stated with cell provenance, or
+    //            a Python-side workbook scan for a "Net IRR" label.
+    // Case 1: both present     → prefer CALCULATED; side panel shows both
+    // Case 2: only calculated  → use CALCULATED
+    // Case 3: only extracted   → use EXTRACTED
+    // Case 4: neither          → blank + itemised reason
     priority_ladder: [
-      { code: 'capitalcall_distribution_xirr',
-        label: 'Priority 1: Fund-level XIRR on CapitalCall + Distribution',
-        detail: 'ILPA-standard Net IRR. Used when the workbook publishes a full LP call/distribution ledger.' },
-      { code: 'cost_weighted_per_investment_irr',
-        label: 'Priority 2: Cost-weighted average of per-investment IRR (Gross)',
-        detail: 'Aggregates the manager-reported per-deal IRR%(Gross) column, weighted by invested cost. Used when calls are sparse but per-deal IRRs are provided.' },
-      { code: 'investment_cashflow_xirr',
-        label: 'Priority 3: Fund-level XIRR on Investment cashflows → LP terminal (Gross approx)',
-        detail: 'Last-resort XIRR from Investment.cost outflows to LP-holding terminal FV. Used when neither of the above data sources is available.' },
+      { code: 'priority1_xirr',
+        label: 'Calculated — XIRR on real dated cashflows (capital calls + distributions + terminal NAV)',
+        detail: 'ILPA-standard Net IRR. Runs Python XIRR bisection over the atomic ledger. Preferred whenever the workbook supplies all three inputs — calls, distributions, and NAV — with dates.' },
+      { code: 'extracted_cell',
+        label: 'Extracted — Net IRR read directly from a labelled workbook cell',
+        detail: 'Used when Priority 1 (calculated) cannot run because at least one atomic input is missing. The value is taken from a labelled cell (e.g. "Net IRR (after mgmt fees)") verified against workbook contents — no computation is performed.' },
+      { code: 'insufficient_data',
+        label: 'Insufficient data — Net IRR cannot be shown',
+        detail: 'Neither a computable cashflow ledger nor a stated cell is available. The reason panel enumerates every missing input so you know what to fix in the workbook.' },
     ],
   },
   active_fair_value: {
@@ -944,18 +951,20 @@ function openProvenancePanel(metricKey) {
       </div>`;
   }
 
-  // ── Section 1.7: Net IRR priority-ladder — highlights which of the 3
-  // computation tiers was picked, with the full ladder for context.
+  // ── Section 1.7: Net IRR — decision matrix + inputs used + reasons.
   // Rendered only for the net_irr metric when the backend passes the
-  // method tag through FundMetric.inputs_used.
+  // method tag + reasons through FundMetric.inputs_used.
   if (metricKey === 'net_irr' && copy.priority_ladder) {
     const chosenCode = rawInputs.net_irr_method || '';
     const chosenLabel = rawInputs.net_irr_method_label || '';
+    const sourceReason = rawInputs.net_irr_source || '';
+    const statedAlt = rawInputs.net_irr_stated_alt || '';
+    const terminalReason = rawInputs.net_irr_terminal || '';
     const ladderRows = copy.priority_ladder.map(item => {
       const isChosen = item.code === chosenCode;
       const badge = isChosen
-        ? `<span style="display:inline-block;background:#dcfce7;color:#166534;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;margin-left:8px;">✓ used</span>`
-        : `<span style="display:inline-block;background:#f1f5f9;color:#64748b;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500;margin-left:8px;">skipped</span>`;
+        ? `<span style="display:inline-block;background:#dcfce7;color:#166534;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;margin-left:8px;">Used</span>`
+        : `<span style="display:inline-block;background:#f1f5f9;color:#64748b;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500;margin-left:8px;">Not used</span>`;
       const rowStyle = isChosen
         ? 'padding:10px;background:#f0fdf4;border-left:3px solid #16a34a;border-radius:4px;margin-bottom:6px;'
         : 'padding:10px;background:#f8fafc;border-left:3px solid #cbd5e1;border-radius:4px;margin-bottom:6px;';
@@ -969,16 +978,51 @@ function openProvenancePanel(metricKey) {
           </div>
         </div>`;
     }).join('');
+    // Disagreement banner — only when both calculated AND extracted were
+    // available and they differ by more than the tolerance. The backend
+    // exposes this as `net_irr_stated_alt`.
+    const disagreementBanner = statedAlt
+      ? `<div style="margin-bottom:12px;padding:10px 12px;background:#fef9c3;border-left:3px solid #ca8a04;border-radius:4px;">
+           <div style="font-size:12px;color:#713f12;font-weight:600;margin-bottom:4px;">
+             Calculated vs Extracted — mismatch detected
+           </div>
+           <div style="font-size:12px;color:#713f12;line-height:1.5;">
+             ${esc(statedAlt)}
+           </div>
+         </div>`
+      : '';
+    const sourceBlock = sourceReason
+      ? `<div style="margin-bottom:10px;padding:10px 12px;background:#eff6ff;border-left:3px solid #2563eb;border-radius:4px;">
+           <div style="font-size:11px;color:#1e40af;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600;">
+             Method used for this fund
+           </div>
+           <div style="font-size:12px;color:#1e3a8a;line-height:1.6;">
+             ${esc(sourceReason)}
+           </div>
+         </div>`
+      : '';
+    const terminalBlock = terminalReason
+      ? `<div style="margin-bottom:10px;padding:8px 12px;background:#f8fafc;border-left:3px solid #94a3b8;border-radius:4px;">
+           <div style="font-size:11px;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600;">
+             Terminal NAV source
+           </div>
+           <div style="font-size:12px;color:#334155;line-height:1.5;">
+             ${esc(terminalReason)}
+           </div>
+         </div>`
+      : '';
     html += `
       <div class="prov-section">
         <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600;">
-          Net IRR Priority Ladder
+          Net IRR — Decision Matrix
         </div>
         <div style="font-size:12px;color:#475569;line-height:1.5;margin-bottom:10px;">
-          Three computations are attempted in order. The first tier whose source data is
-          complete is used; the others are skipped.${chosenLabel
-            ? ` This fund used <b style="color:#0f172a;">${esc(chosenLabel)}</b>.` : ''}
+          Two probes run in parallel — a calculated XIRR from the atomic ledger and a scan for a stated Net IRR cell. When both succeed we prefer the calculated number (independently reproducible); when only one succeeds we use it; when neither is available we show a blank with the reason.${chosenLabel
+            ? ` <b style="color:#0f172a;">This fund: ${esc(chosenLabel)}.</b>` : ''}
         </div>
+        ${disagreementBanner}
+        ${sourceBlock}
+        ${terminalBlock}
         ${ladderRows}
       </div>`;
   }
@@ -2844,8 +2888,12 @@ async function loadCapitalCalls() {
 
     let n = 0;
     tbody.innerHTML = calls.map(c => {
+      // Universal purpose parser — workbook authors use en-dash (–),
+      // em-dash (—), or hyphen (-) between the LP/Company and the reason.
+      // Prefer purpose (set by the persister from the workbook's
+      // "Portfolio Co. / Purpose" column). Split on any dash variant.
       const purposeFull = c.purpose || c.scheme_name || '—';
-      const parts = purposeFull.split(' — ');
+      const parts = purposeFull.split(/\s+[\-–—]\s+/);
       const lpName = parts.length > 1 ? parts[0] : purposeFull;
       const purposeText = parts.length > 1 ? parts.slice(1).join(' — ') : '—';
       const statusCls = (c.call_status || '').toLowerCase().replace('_', '-');

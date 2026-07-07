@@ -589,6 +589,70 @@ def extract_entity_pivoted(
 # dispatch — call the right extractor for the given layout
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _find_all_header_rows(sheet_rows: list[tuple],
+                          min_text_cells: int = 3) -> list[int]:
+    """Return row indices of ALL header-shaped rows in the sheet.
+
+    Detects multi-section tabular sheets (two or more stacked tables in one
+    physical sheet, separated by a blank row and/or a section-title row).
+    Each returned index is a candidate header row that can anchor its own
+    tabular extraction slice.
+
+    A header candidate must:
+      1. Have at least `min_text_cells` non-numeric, non-date text cells
+      2. Not itself be a bare section-title row
+      3. For candidates AFTER the first: be preceded by at least one blank
+         row OR a section-title row (proves a section boundary)
+
+    Universal — no sheet, domain, or fund hardcoding. Sheets with a single
+    header return a one-element list; the caller falls back to the existing
+    single-header extractor path.
+    """
+    n = len(sheet_rows)
+    if n == 0:
+        return []
+
+    def _text_cell_count(row: tuple) -> int:
+        return sum(
+            1 for _, v in row_non_empty(row)
+            if not isinstance(v, (int, float, Decimal))
+            and not hasattr(v, 'isoformat')
+            and _cell_str(v)
+        )
+
+    def _is_header_candidate(ri: int) -> bool:
+        cells = row_non_empty(sheet_rows[ri])
+        if len(cells) < min_text_cells:
+            return False
+        if _text_cell_count(sheet_rows[ri]) < min_text_cells:
+            return False
+        if is_section_title_row(sheet_rows[ri]):
+            return False
+        return True
+
+    headers: list[int] = []
+    for ri in range(n):
+        if not _is_header_candidate(ri):
+            continue
+        if not headers:
+            headers.append(ri)
+            continue
+        last = headers[-1]
+        if ri - last < 3:
+            continue
+        has_separator = False
+        for pi in range(last + 1, ri):
+            if not row_non_empty(sheet_rows[pi]):
+                has_separator = True
+                break
+            if is_section_title_row(sheet_rows[pi]):
+                has_separator = True
+                break
+        if has_separator:
+            headers.append(ri)
+    return headers
+
+
 def _find_deeper_table_start(sheet_rows: list[tuple],
                              min_text_cells: int = 5) -> int:
     """Universal: scan a sheet for a tabular section that starts AFTER the
@@ -616,6 +680,73 @@ def _find_deeper_table_start(sheet_rows: list[tuple],
                 best_score = text_cells
                 best = ri
     return best
+
+
+# Solution A — Multi-section extractor for stacked tables.
+#
+# Some workbooks pack two logical tables into one sheet (e.g. Sequoia's
+# "Exits & Distributions" — Exits on rows 3-10, blank separator on 11,
+# "DISTRIBUTION SCHEDULE" title on row 12, its own header on row 13, data
+# on rows 14-16). Gemini classifies the sheet once by the top table only,
+# and the tabular extractor stops when the top table ends — the second
+# section is silently lost.
+#
+# `_find_stacked_table_start` scans below the primary section for another
+# header row. Universal: keyword hints are per-domain but the mechanism
+# works for any two-table sheet.
+def _find_stacked_table_start(sheet_rows: list[tuple],
+                              min_start: int = 5,
+                              keyword_hints: list[str] | None = None,
+                              min_text_cells: int = 3) -> int:
+    """Scan for a header-like row below the primary section. Returns index
+    of the deeper header, or -1 if none. A header candidate must:
+      1. Sit below min_start rows
+      2. Be preceded by at least one fully-blank row (separator)
+      3. Contain min_text_cells+ text cells (looks like column headers)
+      4. NOT be a bare title row
+      5. If keyword_hints given, EITHER this row OR the two rows above
+         must contain at least one hint keyword (e.g. "distribution")
+    """
+    kw_lc = [k.lower() for k in (keyword_hints or [])]
+
+    def _row_text(row) -> str:
+        return ' '.join(
+            _cell_str(v) for _, v in row_non_empty(row)
+        ).lower()
+
+    for ri in range(min_start, len(sheet_rows)):
+        cells = row_non_empty(sheet_rows[ri])
+        if len(cells) < min_text_cells:
+            continue
+        # Must be preceded by at least one blank row (section separator)
+        prev_blank = False
+        for pi in range(max(0, ri - 3), ri):
+            if not row_non_empty(sheet_rows[pi]):
+                prev_blank = True
+                break
+        if not prev_blank:
+            continue
+        # Header-shaped row: mostly text, short strings, no big numbers
+        text_cells = sum(
+            1 for _, v in cells
+            if not isinstance(v, (int, float, Decimal))
+            and not hasattr(v, 'isoformat')
+            and _cell_str(v)
+        )
+        if text_cells < min_text_cells:
+            continue
+        if is_section_title_row(sheet_rows[ri]):
+            continue
+        # Keyword gate: this row or preceding 2 rows must mention a hint word
+        if kw_lc:
+            surrounding = ' '.join(
+                _row_text(sheet_rows[i])
+                for i in range(max(0, ri - 2), ri + 1)
+            )
+            if not any(k in surrounding for k in kw_lc):
+                continue
+        return ri
+    return -1
 
 
 def extract_sheet(sheet_rows: list[tuple], layout: str,
@@ -649,7 +780,38 @@ def extract_sheet(sheet_rows: list[tuple], layout: str,
     elif layout == 'wide_period':
         result = {'rows': extract_wide_period(sheet_rows, column_map, domain=domain)}
     else:
-        result = {'rows': extract_tabular(sheet_rows, column_map, domain=domain)}
+        # Fix D — universal multi-section tabular extraction.
+        #
+        # Some workbooks stack two logically-separate tables into one
+        # tabular sheet (e.g. TrackFundAI Master CAPITAL_CALLS: top =
+        # fund-level call ledger; bottom = LP-level per-call pivot). The
+        # single-header extractor picks the row with the MOST text cells,
+        # which is often the LP-pivot bottom, and silently skips the top.
+        #
+        # Solution: detect ALL header rows, extract each slice through the
+        # existing single-header extractor, merge with signature dedup so
+        # rows caught by both slices only appear once. Non-regressing:
+        # single-header sheets get one header index and identical output
+        # to the pre-Fix-D path.
+        _header_rows = _find_all_header_rows(sheet_rows)
+        if len(_header_rows) > 1:
+            _merged_rows: list[dict] = []
+            _seen_sigs: set = set()
+            for _i, _hi in enumerate(_header_rows):
+                _end = (_header_rows[_i + 1] if _i + 1 < len(_header_rows)
+                        else len(sheet_rows))
+                _slice = sheet_rows[_hi:_end]
+                _slice_rows = extract_tabular(_slice, column_map, domain=domain)
+                for _r in _slice_rows:
+                    _sig = tuple(sorted(
+                        (k, str(v)) for k, v in _r.items() if v is not None
+                    ))
+                    if _sig and _sig not in _seen_sigs:
+                        _merged_rows.append(_r)
+                        _seen_sigs.add(_sig)
+            result = {'rows': _merged_rows}
+        else:
+            result = {'rows': extract_tabular(sheet_rows, column_map, domain=domain)}
 
     # Universal booster: waterfall sheets nearly always contain KV pairs
     # ("Carry Base | 1430.60", "Clawback Provision | 10") — extract both
@@ -680,4 +842,206 @@ def extract_sheet(sheet_rows: list[tuple], layout: str,
             if deeper_rows:
                 result['rows'] = deeper_rows
 
+    # ── Solution A — Stacked-section rescue for tabular sheets ────────────
+    #
+    # Some workbooks stack TWO tables in one tabular sheet, separated by a
+    # blank row and a title. The primary extractor above stops when the
+    # first section's data runs out, so the second table is dropped.
+    #
+    # This rescue re-scans the sheet for a stacked sub-section whose
+    # neighbourhood contains a domain-relevant keyword, extracts it as a
+    # tabular block, and MERGES the resulting rows into result['rows'].
+    # unified_builder.py routes them by row shape (distribution rows have
+    # distribution_number / total_gross_amount but no exit_date).
+    #
+    # Currently enabled for exits_distributions (Sequoia "DISTRIBUTION
+    # SCHEDULE" below Exits table). Additive: only fires when the keyword
+    # signal is present; sheets with a single table see no change.
+    _STACKED_HINTS_BY_DOMAIN = {
+        'exits_distributions': [
+            'distribution', 'distributed', 'payout', 'dividend', 'dist#',
+            'distribution schedule', 'lp distribution',
+        ],
+    }
+    if (layout == 'tabular'
+            and domain in _STACKED_HINTS_BY_DOMAIN
+            and 'rows' in result
+            and len(sheet_rows) >= 8):
+        sub_idx = _find_stacked_table_start(
+            sheet_rows,
+            min_start=max(4, len(result['rows'])),
+            keyword_hints=_STACKED_HINTS_BY_DOMAIN[domain],
+        )
+        if sub_idx > 0:
+            sub_rows = extract_tabular(
+                sheet_rows[sub_idx:],
+                column_map={},          # empty — alias index handles it
+                domain=domain,
+            )
+            # Dedup guard: only append rows that don't already exist by
+            # a strong identity signal (distribution_number+amount OR
+            # distribution_date+amount). Prevents double-counting if the
+            # primary extractor accidentally caught these.
+            existing_sigs = {
+                (str(r.get('distribution_number') or ''),
+                 str(r.get('distribution_date') or ''),
+                 str(r.get('total_gross_amount') or r.get('total_net_amount') or ''))
+                for r in result['rows']
+            }
+            for r in sub_rows:
+                sig = (str(r.get('distribution_number') or ''),
+                       str(r.get('distribution_date') or ''),
+                       str(r.get('total_gross_amount') or r.get('total_net_amount') or ''))
+                if sig != ('', '', '') and sig not in existing_sigs:
+                    result['rows'].append(r)
+                    existing_sigs.add(sig)
+
+    # ── Fix C — Wide-period rescue for financials_pl_bva ────────────────────
+    # Monthly P&L / MIS sheets typically ship as:
+    #    Line Item          | Oct-24 | Nov-24 | Dec-24 | ... | H2 Total
+    #    Portfolio Revenue  |   254  |   241  |   ...  | ... |   ...
+    # Gemini frequently classifies these as `tabular` because the sheet does
+    # have a proper header row and looks table-shaped. But the "columns" are
+    # actually periods — the correct interpretation is wide_period → unpivot
+    # into row-per-period.
+    #
+    # Detection is universal:
+    #   • domain == financials_pl_bva
+    #   • Gemini said tabular
+    #   • header row has >= 3 period-shaped columns (via helpers.is_period_header)
+    # When those three signals coincide we ALSO run extract_wide_period and
+    # replace the tabular rows with the unpivoted rows. Additive safety net:
+    # if wide-period detection finds nothing, tabular output is preserved.
+    #
+    # No Gemini tokens, no new sheet-name rules, no per-file overrides.
+    # Sheets whose tabular extraction was already correct (no period columns
+    # in the header) are unaffected.
+    if (layout == 'tabular'
+            and domain == 'financials_pl_bva'
+            and 'rows' in result
+            and len(sheet_rows) >= 4):
+        hdr_idx = find_header_row(sheet_rows)
+        if hdr_idx >= 0:
+            header = sheet_rows[hdr_idx]
+            period_col_count = sum(
+                1 for hv in header if is_period_header(_cell_str(hv))
+            )
+            if period_col_count >= 3:
+                wp_rows = extract_wide_period(sheet_rows, column_map, domain=domain)
+                if wp_rows:
+                    # Prefer unpivoted rows — they preserve the value×period
+                    # matrix that tabular extraction inherently flattens.
+                    result['rows'] = wp_rows
+
+    # Fix 3 (companion) — Wide-period rescue for NAV sheets. Sequoia's
+    # `NAV & Accounting` sheet publishes NAV as a pivot: row-labels are
+    # balance-sheet components, columns are periods (Oct-24, Nov-24, ...).
+    # Gemini often classifies these as `tabular` because the layout has a
+    # header row. Run wide-period extraction when >=3 period columns are
+    # detected so unified_builder's line-item → NAV pivot has rows to work
+    # with. Additive: if wide-period returns nothing, tabular rows are
+    # preserved.
+    if (layout == 'tabular'
+            and domain in ('nav_accounting', 'nav_calculation')
+            and 'rows' in result
+            and len(sheet_rows) >= 4):
+        hdr_idx = find_header_row(sheet_rows)
+        if hdr_idx >= 0:
+            header = sheet_rows[hdr_idx]
+            period_col_count = sum(
+                1 for hv in header if is_period_header(_cell_str(hv))
+            )
+            if period_col_count >= 3:
+                wp_rows = extract_wide_period(sheet_rows, column_map, domain=domain)
+                if wp_rows:
+                    # Merge without duplicates: tabular rows stay for
+                    # single-row shape (NAV Summary key/value block) and
+                    # wide-period rows add the per-period history.
+                    _existing_sigs = {
+                        tuple(sorted((k, str(v)) for k, v in r.items() if v is not None))
+                        for r in result['rows']
+                    }
+                    for r in wp_rows:
+                        _sig = tuple(sorted((k, str(v)) for k, v in r.items() if v is not None))
+                        if _sig and _sig not in _existing_sigs:
+                            result['rows'].append(r)
+                            _existing_sigs.add(_sig)
+
+    # ── Fix 3 — Headerless MIS fallback for financials_pl_bva ──────────────
+    # Some fund MIS sheets omit the period-header row entirely — the sheet
+    # is a title + implicit monthly columns + a trailing total column, e.g.
+    #    Row 1: 'MONTHLY P&L (MIS) | ... | Portfolio Aggregate | Rs Crore'
+    #    Row 2: 'REVENUE'
+    #    Row 3: 'Portfolio Revenue (Aggregate)', 260.3, 259.6, ..., 1586.5
+    # There is no header row at all — `find_header_row` returns -1, the
+    # wide-period rescue above cannot fire, and tabular extraction yields
+    # zero rows (no header → no column mapping).
+    #
+    # This secondary rescue extracts one fund-level row per data row shaped
+    # as [text_label, num, num, num, ...]. It emits {line_item, period_value}
+    # using the LAST numeric column (universally the period aggregate/total
+    # in AIF MIS sheets). The pivot in unified_builder.py groups them into a
+    # single "__fund_total__" bucket, attaches the sentinel PortfolioCompany,
+    # and the persister derives GM% / EBITDA% from Revenue + COGS + EBITDA.
+    #
+    # Universal safeguards:
+    #   • Fires only when the earlier extractors produced zero rows.
+    #   • Row 0 must be a non-numeric label; ≥3 numeric cells required.
+    #   • Junk / section-title rows are filtered.
+    #   • Rescue rows still go through _canon_pl_line_item at pivot time,
+    #     so labels that aren't real P&L / BS line items are silently
+    #     dropped — no data fabrication.
+    if (domain == 'financials_pl_bva'
+            and 'rows' in result
+            and not result['rows']
+            and len(sheet_rows) >= 3):
+        result['rows'] = _extract_headerless_pl_totals(sheet_rows)
+
     return result
+
+
+def _extract_headerless_pl_totals(sheet_rows: list[tuple]) -> list[dict]:
+    """Emit {line_item, period_value} rows for label + numeric-total shape.
+
+    Selection rule (universal):
+      • row's first non-empty cell is a text label (not a date, not numeric)
+      • the row contains at least 3 numeric cells after the label
+      • the row is not junk (subtotals, disclaimers) and not a section title
+    The LAST numeric cell in the row is chosen as `period_value` — this is
+    the universal AIF MIS convention (trailing "H2 Total", "FY Total",
+    "Cumulative" column). Callers use the pivot in unified_builder to route
+    these into fund-level KPI persistence.
+    """
+    out: list[dict] = []
+    for row in sheet_rows:
+        cells = row_non_empty(row)
+        if len(cells) < 4:
+            continue
+        # First non-empty cell must be a text label.
+        _first_idx, first_val = cells[0]
+        if isinstance(first_val, (int, float, Decimal)):
+            continue
+        if hasattr(first_val, 'isoformat'):     # datetime / date object
+            continue
+        label = _cell_str(first_val)
+        if not label:
+            continue
+        if is_junk_row(row) or is_section_title_row(row):
+            continue
+        # Collect trailing numeric cells.
+        numerics: list = []
+        for _, v in cells[1:]:
+            if isinstance(v, (int, float, Decimal)):
+                numerics.append(v)
+                continue
+            nv = to_decimal(v)
+            if nv is not None:
+                numerics.append(nv)
+        if len(numerics) < 3:
+            continue
+        # Last numeric is the period total (universal MIS convention).
+        period_val = to_decimal(numerics[-1])
+        if period_val is None:
+            continue
+        out.append({'line_item': label, 'period_value': period_val})
+    return out

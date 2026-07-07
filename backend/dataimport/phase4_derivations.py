@@ -239,6 +239,18 @@ def derive_fund_investment_metrics(fund, as_of=None) -> dict:
 
             cashflows = outflows + exit_inflows + distribution_inflows + terminal_inflows
 
+            # Universal per-investment IRR bounds — mathematical floor is
+            # -100% (can't lose more than invested); no realistic annualised
+            # IRR exceeds 1000%. Outside this window = extraction / compute
+            # artefact → dashboard shows "—" instead of a garbage number.
+            _IRR_LO = Decimal('-99.99')
+            _IRR_HI = Decimal('999.99')
+            # Universal MOIC bounds — MOIC is always >= 0 (money multiple
+            # cannot be negative). Values above 100x are practically
+            # impossible for a single investment; treat as extraction error.
+            _MOIC_LO = Decimal('0')
+            _MOIC_HI = Decimal('100')
+
             # --- IRR via XIRR — PRESERVE workbook-provided value ---
             # Universal precedence: if Phase 2 already extracted a per-inv IRR
             # from the workbook's "IRR%(Gross)" column, that is the manager's
@@ -251,6 +263,13 @@ def derive_fund_investment_metrics(fund, as_of=None) -> dict:
                 if irr is not None:
                     inv.irr_pct = irr
                     irr_set += 1
+            # Clamp / null out-of-range values that came from either path.
+            if inv.irr_pct is not None and not (_IRR_LO <= inv.irr_pct <= _IRR_HI):
+                logger.warning(
+                    f'[phase4.clamp] {inv.portfolio_company.name}: rejecting '
+                    f'IRR {inv.irr_pct}% — outside [{_IRR_LO}, {_IRR_HI}] window'
+                )
+                inv.irr_pct = None
 
             # --- MOIC = total positive / total negative ---
             pos = sum((a for _, a in cashflows if a > 0), Decimal('0'))
@@ -258,6 +277,13 @@ def derive_fund_investment_metrics(fund, as_of=None) -> dict:
             if neg > 0:
                 inv.moic = (pos / neg).quantize(Decimal('0.0001'))
                 moic_set += 1
+            # Clamp / null out-of-range MOIC.
+            if inv.moic is not None and not (_MOIC_LO <= inv.moic <= _MOIC_HI):
+                logger.warning(
+                    f'[phase4.clamp] {inv.portfolio_company.name}: rejecting '
+                    f'MOIC {inv.moic}x — outside [{_MOIC_LO}, {_MOIC_HI}] window'
+                )
+                inv.moic = None
 
             inv.save(update_fields=['irr_pct', 'moic'])
 
@@ -270,7 +296,7 @@ def derive_fund_investment_metrics(fund, as_of=None) -> dict:
                     continue
                 cf = outflows + [(e.exit_date, Decimal(str(e_amt)))]
                 e_irr = _xirr(cf)
-                if e_irr is not None:
+                if e_irr is not None and _IRR_LO <= e_irr <= _IRR_HI:
                     e.irr_pct = e_irr
                     e.irr_on_exit = e_irr
                     e.save(update_fields=['irr_pct', 'irr_on_exit'])
@@ -343,19 +369,42 @@ def compute_waterfall_for_scheme(scheme, as_of=None) -> dict:
     from lp.models import CapitalCall, Distribution
     from django.db.models import Sum
 
-    # As-of date: prefer caller-supplied → latest CarriedInterest.calculation_date
-    # → latest NAVRecord.nav_date → today. Using `today` is wrong for historic
-    # imports because preferred_return accrues per day from each call.
+    # Solution E — As-of / calculation-date ladder.
+    #
+    # Priority (first non-null wins):
+    #   1. caller-supplied `as_of`
+    #   2. pre-existing CarriedInterest.calculation_date, if it looks
+    #      current (> fund_close + 6 months). Old CI rows anchored at
+    #      final_close (a Fix-C fallback artifact) are rejected here.
+    #   3. latest NAVRecord.nav_date, if it looks current
+    #      (> fund_close + 6 months). Same guard as #2.
+    #   4. `today()` — matches what a dashboard user is viewing
+    #
+    # The 6-month guard prevents the old Sequoia bug where the CarriedInterest
+    # row was anchored at 2022-09-30 (the final_close_date) because the NAV
+    # date's own Fix-C fallback used final_close_date. Any date within the
+    # 6-month window post-close is "stale close-anchored" — we prefer today().
+    _min_current = None
+    _fund_close = (getattr(scheme, 'final_close_date', None)
+                   or getattr(scheme.fund, 'inception_date', None))
+    if _fund_close:
+        # ~183 days
+        from datetime import timedelta as _td
+        _min_current = _fund_close + _td(days=183)
+
+    def _is_current_date(d):
+        return d is not None and (_min_current is None or d > _min_current)
+
     today = as_of
     if today is None:
         ci_existing = (CarriedInterest.objects.filter(scheme=scheme)
                        .order_by('-calculation_date').first())
-        if ci_existing and ci_existing.calculation_date:
+        if ci_existing and _is_current_date(ci_existing.calculation_date):
             today = ci_existing.calculation_date
     if today is None:
         nav_latest = (NAVRecord.objects.filter(scheme=scheme)
                       .order_by('-nav_date').first())
-        if nav_latest and nav_latest.nav_date:
+        if nav_latest and _is_current_date(nav_latest.nav_date):
             today = nav_latest.nav_date
     if today is None:
         today = _date.today()
@@ -399,12 +448,25 @@ def compute_waterfall_for_scheme(scheme, as_of=None) -> dict:
             # extracted aggregate (totals-row cell) wins.
             total_called = _safe_decimal(ci_existing.total_called_capital, total_called)
 
-    # Distributions: prefer extracted aggregate over row-sum (row persister may
-    # have missed rows for various reasons; the TOTAL row cell is authoritative
-    # when extracted with a real cell-ref provenance).
+    # Solution B — Multi-source fallback ladder for total_distributed.
+    #
+    # Priority (first non-null wins):
+    #   1. CarriedInterest.total_distributions (extracted TOTAL cell — was already tier 1)
+    #   2. Sum of Distribution rows in DB (was already tier 2)
+    #   3. Sum of ExitEvent.proceeds — realised exits are cash returned to LPs.
+    #      Universal: any scheme with completed exits has this signal even when
+    #      the Distribution ledger wasn't extracted from the workbook.
+    #   4. CarriedInterest.total_realised_proceeds if extracted separately
+    #      (Sequoia-style "Exit Proceeds (Cumulative)" cell in Fund_Master).
+    #
+    # Every tier is a real, extracted-or-derived signal — never invented.
+    # If ALL tiers return 0, we still fall through to the compute step;
+    # the downstream `carry_base = MAX(0, ...)` guard keeps values sane.
     total_distributed = Decimal('0')
+    total_distributed_source = 'none'
     if ci_existing and ci_existing.total_distributions and ci_existing.total_distributions > 0:
         total_distributed = _safe_decimal(ci_existing.total_distributions, Decimal('0'))
+        total_distributed_source = 'extracted_carried_interest_total'
     if total_distributed == 0:
         dists = list(Distribution.objects.filter(scheme=scheme).order_by('distribution_date'))
         for d in dists:
@@ -412,6 +474,24 @@ def compute_waterfall_for_scheme(scheme, as_of=None) -> dict:
             if amt is None:
                 amt = _safe_decimal(d.total_gross_amount, Decimal('0'))
             total_distributed += amt or Decimal('0')
+        if total_distributed > 0:
+            total_distributed_source = 'distribution_ledger_sum'
+    if total_distributed == 0:
+        # Tier 3 — Exit proceeds as distribution proxy.
+        from investments.models import ExitEvent as _ExitEvent
+        _exit_sum = Decimal('0')
+        for e in _ExitEvent.objects.filter(investment__scheme=scheme):
+            amt = _safe_decimal(e.net_exit_proceeds) or _safe_decimal(e.proceeds) or Decimal('0')
+            _exit_sum += amt
+        if _exit_sum > 0:
+            total_distributed = _exit_sum
+            total_distributed_source = 'exit_proceeds_sum'
+    if total_distributed == 0 and ci_existing:
+        # Tier 4 — Extracted cumulative exit proceeds cell.
+        _extracted_exits = _safe_decimal(getattr(ci_existing, 'total_realised_proceeds', None))
+        if _extracted_exits and _extracted_exits > 0:
+            total_distributed = _extracted_exits
+            total_distributed_source = 'extracted_total_realised_proceeds'
 
     # ── Step 1 — Return of Capital ──────────────────────────────────────
     step1_roc = min(total_called, total_distributed)
@@ -474,22 +554,55 @@ def compute_waterfall_for_scheme(scheme, as_of=None) -> dict:
     # When escrow ≥ clawback, the net to GP is entitlement − clawback.
     carry_amount_net = (carry_amount_gross - gp_clawback).quantize(Decimal('0.01'))
 
+    # ── Solution C — Per-field extracted-first override ────────────────
+    # For each waterfall field, prefer the value that was already extracted
+    # from the workbook (persisted on CarriedInterest by the persister /
+    # reconciler) over the value we just computed. Rationale: an extracted
+    # cell like "Preferred Return Accrued | 825.6" is the CA's/GP's own
+    # number — it's the source of truth and reconciled the workbook's
+    # closing NAV. Our compute is a fallback for files that don't publish
+    # these cells (e.g. Trivesta before the aliases landed).
+    def _extracted_or_computed(computed_val: Decimal, *field_names: str) -> Decimal:
+        if ci_existing is None:
+            return computed_val
+        for fn in field_names:
+            v = _safe_decimal(getattr(ci_existing, fn, None))
+            if v is not None and v > 0:
+                return v.quantize(Decimal('0.01'))
+        return computed_val
+
+    preferred_return_final = _extracted_or_computed(
+        preferred_return, 'preferred_return_amount')
+    catchup_final = _extracted_or_computed(
+        catchup_amount, 'gp_catchup_amount')
+    carry_base_final = _extracted_or_computed(
+        carry_base, 'carry_base')
+    carry_gross_final = _extracted_or_computed(
+        carry_amount_gross, 'carry_amount_gross', 'gp_carry_amount')
+    gp_holdback_final = _extracted_or_computed(
+        gp_holdback, 'gp_holdback_escrow', 'gp_carry_holdback_amount')
+    gp_clawback_final = _extracted_or_computed(
+        gp_clawback, 'gp_clawback_provision')
+    carry_net_final = _extracted_or_computed(
+        carry_amount_net, 'carry_amount_net', 'gp_carry_amount_net')
+
     return {
         'computed': True,
         'reason': None,
         'total_called_capital': total_called.quantize(Decimal('0.01')),
         'total_distributions': total_distributed.quantize(Decimal('0.01')),
+        'total_distributions_source': total_distributed_source,
         'step1_return_of_capital': step1_roc.quantize(Decimal('0.01')),
-        'preferred_return_amount': preferred_return,
-        'gp_catchup_amount': catchup_amount,
-        'carry_base': carry_base.quantize(Decimal('0.01')),
-        'carry_amount_gross': carry_amount_gross,
+        'preferred_return_amount': preferred_return_final,
+        'gp_catchup_amount': catchup_final,
+        'carry_base': carry_base_final,
+        'carry_amount_gross': carry_gross_final,
         'step4a_lp_residual': step4_lp,
         'step4b_gp_residual_carry': step4_gp,
         'gp_distributed': gp_distributed,
-        'gp_holdback_escrow': gp_holdback,
-        'gp_clawback_provision': gp_clawback,
-        'carry_amount_net': carry_amount_net,
+        'gp_holdback_escrow': gp_holdback_final,
+        'gp_clawback_provision': gp_clawback_final,
+        'carry_amount_net': carry_net_final,
         'hurdle_rate_pct_used': hurdle_pct,
         'carry_pct_used': carry_pct,
         'inception_used': inception.isoformat() if inception else None,
@@ -706,6 +819,150 @@ def _extract_overrides(unified_json: dict) -> dict:
     return out
 
 
+# ── Universal Python-side scanner for stated Net IRR cells ─────────────
+#
+# Some fund workbooks publish a hardcoded Net IRR value in a labelled cell
+# (e.g. TrackFundAI Master workbook stores "Net IRR (after mgmt fees)" =
+# 0.1612 at MASTER_INPUTS!B91 and DASHBOARD_BRIDGE!D19). Gemini sometimes
+# fails to emit this into `fund_performance.net_irr_stated` — especially
+# when the label is verbose or lives on a low-priority summary / inputs
+# sheet, and no dedicated Net IRR column header exists.
+#
+# This scanner is a UNIVERSAL fallback that reads the cached workbook and
+# locates any "Net IRR" label adjacent to a numeric value. Sheet names,
+# cell positions, and label variants can all differ per fund — the scanner
+# discovers them each run. Works on ANY AIF Excel workbook.
+#
+# Rules (universal, format-agnostic):
+#   • Match cells whose text is "Net IRR" (with optional annotations like
+#     "(net of fees)", "(after mgmt fees)", "%", "(%)").
+#   • Exclude "Gross IRR", "IRR (Gross)", "Deal IRR", "Per-Investment IRR",
+#     "Investment IRR" — those are NOT net-fund-level.
+#   • Look at neighbours (right +1..+4, below +1..+2) for a numeric value.
+#   • Value normalisation:
+#       -1.0  <  v  <  1.0   → treat as fraction, ×100 to get percent
+#       1.0  <=  v  <=  200 → treat as percent already
+#       else → reject (implausible Net IRR magnitude).
+#   • Prefer the closest label whose text contains "net" (highest
+#     confidence). Score = -distance − label_bonus so lowest score wins.
+#   • Returns {value: Decimal_percent, sheet: str, cell: 'A1'} or None.
+
+_NET_IRR_LABEL_INCLUDE_RE = None
+_NET_IRR_LABEL_EXCLUDE_RE = None
+
+
+def _col_idx_to_letter(idx_1based: int) -> str:
+    letters = ''
+    n = idx_1based
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        letters = chr(ord('A') + r) + letters
+    return letters
+
+
+def _scan_workbook_for_net_irr_stated(filepath: str):
+    """Universal workbook-side scanner for a hardcoded / stated Net IRR cell.
+
+    Reads the cached workbook and looks for a "Net IRR" label adjacent to a
+    numeric value. Returns {'value': Decimal_percent, 'sheet': str,
+    'cell': 'A1_ref'} on best match, None otherwise.
+    """
+    if not filepath:
+        return None
+    global _NET_IRR_LABEL_INCLUDE_RE, _NET_IRR_LABEL_EXCLUDE_RE
+    if _NET_IRR_LABEL_INCLUDE_RE is None:
+        import re as _re
+        # Label must mention "net" AND "irr" within ~40 chars (order-flexible).
+        # Also accept "LP IRR" (LP-side is net by definition).
+        _NET_IRR_LABEL_INCLUDE_RE = _re.compile(
+            r'\b(net\s*irr|lp\s*irr|irr\s*\(\s*net\s*\)|irr\s*net|'
+            r'net\s*internal\s*rate\s*of\s*return|net\s*return)\b',
+            _re.IGNORECASE,
+        )
+        _NET_IRR_LABEL_EXCLUDE_RE = _re.compile(
+            r'\b(gross\s*irr|irr\s*\(\s*gross\s*\)|deal\s*irr|'
+            r'per[\-\s]*investment\s*irr|investment\s*irr|'
+            r'irr\s*\(\s*deal|company\s*irr|portfolio\s*irr\s*\(\s*gross)\b',
+            _re.IGNORECASE,
+        )
+
+    try:
+        from .phase3_layers.workbook_cache import load_workbook as _lw
+        cached = _lw(filepath)
+    except Exception as e:
+        logger.warning(f'[net_irr_scan] cache load failed: {e}')
+        return None
+
+    NEIGHBOUR_OFFSETS = [(0, 1), (0, 2), (0, 3), (0, 4), (1, 0), (2, 0),
+                         (1, 1), (0, -1), (0, -2)]
+
+    best = None  # (score, value_pct, sheet, cell_ref)
+    for sname, sdata in (cached.get('data') or {}).items():
+        rows = sdata.get('rows') or []
+        for ri, row in enumerate(rows):
+            for ci, cell in enumerate(row):
+                if not isinstance(cell, str):
+                    continue
+                text = cell.strip()
+                if not text or len(text) > 80:
+                    continue
+                if not _NET_IRR_LABEL_INCLUDE_RE.search(text):
+                    continue
+                if _NET_IRR_LABEL_EXCLUDE_RE.search(text):
+                    continue
+                for dr, dc in NEIGHBOUR_OFFSETS:
+                    nr, nc = ri + dr, ci + dc
+                    if nr < 0 or nc < 0 or nr >= len(rows):
+                        continue
+                    nrow = rows[nr]
+                    if nc >= len(nrow):
+                        continue
+                    nval = nrow[nc]
+                    if nval is None:
+                        continue
+                    try:
+                        num = Decimal(str(nval).strip().rstrip('%').replace(',', ''))
+                    except (InvalidOperation, ValueError, TypeError):
+                        continue
+                    # Normalise fraction → percent
+                    if Decimal('-1') < num < Decimal('1') and num != 0:
+                        val_pct = num * Decimal('100')
+                    elif Decimal('-100') <= num <= Decimal('500'):
+                        val_pct = num
+                    else:
+                        continue
+                    if not (Decimal('-99.99') <= val_pct <= Decimal('500')):
+                        continue
+                    distance = abs(dr) + abs(dc)
+                    label_lc = text.lower()
+                    # Bonus (subtract) for higher-confidence labels
+                    bonus = 0
+                    if 'net irr' in label_lc:
+                        bonus -= 10
+                    if 'after' in label_lc or 'of fee' in label_lc or 'net of' in label_lc:
+                        bonus -= 5
+                    if 'lp irr' in label_lc:
+                        bonus -= 3
+                    score = distance + bonus
+                    cell_ref = f'{_col_idx_to_letter(nc + 1)}{nr + 1}'
+                    label_cell = f'{_col_idx_to_letter(ci + 1)}{ri + 1}'
+                    candidate = (score, val_pct, sname, cell_ref, label_cell, text)
+                    if best is None or candidate[0] < best[0]:
+                        best = candidate
+                    # Only consider the closest neighbour with a number
+                    break
+
+    if best is None:
+        return None
+    score, val_pct, sname, cell_ref, label_cell, label_text = best
+    logger.info(
+        f'[net_irr_scan] found stated Net IRR = {val_pct}% at '
+        f'{sname}!{cell_ref} (label {label_cell!r}={label_text!r}, score={score})'
+    )
+    return {'value': val_pct, 'sheet': sname, 'cell': cell_ref,
+            'label_cell': label_cell, 'label_text': label_text}
+
+
 # ── Option C — cell-verified aggregate overrides (universal) ────────────────
 #
 # Gemini extracts a `workbook_aggregates[]` array of `{metric, value, sheet,
@@ -845,7 +1102,17 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
     db_fund_nav = None
     db_as_of = None
     if latest_nav and latest_nav.nav_date:
-        db_as_of = latest_nav.nav_date
+        # Solution E (part 2) — same current-date guard as in
+        # compute_waterfall_for_scheme. Reject NAV dates that fall inside
+        # the fund-close window (a Fix-C fallback artifact); prefer
+        # today() so CarriedInterest.calculation_date reflects the
+        # actual as-of view. Same 6-month threshold, same universal rule.
+        from datetime import timedelta as _td
+        _fclose = (getattr(scheme, 'final_close_date', None)
+                   or getattr(scheme.fund, 'inception_date', None))
+        _min_current = (_fclose + _td(days=183)) if _fclose else None
+        if _min_current is None or latest_nav.nav_date > _min_current:
+            db_as_of = latest_nav.nav_date
         v = _safe_decimal(latest_nav.total_nav)
         if v and v > 0:
             db_fund_nav = v
@@ -1250,38 +1517,30 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
     # IRR when the extracted NAV was wrong (e.g. Bharatcrest 4746 vs 2079
     # actual unrealised — turned 38% IRR into 46%). Atomic FV is universal:
     # works for any fund where Valuation rows persisted, no LPA dependency.
-    # ── Net IRR — Universal 3-tier priority ladder ──────────────────────
+    # ── Net IRR — Universal 4-case decision matrix ──────────────────────
     #
-    # Fund workbooks vary widely in what data they publish. Three IRR
-    # computations are attempted in priority order; the first that produces
-    # a plausible value wins. The chosen method is emitted via `net_irr_method`
-    # so the dashboard can label the tile and the formula panel can explain
-    # how the number was derived.
+    # Two independent probes always run BEFORE we pick:
+    #   Probe A: Priority 1 XIRR (calculated) — needs capital calls + dated
+    #            distributions + terminal NAV, all in atomic ledger form
+    #   Probe B: Extracted stated value — Gemini's fund_performance
+    #            .net_irr_stated (cell-provenance verified) OR Python-side
+    #            workbook scan for a "Net IRR" label + adjacent cell.
     #
-    # Priority 1 — ILPA Net IRR via CapitalCall + Distribution ledger
-    #   Requires: CapitalCall data reasonably complete
-    #             (total_called >= 50% of total_invested — the physics bound,
-    #             since you cannot invest more than you have called).
-    #   Method:   XIRR over (Call → out, Distribution → in, Terminal → in).
-    #   Gives:    industry-standard LP-perspective Net IRR (Bharatcrest).
+    # Then we pick by 4-case matrix:
+    #   Case 1 — Both present   → PREFER CALCULATED. If they disagree by
+    #                             >1% absolute, side-panel shows both.
+    #   Case 2 — Only calculated → USE CALCULATED
+    #   Case 3 — Only extracted  → USE EXTRACTED
+    #   Case 4 — Neither         → honest blank + itemised reason
     #
-    # Priority 2 — Cost-weighted per-investment Gross IRR
-    #   Requires: majority of investments have workbook-provided irr_pct.
-    #   Method:   SUM(cost × irr_pct) / SUM(cost) across all Investment rows.
-    #   Gives:    portfolio-level Gross IRR (before fees/carry) — standard
-    #             fund-manager reporting format (Multiples IV, Edelweiss).
-    #
-    # Priority 3 — Fund-level XIRR on Investment cashflows → LP terminal
-    #   Requires: at least Investment.investment_date + total_invested exist.
-    #   Method:   XIRR over (Investment.cost → out, Distribution → in,
-    #             Terminal FV → in).
-    #   Gives:    approximation of Gross IRR from atomic ledger only.
-    #             Last-resort fallback; will be marked in method tag.
-    #
-    # A 500%/yr sanity cap discards absurd XIRR results from all tiers.
+    # Method tag values (dashboard label):
+    #   'priority1_xirr'       — Calculated used (Case 1 or 2)
+    #   'extracted_cell'       — Extracted used (Case 3)
+    #   'insufficient_data'    — Blank (Case 4)
     _IRR_SANITY_CAP = Decimal('500')
+    _IRR_AGREEMENT_TOL = Decimal('1.0')   # 100 bps
     net_irr = None
-    net_irr_method = None   # dashboard tag identifying the chosen computation
+    net_irr_method = None
     cf: list = []
 
     _sum_called = sum(
@@ -1289,26 +1548,43 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
          for c in CapitalCall.objects.filter(scheme=scheme)),
         Decimal('0'),
     )
+    _sum_distributed = sum(
+        (_safe_decimal(d.total_net_amount, None)
+         or _safe_decimal(d.total_gross_amount, Decimal('0'))
+         for d in Distribution.objects.filter(scheme=scheme)),
+        Decimal('0'),
+    )
+    _num_calls = CapitalCall.objects.filter(scheme=scheme).count()
+    _num_dists = Distribution.objects.filter(scheme=scheme).count()
+    _num_dated_calls = CapitalCall.objects.filter(
+        scheme=scheme, call_date__isnull=False,
+    ).count()
+    _num_dated_dists = Distribution.objects.filter(
+        scheme=scheme, distribution_date__isnull=False,
+    ).count()
 
-    # Determine terminal value — used by tier 1 and tier 3.
+    # Terminal value — the residual FV at the reporting date.
+    # Prefer atomic Valuation sum over extracted fund_nav.
     terminal_value = None
     if db_active_fv and db_active_fv > 0:
         terminal_value = db_active_fv
         reasons['net_irr_terminal'] = (
-            f'Terminal = atomic Valuation sum (₹{db_active_fv} Cr) — '
-            f'preferred over extracted NAV for IRR accuracy.'
+            f'Terminal NAV taken from the sum of per-investment Valuation '
+            f'rows (₹{db_active_fv} Cr) — preferred over any extracted '
+            f'fund-level NAV for IRR accuracy.'
         )
     elif fund_nav is not None and fund_nav > 0:
         if total_invested and fund_nav > total_invested * Decimal('5'):
             reasons['net_irr_terminal'] = (
-                f'Extracted fund_nav={fund_nav} > 5× invested={total_invested} — '
-                f'suspect extraction error; omitting terminal value from IRR.'
+                f'Extracted fund_nav (₹{fund_nav} Cr) is more than 5× the '
+                f'invested capital (₹{total_invested} Cr) — treated as an '
+                f'extraction error; terminal NAV omitted.'
             )
         else:
             terminal_value = fund_nav
             reasons['net_irr_terminal'] = (
-                f'Terminal = extracted fund_nav (₹{fund_nav} Cr) — no atomic '
-                f'valuations available.'
+                f'Terminal NAV taken from the extracted fund NAV '
+                f'(₹{fund_nav} Cr) — no per-investment valuations available.'
             )
 
     def _apply_distributions(target: list):
@@ -1322,9 +1598,24 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
             if d.distribution_date and amt and amt > 0:
                 target.append((d.distribution_date, amt))
 
-    # --- Tier 1: ILPA Net IRR via CapitalCall + Distribution ledger ---
-    if (total_invested and total_invested > 0
-            and _sum_called and _sum_called >= total_invested * Decimal('0.5')):
+    # ── Probe A: Priority 1 XIRR (calculated) ────────────────────────────
+    # Gate — ALL must be present for a faithful ILPA-standard Net IRR:
+    #   (a) dated capital-call rows with non-zero total
+    #   (b) dated distribution rows with non-zero total
+    #   (c) terminal NAV > 0
+    #   (d) sanity: called >= 50% of invested (physics — can't invest more
+    #       than you've called; failure signals broken extraction).
+    _calls_ok = _num_dated_calls > 0 and _sum_called > 0
+    _dists_ok = _num_dated_dists > 0 and _sum_distributed > 0
+    _terminal_ok = terminal_value is not None and terminal_value > 0
+    _sanity_ok = (
+        total_invested and total_invested > 0
+        and _sum_called >= total_invested * Decimal('0.5')
+    )
+    _probeA_ok = _calls_ok and _dists_ok and _terminal_ok and _sanity_ok
+    _calculated_irr = None
+    _calculated_cf: list = []
+    if _probeA_ok:
         _cf1: list = []
         for c in sorted(
             CapitalCall.objects.filter(scheme=scheme),
@@ -1334,78 +1625,178 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
             if c.call_date and amt and amt > 0:
                 _cf1.append((c.call_date, -amt))
         _apply_distributions(_cf1)
-        if terminal_value is not None:
-            _cf1.append((as_of, terminal_value))
+        _cf1.append((as_of, terminal_value))
         _irr1 = _xirr(_cf1)
         if _irr1 is not None and abs(_irr1) <= _IRR_SANITY_CAP:
-            net_irr = _irr1
-            cf = _cf1
-            net_irr_method = 'capitalcall_distribution_xirr'
-            reasons['net_irr_source'] = (
-                f'Fund-level XIRR on CapitalCall + Distribution ledger '
-                f'({CapitalCall.objects.filter(scheme=scheme).count()} calls '
-                f'totalling ₹{_sum_called} Cr). Standard ILPA Net IRR.'
-            )
+            _calculated_irr = _irr1
+            _calculated_cf = _cf1
 
-    # --- Tier 2: Cost-weighted average of per-investment IRR ---
-    if net_irr is None and total_invested and total_invested > 0:
-        _inv_with_irr = Investment.objects.filter(scheme=scheme).exclude(
-            irr_pct__isnull=True,
+    # ── Probe B: Extracted stated Net IRR ────────────────────────────────
+    # Order within probe:
+    #   B1. Gemini-emitted fund_performance.net_irr_stated with cell provenance
+    #   B2. Python-side workbook scan for a "Net IRR" label + adjacent value
+    # B2 is a universal fallback because Gemini has been observed omitting
+    # this field on inputs / dashboard sheets that lack a proper column
+    # header (e.g. TrackFundAI Master: 16.12% at MASTER_INPUTS!B91).
+    _extracted_irr = None
+    _extracted_cell = None
+    _extracted_probe = None
+    _stated_overrides = _extract_overrides(unified_json or {})
+    _stated = _stated_overrides.get('net_irr_stated')
+    if _stated is not None:
+        _extracted_irr = _stated
+        _extracted_probe = 'gemini_provenance'
+        _extracted_cell = 'fund_performance.net_irr_stated (Gemini)'
+    else:
+        _filepath = (unified_json or {}).get('__source_filepath__')
+        if _filepath:
+            scan = _scan_workbook_for_net_irr_stated(_filepath)
+            if scan is not None:
+                _extracted_irr = scan['value']
+                _extracted_probe = 'python_workbook_scan'
+                _extracted_cell = f'{scan["sheet"]}!{scan["cell"]}'
+    if _extracted_irr is not None and abs(_extracted_irr) > _IRR_SANITY_CAP:
+        _extracted_irr = None  # implausible magnitude, reject
+
+    # ── 4-case decision ──────────────────────────────────────────────────
+    _INPUT_SUMMARY = (
+        f'{_num_dated_calls} dated capital call rows (₹{_sum_called} Cr), '
+        f'{_num_dated_dists} dated distribution rows (₹{_sum_distributed} Cr), '
+        f'terminal NAV ₹{terminal_value if terminal_value else 0} Cr on {as_of}'
+    )
+    _FORMULA = (
+        'XIRR bisection over the fund\'s real dated cashflows: '
+        'capital calls as outflows, LP distributions as inflows, terminal '
+        'NAV as the final positive flow at the as-of date. This is the '
+        'ILPA-standard Net IRR definition.'
+    )
+
+    if _calculated_irr is not None and _extracted_irr is not None:
+        # Case 1 — Both present → prefer calculated; if disagreement > 1%,
+        # side panel shows both so the user sees what the fund's own cell
+        # reports vs what our atomic-ledger XIRR reproduces.
+        net_irr = _calculated_irr
+        net_irr_method = 'priority1_xirr'
+        cf = _calculated_cf
+        _delta = abs(_calculated_irr - _extracted_irr)
+        if _delta > _IRR_AGREEMENT_TOL:
+            reasons['net_irr_source'] = (
+                f'Priority 1 — Calculated Net IRR = {_calculated_irr}% '
+                f'(preferred). The workbook also publishes a stated Net IRR '
+                f'of {_extracted_irr}% at cell {_extracted_cell}, which '
+                f'differs by {_delta:.2f} percentage points. '
+                f'We display the calculated number because it is '
+                f'reproducible directly from the atomic ledger '
+                f'({_INPUT_SUMMARY}) using standard ILPA XIRR. '
+                f'Formula: {_FORMULA}'
+            )
+            reasons['net_irr_stated_alt'] = (
+                f'Workbook stated value: {_extracted_irr}% at '
+                f'{_extracted_cell}. Difference vs calculated: '
+                f'{_delta:.2f} percentage points. Possible causes: manager '
+                f'used non-standard IRR method, different measurement date, '
+                f'or proprietary fee assumptions not visible in the ledger.'
+            )
+        else:
+            reasons['net_irr_source'] = (
+                f'Priority 1 — Calculated Net IRR = {_calculated_irr}% '
+                f'(preferred). Cross-verified against the workbook\'s stated '
+                f'value {_extracted_irr}% at cell {_extracted_cell} — '
+                f'agreement within {_IRR_AGREEMENT_TOL}%. '
+                f'Inputs: {_INPUT_SUMMARY}. Formula: {_FORMULA}'
+            )
+    elif _calculated_irr is not None:
+        # Case 2 — Only calculated → use it directly.
+        net_irr = _calculated_irr
+        net_irr_method = 'priority1_xirr'
+        cf = _calculated_cf
+        reasons['net_irr_source'] = (
+            f'Priority 1 — Calculated Net IRR = {_calculated_irr}%. '
+            f'The workbook does not publish an explicit Net IRR cell, so '
+            f'the value is computed from the atomic ledger. '
+            f'Inputs: {_INPUT_SUMMARY}. Formula: {_FORMULA}'
         )
-        _num = Decimal('0')
-        _den = Decimal('0')
-        for _inv in _inv_with_irr:
-            _cost = _safe_decimal(_inv.total_invested, Decimal('0'))
-            _pct  = _safe_decimal(_inv.irr_pct, None)
-            if _cost > 0 and _pct is not None:
-                _num += _cost * _pct
-                _den += _cost
-        # Only trust the aggregate if a majority of investment cost has
-        # workbook-provided IRR data. Universal cutoff: 50% of invested cost.
-        if _den > 0 and _den >= total_invested * Decimal('0.5'):
-            _irr2 = (_num / _den).quantize(Decimal('0.01'))
-            if abs(_irr2) <= _IRR_SANITY_CAP:
-                net_irr = _irr2
-                net_irr_method = 'cost_weighted_per_investment_irr'
-                reasons['net_irr_source'] = (
-                    f'Cost-weighted average of per-investment IRR '
-                    f'({_inv_with_irr.count()} of '
-                    f'{Investment.objects.filter(scheme=scheme).count()} '
-                    f'investments carry workbook irr_pct values). '
-                    f'Gross portfolio-level IRR.'
+    elif _extracted_irr is not None:
+        # Case 3 — Only extracted → use it. Priority 1 could not run because
+        # at least one of (dated calls, dated distributions, terminal NAV)
+        # is missing from the workbook — list which one.
+        net_irr = _extracted_irr
+        net_irr_method = 'extracted_cell'
+        _reason_bits: list[str] = []
+        if not _calls_ok:
+            _reason_bits.append(
+                f'no dated capital-call rows with a non-zero total '
+                f'({_num_dated_calls} dated rows, ₹{_sum_called} Cr)'
+            )
+        if not _dists_ok:
+            _reason_bits.append(
+                f'no dated distribution rows with a non-zero total '
+                f'({_num_dated_dists} dated rows, ₹{_sum_distributed} Cr)'
+            )
+        if not _terminal_ok:
+            _reason_bits.append('no terminal NAV available')
+        if not _sanity_ok and total_invested and total_invested > 0:
+            _reason_bits.append(
+                f'capital called (₹{_sum_called} Cr) is below 50% of '
+                f'invested (₹{total_invested} Cr) — extraction incomplete'
+            )
+        _why = '; '.join(_reason_bits or ['unknown']) + '.'
+        reasons['net_irr_source'] = (
+            f'Extracted Net IRR = {_extracted_irr}% taken directly from '
+            f'workbook cell {_extracted_cell}. Priority 1 (calculated XIRR) '
+            f'could not run because: {_why} We fall back to the value the '
+            f'fund file itself publishes rather than compute a partial-input '
+            f'approximation.'
+        )
+    else:
+        # Case 4 — Neither → honest blank + itemised reason.
+        _missing: list[str] = []
+        if not _calls_ok:
+            if _num_calls == 0:
+                _missing.append('no capital call rows persisted')
+            elif _num_dated_calls == 0:
+                _missing.append(
+                    f'{_num_calls} capital call rows but none have a call_date'
                 )
-
-    # --- Tier 3: Fund-level XIRR on Investment cashflows → LP terminal ---
-    if net_irr is None and total_invested and total_invested > 0:
-        _cf3: list = []
-        _inv_qs = Investment.objects.filter(scheme=scheme).exclude(
-            investment_date__isnull=True,
-        )
-        for inv in _inv_qs:
-            amt = _safe_decimal(inv.total_invested, Decimal('0'))
-            if inv.investment_date and amt and amt > 0:
-                _cf3.append((inv.investment_date, -amt))
-        _apply_distributions(_cf3)
-        if terminal_value is not None:
-            _cf3.append((as_of, terminal_value))
-        _irr3 = _xirr(_cf3)
-        if _irr3 is not None and abs(_irr3) <= _IRR_SANITY_CAP:
-            net_irr = _irr3
-            cf = _cf3
-            net_irr_method = 'investment_cashflow_xirr'
-            reasons['net_irr_source'] = (
-                f'Fund-level XIRR on Investment cashflows → LP terminal '
-                f'({_inv_qs.count()} investments, total ₹{total_invested} Cr → '
-                f'terminal ₹{terminal_value} Cr). Approximation of Gross IRR '
-                f'from atomic ledger — used when CapitalCall extraction is '
-                f'incomplete AND workbook does not publish per-inv IRR.'
+            elif _sum_called == 0:
+                _missing.append(
+                    f'{_num_calls} capital call rows but total called = ₹0 Cr'
+                )
+        if not _dists_ok:
+            if _num_dists == 0:
+                _missing.append('no distribution rows persisted')
+            elif _num_dated_dists == 0:
+                _missing.append(
+                    f'{_num_dists} distribution rows but none have a '
+                    f'distribution_date'
+                )
+            elif _sum_distributed == 0:
+                _missing.append(
+                    f'{_num_dists} distribution rows but total distributed '
+                    f'= ₹0 Cr'
+                )
+        if not _terminal_ok:
+            _missing.append(
+                'no terminal NAV available (need latest NAVRecord OR '
+                'extracted fund_nav)'
             )
-
-    if net_irr is None:
+        if not _sanity_ok and total_invested and total_invested > 0:
+            _missing.append(
+                f'capital called (₹{_sum_called} Cr) is below 50% of '
+                f'invested (₹{total_invested} Cr) — extraction incomplete'
+            )
+        _missing.append(
+            'no Net IRR cell found in the workbook (checked both Gemini '
+            'fund_performance.net_irr_stated and Python-side scan for "Net '
+            'IRR" labels)'
+        )
+        net_irr_method = 'insufficient_data'
         reasons['net_irr'] = (
-            'No priority tier produced a plausible Net IRR. Insufficient '
-            'CapitalCall / per-investment IRR / Investment cashflow data, '
-            'OR all computed values exceeded the 500%/yr sanity cap.'
+            'Cannot display Net IRR — neither the calculated value nor a '
+            'stated cell is available. Missing inputs: '
+            + '; '.join(_missing)
+            + '. Once distributions and NAV are populated, Priority 1 will '
+            'compute the standard ILPA XIRR automatically.'
         )
 
     # ── Drawdown / uncalled ────────────────────────────────────────────
@@ -1443,9 +1834,11 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
         'rvpi':                   rvpi,
         'moic':                   moic,
         'net_irr':                net_irr,
-        # Universal method tag — which of the 3 IRR tiers produced the value.
-        # Values: 'capitalcall_distribution_xirr', 'cost_weighted_per_investment_irr',
-        # 'investment_cashflow_xirr', or None (no tier succeeded).
+        # Universal method tag — how the Net IRR was arrived at, or None.
+        # Values (Option B, 2026-07-07):
+        #   'priority1_xirr'      — XIRR on real dated cashflows + terminal NAV
+        #   'extracted_cell'      — value published in the workbook (cell ref)
+        #   'insufficient_data'   — no computable value; see reasons['net_irr']
         # The dashboard uses this to label the Net IRR tile transparently.
         'net_irr_method':         net_irr_method,
         # Metadata

@@ -322,21 +322,24 @@ COMMITMENTS_FIELDS = {
 
 CAPITAL_CALLS_FIELDS = {
     'scheme_name': 'Scheme issuing the capital call',
-    'call_number': 'Sequential call number (1, 2, 3...)',
-    'call_date': 'Date of the capital call',
-    'payment_due_date': 'Date payment is due',
-    'call_percentage': 'Percentage of commitment being called',
-    'total_call_amount': 'Total amount being called across all LPs',
-    'purpose': 'Purpose of the call (investment, fees, expenses)',
-    'call_status': 'Status: draft, approved, sent, paid, defaulted',
-    # Line item fields
-    'investor_name': 'LP name for line item',
-    'called_amount': 'Amount called from this LP',
-    'cumulative_called_pct': 'Cumulative % of commitment called to date',
-    'payment_status': 'Payment status: pending, paid, partial, defaulted',
-    'amount_received': 'Amount received from this LP',
-    'payment_date': 'Date payment was received',
-    'utr_number': 'Unique Transaction Reference number',
+    'call_number': 'Sequential call number — Call #, Call No, Call ID, Drawdown #, Drawdown No, CC#, Cash Call #, Call Sequence',
+    'call_date': 'Date of the capital call — Call Notice Date, Notice Date, Drawdown Date, Cash Call Date, Call Issue Date',
+    'payment_due_date': 'Date payment is due — Due Date, Payment Date, Settlement Date',
+    'call_percentage': 'Percentage of commitment being called — % of Commitment, % of Corpus, % of Committed Capital, Drawn %, Draw %, Call %, % Called, Percent Called',
+    'total_call_amount': 'Total amount being called across all LPs — Amount Called, Amount Called (Cr), Amount(Cr), Amount(₹Cr), Amt Called, Total Call Amount, Drawdown Amount, Cash Call Amount, Fund Call Amount, Fund Level Call Amount',
+    'purpose': 'Purpose of the call — Call Purpose, Reason, Description, Use of Funds',
+    'call_status': 'Status — draft, approved, sent, paid, defaulted, funded, notified',
+    # Line item fields — per-LP breakdown of a call. Kept in the schema so
+    # Gemini can classify LP-level rows and route them to commitments via
+    # Fix A. Aliases are LP-context specific — never confused with the
+    # fund-level total_call_amount above.
+    'investor_name': 'LP name for line item — LP Name, Investor Name, LP',
+    'called_amount': 'Amount called from this LP for this specific call — LP Contribution, LP Called',
+    'cumulative_called_pct': 'Cumulative % of commitment called to date — Cumulative %, Cumulative Called %',
+    'payment_status': 'Payment status — pending, paid, partial, defaulted',
+    'amount_received': 'Amount received from this LP — Actual Received, Received Amount, Paid Amount',
+    'payment_date': 'Date payment was received — Receipt Date, Paid Date',
+    'utr_number': 'Unique Transaction Reference number — UTR, UTR Number, Transaction Ref',
 }
 
 PORTFOLIO_INVESTMENTS_FIELDS = {
@@ -441,15 +444,15 @@ VALUATIONS_KPIS_FIELDS = {
 
 NAV_ACCOUNTING_FIELDS = {
     'scheme_name': 'Scheme name for NAV record',
-    'nav_date': 'Date of NAV calculation — Date, Month End, Period, Valuation Date, As Of Date',
-    'total_nav': 'Total NAV of the scheme — Fund NAV, Net NAV, Total Fund NAV, Closing NAV, Net Asset Value',
-    'total_units_outstanding': 'Total units outstanding — Units OS, Units Issued, Units Outstanding, Total Units',
-    'nav_per_unit': 'NAV per unit — NAV/Unit, NAV per Share, Unit NAV, Per Unit NAV',
-    'investments_at_fair_value': 'Total fair value of investments — Portfolio FV, Investments FV, Portfolio Fair Value, Total FV of Portfolio, FV Holdings',
-    'cash_and_equivalents': 'Cash and bank balances — Cash, Bank Balance, Cash on Hand, Cash Balance, Closing Cash, Liquid Assets',
-    'receivables': 'Outstanding receivables — Interest Receivable, Dividend Receivable, Other Receivables',
-    'management_fee_payable': 'Management fee liability — Mgmt Fee, Management Fee, Accrued Fees, Mgmt Fee Payable',
-    'other_liabilities': 'Other liabilities — Payables, Total Liabilities, Fund Expenses Payable',
+    'nav_date': 'Date of NAV calculation — Date, Month End, Period, Valuation Date, As Of Date, Reporting Date, NAV Date, Period End',
+    'total_nav': 'Total NAV of the scheme — Fund NAV, Net NAV, Total Fund NAV, Closing NAV, Closing Fund NAV, Closing NAV Before Carry, Net Asset Value, Total NAV(Cr), Total NAV(₹Cr), NAV (Cr), NAV(₹Cr), Fund NAV(Cr)',
+    'total_units_outstanding': 'Total units outstanding — Units OS, Units Issued, Units Outstanding, Total Units, No. of Units, Number of Units',
+    'nav_per_unit': 'NAV per unit — NAV/Unit, NAV per Share, Unit NAV, Per Unit NAV, NAV/Unit(₹), NAV per Unit(INR)',
+    'investments_at_fair_value': 'Total fair value of investments — Portfolio FV, Investments FV, Portfolio Fair Value, Total FV of Portfolio, FV Holdings, Total Investments, Total Investments (Cr), Total Investments(₹Cr), Unrealised Gains',
+    'cash_and_equivalents': 'Cash and bank balances — Cash, Bank Balance, Cash on Hand, Cash Balance, Closing Cash, Liquid Assets, Cash & Bank',
+    'receivables': 'Outstanding receivables — Interest Receivable, Dividend Receivable, Other Receivables, Accrued Income',
+    'management_fee_payable': 'Management fee liability — Mgmt Fee, Management Fee, Accrued Fees, Mgmt Fee Payable, Mgmt Fee (Cr), Management Fees Paid',
+    'other_liabilities': 'Other liabilities — Payables, Total Liabilities, Fund Expenses Payable, Fund Expenses (Cr), Fund Expenses',
     'depository_type': 'Depository: cdsl or nsdl',
     'depository_reconciled': 'Whether reconciled with depository',
     # Chart of accounts
@@ -488,21 +491,26 @@ EXITS_DISTRIBUTIONS_FIELDS = {
     'is_actual': 'Whether this is an actual exit (vs scenario)',
     'exit_date': 'Date of exit',
     'exit_valuation': 'Company valuation at exit',
-    'proceeds': 'Gross proceeds to the fund',
+    'proceeds': 'Gross proceeds to the fund — Proceeds (Cr), Gross Proceeds, Realised, Exit Proceeds',
     'net_exit_proceeds': 'Net proceeds after transaction costs',
     'realized_gain_loss': 'Realized gain or loss',
     'gain_loss_nature': 'SEBI: ltcg, stcg, short_term_loss, long_term_loss',
     'moic': 'Multiple on invested capital at exit',
     'irr_pct': 'Gross IRR percentage at exit',
     'buyer_name': 'Acquirer / buyer name (for M&A / secondary)',
+    # Solution G — sector + cost fields on exit rows so auto-created
+    # PortfolioCompany + Investment shells carry the right sector/cost.
+    'sector': 'Sector of the exited portfolio company — Sector, Industry, Sector Group, Segment',
+    'cost_basis': 'Original cost of the investment being exited — Cost, Cost (Cr), Cost(Cr), Investment Cost, Capital Invested, Cost of Investment',
+    'hold_years': 'Holding period in years — Hold(Yrs), Hold Years, Holding Period, Years Held',
     # Distribution fields
     'scheme_name': 'Scheme making the distribution',
-    'distribution_number': 'Sequential distribution number',
-    'distribution_date': 'Date of distribution',
-    'distribution_type': 'Type: return_of_capital, stcg, ltcg, interest, dividend, carry',
-    'total_gross_amount': 'Total gross distribution amount',
-    'total_tds_amount': 'Total TDS withheld',
-    'total_net_amount': 'Total net distribution after TDS',
+    'distribution_number': 'Sequential distribution number — Dist#, Dist No, Distribution Number, Distribution #, Payout Number, D#, Distribution ID, Dist ID',
+    'distribution_date': 'Date of distribution — Distribution Date, Payout Date, Date, Dist Date, Payment Date',
+    'distribution_type': 'Type — Return of Capital, STCG, LTCG, Interest, Dividend, Carry, Capital + Income, Capital + Profit',
+    'total_gross_amount': 'Total gross distribution amount — Amount, Amount (Cr), Amount(Cr), Amount(₹Cr), Distribution Amount, Distribution Amount (Cr), Gross Amount, Gross (Cr), Payout Amount, Payout (Cr), Total Amount, Amount Paid, Gross Distributed, Gross Realised Amount',
+    'total_tds_amount': 'Total TDS withheld — TDS, TDS Amount, Withholding',
+    'total_net_amount': 'Total net distribution after TDS — Net Amount, Net Amount (Cr), Net (Cr), Net Distribution, Net Distribution Amount, Net Paid, Amount Net of TDS',
     'gp_carry_amount': (
         'Portion of this distribution paid to the GP as carried interest. '
         'Match column labels like: "GP Carry Component", "Carried Interest Distribution", '

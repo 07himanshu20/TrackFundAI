@@ -61,17 +61,32 @@ _NONE: Tuple[str, ...] = ()
 LABEL_WHITELIST: Dict[str, Tuple[Tuple[str, ...], Tuple[str, ...]]] = {
     # ── Carry / waterfall — the highest-stakes class ────────────────────
     'carry_amount_gross': (
-        ('gross carry', 'carry (gross)', 'gross carried interest', 'carried interest gross'),
+        # "gross carry", "carry (gross)", "gross carried interest", "carried interest gross" — canonical
+        # "carry provision" — Sequoia-style label; provision means what's set aside as gross carry
+        ('gross carry', 'carry (gross)', 'gross carried interest', 'carried interest gross',
+         'carry provision', 'carried interest provision'),
+        # "escrow"/"escrow balance" refer to net-after-holdback → belong to carry_amount_net
         ('allocated', 'allocation', 'p&l', 'profit share', 'profit allocation',
-         'net carry', 'net of', 'after clawback', 'after holdback', 'distributed'),
+         'net carry', 'net of', 'after clawback', 'after holdback', 'distributed',
+         'escrow', 'holdback balance'),
     ),
     'carry_amount_net': (
+        # Fix D (2026-07-06) — REMOVED "escrow balance"/"carry escrow" from
+        # required_any; escrow amounts are held AGAINST clawback, so they
+        # now route to gp_clawback_provision instead. Universal: files that
+        # publish "Net Carry" or "Carry (Net)" continue to hit this metric.
         ('net carry', 'carry (net)', 'net carried interest', 'carried interest net',
          'carry net of clawback', 'carry after clawback'),
-        ('gross', 'allocated', 'allocation', 'before clawback', 'before holdback'),
+        ('gross', 'allocated', 'allocation', 'before clawback', 'before holdback',
+         'provision', 'escrow'),
     ),
     'gp_clawback_provision': (
-        ('clawback', 'claw-back', 'escrow', 'holdback', 'reserve for clawback'),
+        # Universal: "escrow"/"escrow balance"/"carry escrow"/"holdback" all
+        # refer to amounts held aside against clawback obligations. Route
+        # to gp_clawback_provision so the dashboard's Clawback tile reflects
+        # the CA-published held-aside figure.
+        ('clawback', 'claw-back', 'escrow', 'holdback', 'reserve for clawback',
+         'escrow balance', 'carry escrow'),
         ('paid', 'released', 'reversed'),
     ),
     'gp_catchup_amount': (
@@ -88,8 +103,11 @@ LABEL_WHITELIST: Dict[str, Tuple[Tuple[str, ...], Tuple[str, ...]]] = {
         ('rate', 'percentage', 'remaining'),
     ),
     'carry_base': (
+        # "carry base", "profit pool", "distributable profit", "available for carry" — canonical
+        # "profit above hurdle" — Sequoia label; profit above hurdle = carry base
         ('carry base', 'profit pool', 'distributable profit', 'available for carry',
-         'profit available', 'residual after preferred'),
+         'profit available', 'residual after preferred', 'profit above hurdle',
+         'hurdle profit', 'profits above hurdle'),
         ('rate', 'percentage'),
     ),
     'lp_total_return': (

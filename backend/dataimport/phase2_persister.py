@@ -36,6 +36,31 @@ def _first_present(*values):
     return None
 
 
+def _derive_carry_net(agg: dict, wf: dict):
+    """Universal fallback: carry_amount_net = carry_amount_gross − gp_clawback.
+
+    Used when no explicit "Net Carry" was extracted (Sequoia case: only
+    "Carry Escrow Balance" was published). Returns None if either input is
+    missing, so `_first_present` cleanly falls through to the None-tail.
+    Deterministic; never fires when an explicit net-carry candidate exists.
+    """
+    _wf = wf or {}
+    _gross = _first_present(
+        (agg or {}).get('carry_amount_gross'),
+        _wf.get('carry_amount_gross'),
+    )
+    _clawback = _first_present(
+        (agg or {}).get('gp_clawback_provision'),
+        _wf.get('clawback_provision'),
+        _wf.get('gp_clawback_provision'),
+    )
+    _cg, _cb = _d(_gross), _d(_clawback)
+    if _cg is None or _cb is None:
+        return None
+    net = _cg - _cb
+    return net if net >= 0 else Decimal('0')
+
+
 def _d(v) -> Optional[Decimal]:
     if v is None or v == '':
         return None
@@ -444,7 +469,7 @@ def persist_phase2(data: dict, import_file, organization, user,
 
     with transaction.atomic():
         # ---- Fund ----
-        _p(81, 'Phase 2: Fund + Scheme…')
+        _p(81, 'Persistence: Fund + Scheme…')
         fund = _persist_fund(organization, fund_name, fm, user)
         scheme = _persist_scheme(fund, scheme_name, fm)
         import_file.fund = fund
@@ -452,7 +477,7 @@ def persist_phase2(data: dict, import_file, organization, user,
         import_file.save(update_fields=['fund', 'fund_name'])
 
         # ---- Investors + Commitments ----
-        _p(83, 'Phase 2: Investors + commitments…')
+        _p(83, 'Persistence: Investors + commitments…')
         counts['investors'] = _persist_investors(organization, data.get('investors') or [])
         counts['commitments'] = _persist_commitments(
             organization, scheme,
@@ -460,11 +485,11 @@ def persist_phase2(data: dict, import_file, organization, user,
         )
 
         # ---- Capital Calls ----
-        _p(85, 'Phase 2: Capital calls…')
+        _p(85, 'Persistence: Capital calls…')
         counts['capital_calls'] = _persist_capital_calls(scheme, data.get('capital_calls') or [], user)
 
         # ---- Portfolio Companies + Investments + Tranches ----
-        _p(87, 'Phase 2: Portfolio companies + investments + tranches…')
+        _p(87, 'Persistence: Portfolio companies + investments + tranches…')
         co_count, inv_count, tr_count = _persist_portfolio(
             organization, scheme, data.get('portfolio_investments') or [],
             data.get('valuations') or [], user,
@@ -474,20 +499,20 @@ def persist_phase2(data: dict, import_file, organization, user,
         counts['tranches'] = tr_count
 
         # ---- Valuations ----
-        _p(89, 'Phase 2: Valuations…')
+        _p(89, 'Persistence: Valuations…')
         counts['valuations'] = _persist_valuations(scheme, data.get('valuations') or [])
 
         # ---- Quoted/Unquoted ----
-        _p(90, 'Phase 2: Quoted/Unquoted listing status…')
+        _p(90, 'Persistence: Quoted/Unquoted listing status…')
         counts['quoted_updates'] = _persist_quoted(organization, data.get('quoted_unquoted') or [])
 
         # ---- Exits + Distributions ----
-        _p(91, 'Phase 2: Exits + distributions…')
+        _p(91, 'Persistence: Exits + distributions…')
         counts['exits'] = _persist_exits(scheme, data.get('exits') or [], user)
         counts['distributions'] = _persist_distributions(scheme, data.get('distributions') or [], user)
 
         # ---- NAV records (FULL monthly walk) ----
-        _p(93, 'Phase 2: NAV walk…')
+        _p(93, 'Persistence: NAV walk…')
         counts['nav_records'] = _persist_nav_records(scheme, data.get('nav_records') or [])
 
         # ---- Compliance (SEBI + Calendar) ─────────────────────────────
@@ -647,7 +672,7 @@ def persist_phase2(data: dict, import_file, organization, user,
             except Exception as e:
                 logger.warning(f'[phase4.audit] could not stash audit: {e}')
 
-        _p(96, 'Phase 2: Carry + fund metrics…')
+        _p(96, 'Persistence: Carry + fund metrics…')
         _persist_carried_interest(scheme, aggregates, data.get('waterfall') or {}, fp)
         counts['fund_metrics'] = _persist_fund_metrics(
             organization, scheme, fp, data.get('waterfall') or {},
@@ -659,22 +684,26 @@ def persist_phase2(data: dict, import_file, organization, user,
 
         # ---- Per-company periodic KPIs ----
         # Universal: fan out KPIs from BOTH dedicated KPI sheets and from
-        # monthly P&L / BS / CF rows so the company-matrix dashboard sees
-        # EVERY metric value Gemini extracted, regardless of which sheet
-        # it came from. Previously only portfolio_kpis_periodic was read.
-        _p(97, 'Phase 2: Per-company periodic KPIs + monthly financials…')
+        # monthly P&L / BS / CF rows AND the burn_runway / SaaS-metrics
+        # snapshot so the company-matrix dashboard sees EVERY metric value
+        # Gemini extracted, regardless of which sheet it came from.
+        # burn_runway ships MRR/ARR/NRR/Churn/CAC/LTV/runway_months as a
+        # single-period snapshot per company — the persister already has a
+        # fund-context period fallback for period-less rows.
+        _p(97, 'Persistence: Per-company periodic KPIs + monthly financials…')
         combined_kpi_source = (
             (data.get('portfolio_kpis_periodic') or [])
             + (data.get('monthly_pl_rows') or [])
             + (data.get('monthly_bs_rows') or [])
             + (data.get('monthly_cf_rows') or [])
+            + (data.get('burn_runway') or [])
         )
         counts['portfolio_kpis'] = _persist_portfolio_kpis(
             organization, scheme, combined_kpi_source,
         )
 
         # ---- Budget vs Actual ----
-        _p(98, 'Phase 2: Budget vs Actual…')
+        _p(98, 'Persistence: Budget vs Actual…')
         counts['budget_vs_actual'] = _persist_budget_vs_actual(
             organization, fund, data.get('budget_vs_actual') or []
         )
@@ -901,6 +930,30 @@ def _persist_capital_calls(scheme, rows: list, user) -> int:
         [r for r in rows if isinstance(r, dict)],
         key=lambda r: _date(r.get('call_date')) or date.max,
     )
+    # ── Universal layout detection: fund-level ledger vs LP-split matrix ──
+    # Group input rows by (call_number OR call_date). If every group has
+    # exactly 1 row → workbook is a "one-row-per-call" ledger, and each
+    # row's `called_amount` IS the fund-level total for that call
+    # (Multiples / Edelweiss template). If any group has >1 row → workbook
+    # is a "call × LP matrix" where `called_amount` is per-LP and rescuing
+    # it would double-count (TrackFundAI Master template). This detection
+    # runs ONCE and is universal — no per-file hardcoding.
+    def _group_key(r):
+        cn_raw = r.get('call_number') or r.get('call_ref')
+        cn = _str(cn_raw, 32) if cn_raw is not None else ''
+        m = re.search(r'\d+', cn) if cn else None
+        if m:
+            return f'CN:{m.group()}'
+        d = _date(r.get('call_date'))
+        return f'D:{d.isoformat()}' if d else 'NONE'
+    _group_counts: dict[str, int] = {}
+    for _r in sorted_rows:
+        _k = _group_key(_r)
+        _group_counts[_k] = _group_counts.get(_k, 0) + 1
+    _is_fund_level_ledger = (
+        len(_group_counts) > 0
+        and all(v == 1 for v in _group_counts.values())
+    )
     for idx, row in enumerate(sorted_rows, start=1):
         # Universal call_number resolution:
         #   1. Use explicit call_number / call_ref digit if Gemini emitted one
@@ -912,13 +965,68 @@ def _persist_capital_calls(scheme, rows: list, user) -> int:
         m = re.search(r'\d+', cn) if cn else None
         call_number = int(m.group()) if m else idx
 
+        # Universal amount rescue: Gemini's column mapping is non-deterministic
+        # across imports of the same-template workbook (Mock_14 got amount
+        # right; Mock_28 with identical template got 0). Search fund-level
+        # amount aliases first, then conditionally rescue `called_amount`.
+        _amt_candidates = (
+            row.get('total_call_amount'),
+            row.get('amount'),
+            row.get('actual_received'),
+        )
+        raw_amt = None
+        for _c in _amt_candidates:
+            _dc = _d(_c)
+            if _dc is not None and _dc != 0:
+                raw_amt = _dc
+                break
+        # Conditional rescue: `called_amount` semantics depend on layout.
+        #   • Fund-level ledger (1 row per call, e.g. Multiples / Edelweiss):
+        #     called_amount IS the fund-level total → safe to rescue.
+        #   • LP-split matrix (N rows per call, e.g. TrackFundAI Master):
+        #     called_amount is per-LP → summing it duplicates via the last
+        #     -resort per-LP sum below.
+        # The pre-loop `_is_fund_level_ledger` flag makes this universal.
+        if (raw_amt is None or raw_amt == 0) and _is_fund_level_ledger:
+            _dc = _d(row.get('called_amount'))
+            if _dc is not None and _dc != 0:
+                raw_amt = _dc
+        # Fallback: any non-None value (permits genuine 0-Cr planned calls
+        # where the workbook explicitly wrote 0 into the amount cell).
+        if raw_amt is None:
+            raw_amt = _d(_first_present(*_amt_candidates))
+        # Last-resort rescue: sum per-LP columns (LP001, LP002, …) — this IS
+        # mathematically valid (fund-level total = sum of per-LP allocations
+        # for the same call). Distinct from the per-LP field rescue above
+        # (which would double-count a single LP's total commitment).
+        if raw_amt is None or raw_amt == 0:
+            lp_sum = Decimal('0')
+            for _k, _v in row.items():
+                if isinstance(_k, str) and re.match(r'^lp\d+(_cr)?$', _k, re.I):
+                    _d_val = _d(_v)
+                    if _d_val is not None:
+                        lp_sum += _d_val
+            if lp_sum > 0:
+                raw_amt = lp_sum
+
+        # Fix 1b — defensive phantom-row guard. XIRR is mathematically defined
+        # as Σ cashflow_i / (1+r)^((date_i - date_0)/365); a row without
+        # date_i is undefined for XIRR. Persisting date=None as date.today()
+        # gives XIRR a fake input; dropping it gives XIRR only real dated
+        # inputs. Universal — no fund/sheet hardcoding. Fix A in
+        # unified_builder.py routes LP-shape rows upstream; this is the
+        # persister-layer backstop for any pattern that slips through.
+        raw_date = _date(row.get('call_date'))
+        if raw_date is None:
+            continue
+
         # NOT-NULL fields on CapitalCall: call_date, payment_due_date,
         # call_percentage, total_call_amount. Provide zero/today defaults
         # so a row with missing percentage (LLM omitted) still persists.
-        call_date = _date(row.get('call_date')) or date.today()
+        call_date = raw_date or date.today()
         pay_due   = _date(row.get('payment_due_date')) or call_date
         pct       = _d(row.get('call_percentage')) or Decimal('0')
-        amount    = _d(row.get('total_call_amount') or row.get('amount')) or Decimal('0')
+        amount    = raw_amt if raw_amt is not None else Decimal('0')
 
         defaults = {
             'call_date': call_date,
@@ -1193,6 +1301,7 @@ def _persist_portfolio(organization, scheme, rows: list, valuation_rows: list, u
                 _d(latest_row.get('fd_pct') or latest_row.get('percentage_stake_fully_diluted')))
         _set_if(inv_defaults, 'sector', _str(latest_row.get('sector') or first_row.get('sector'), 100))
         gemini_irr = _d(latest_row.get('irr_pct'))
+        gemini_irr_source = 'gemini' if gemini_irr is not None else None
         if gemini_irr is None:
             # Rule 21 fallback — compute IRR from tranche cashflows + latest FV.
             # Universal: if a row lacks an explicit investment_date, fall back to
@@ -1208,15 +1317,37 @@ def _persist_portfolio(organization, scheme, rows: list, valuation_rows: list, u
             term = latest_fv_by_company.get(name)
             if tcf and term:
                 gemini_irr = _compute_investment_irr(tcf, term[1], term[0])
-        # Universal scale-normalisation: Excel stores percentages as
-        # decimal fractions (0.3329 = 33.29%). Gemini + Python read the raw
-        # fraction. All downstream code (Phase 4 XIRR, dashboard display,
-        # weighted-avg aggregation) treats irr_pct as PERCENT scale (e.g.,
-        # 33.29). Detect fraction-shape values (|v| < 5) and rescale.
+                if gemini_irr is not None:
+                    gemini_irr_source = 'computed'
+        # Universal scale-normalisation applies ONLY to Gemini-extracted values,
+        # never to Python-computed XIRR (which already returns percent scale).
+        # Excel stores percentages as decimal fractions (0.3329 = 33.29%);
+        # Gemini reads the raw fraction and we must rescale to percent.
         # A real fund IRR is essentially never in the [-5%, +5%] range and
         # then formatted as 5 not 0.05 — the choice is deterministic.
-        if gemini_irr is not None and abs(gemini_irr) < Decimal('5'):
+        # WITHOUT this source guard, a computed IRR of -2.9% was being
+        # multiplied by 100 → -290%, producing impossible values on the
+        # dashboard (e.g. CloudBase India -304.6%, CyberShield -429.7%).
+        if (
+            gemini_irr is not None
+            and gemini_irr_source == 'gemini'
+            and abs(gemini_irr) < Decimal('5')
+        ):
             gemini_irr = gemini_irr * Decimal('100')
+        # Universal per-investment IRR sanity clamp: mathematical floor is
+        # -100% (can't lose more than you invested) and no realistic
+        # per-investment annualised IRR exceeds 1000%. Values outside this
+        # window are extraction / compute artefacts — set to None so the
+        # dashboard shows "—" instead of a garbage number.
+        if gemini_irr is not None and not (
+            Decimal('-99.99') <= gemini_irr <= Decimal('999.99')
+        ):
+            logger.warning(
+                f'[irr_clamp] {name}: rejecting per-investment IRR '
+                f'{gemini_irr}% (source={gemini_irr_source}) — outside '
+                f'[-99.99, 999.99] window'
+            )
+            gemini_irr = None
         # Use update_or_create on irr_pct directly so a legitimate computed 0
         # (or negative) IRR overwrites stale data. _set_if skips 0 — wrong here.
         if gemini_irr is not None:
@@ -1430,8 +1561,9 @@ def _persist_quoted(organization, rows: list) -> int:
 
 
 def _persist_exits(scheme, rows: list, user) -> int:
-    from investments.models import Investment, ExitEvent
+    from investments.models import Investment, PortfolioCompany, ExitEvent
     count = 0
+    _autocreated = 0
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -1445,7 +1577,68 @@ def _persist_exits(scheme, rows: list, user) -> int:
             scheme=scheme, portfolio_company__name=co_name
         ).order_by('-investment_date').first()
         if not inv:
-            continue
+            # ── Solution G — Exit-only company auto-create ───────────
+            # Some workbooks list exits for companies that never appear
+            # in the Portfolio Investments sheet (Sequoia's 7 exits are
+            # in a distinct universe from its 17 active companies).
+            # Without this rescue the ExitEvent, its proceeds, its IRR
+            # and its downstream distributions are silently dropped.
+            #
+            # Universal safeguards:
+            #   1. Only fires when we have a real exit_date AND either
+            #      cost_basis or proceeds → this is a real historical
+            #      exit worth capturing, not a placeholder line item.
+            #   2. Creates minimal shell rows: a PortfolioCompany scoped
+            #      to the scheme's organization (multi-tenancy honored)
+            #      and an Investment with status='exited' so it doesn't
+            #      inflate active-portfolio counts.
+            #   3. Uses update_or_create so re-imports don't duplicate.
+            #   4. If the row lacks BOTH cost and proceeds, skip — we
+            #      have no anchor to reason from, so silently dropping
+            #      is safer than fabricating a company.
+            cost_hint = _d(row.get('cost') or row.get('cost_basis')
+                           or row.get('cost_cr') or row.get('cost_of_investment'))
+            proceeds_hint = _d(row.get('proceeds') or row.get('realised')
+                               or row.get('gross_proceeds') or row.get('net_exit_proceeds'))
+            if cost_hint is None and proceeds_hint is None:
+                continue
+            org = getattr(scheme, 'organization', None) or getattr(scheme.fund, 'organization', None)
+            if org is None:
+                continue
+            sector = _str(row.get('sector') or row.get('sector_group'), 100)
+            pc, _ = PortfolioCompany.objects.update_or_create(
+                organization=org,
+                name=co_name,
+                defaults={
+                    'sector': sector or 'Unknown',
+                    'is_active': False,
+                },
+            )
+            # Placeholder Investment. investment_date < exit_date is required
+            # so tranche → exit ordering makes sense in IRR compute; fall
+            # back to exit_date if we have no better signal.
+            inv_date_hint = _date(row.get('investment_date')) or edate
+            hold_years = _d(row.get('hold_years') or row.get('holding_period_years'))
+            if hold_years and hold_years > 0:
+                # Prefer inferred entry date from hold_years if we have it.
+                try:
+                    from datetime import timedelta as _td
+                    inv_date_hint = edate - _td(days=int(float(hold_years) * 365))
+                except (TypeError, ValueError):
+                    pass
+            inv, _ = Investment.objects.update_or_create(
+                scheme=scheme,
+                portfolio_company=pc,
+                defaults={
+                    'company_name': co_name,
+                    'total_invested': cost_hint or Decimal('0'),
+                    'investment_date': inv_date_hint,
+                    'sector': sector or 'Unknown',
+                    'status': 'exited',
+                    'created_by': user,
+                },
+            )
+            _autocreated += 1
         exit_type = _enum(row.get('exit_type') or row.get('exit_route'),
                           _EXIT_TYPE_MAP, default='secondary_sale')
         defaults = {
@@ -1467,6 +1660,11 @@ def _persist_exits(scheme, rows: list, user) -> int:
             defaults=defaults,
         )
         count += 1
+    if _autocreated:
+        logger.info(
+            f'[persister] Solution G auto-created {_autocreated} '
+            f'exit-only companies (scheme={scheme.name!r})'
+        )
     return count
 
 
@@ -1479,7 +1677,14 @@ def _persist_distributions(scheme, rows: list, user) -> int:
         dn_raw = row.get('distribution_number') or row.get('dist_id')
         m = re.search(r'\d+', _str(dn_raw))
         dnum = int(m.group()) if m else idx
-        ddate = _date(row.get('distribution_date'))
+        # Solution A — Fall back to _period_to_date when the distribution
+        # row only publishes a "Quarter" label (e.g. Sequoia's "Q1 FY25")
+        # and no explicit date column. Universal — same _period_to_date
+        # already used by valuations/KPI persisters for FY / quarter labels.
+        ddate = (_date(row.get('distribution_date'))
+                 or _period_to_date(row.get('distribution_date'))
+                 or _period_to_date(row.get('period'))
+                 or _period_to_date(row.get('quarter')))
         # Use _first_present (NOT `or`) — Python's `or` treats 0.0 as falsy
         # and falls through, dropping a legitimate ₹0 distribution.
         gross = _d(_first_present(row.get('total_gross_amount'), row.get('gross_amount')))
@@ -2096,6 +2301,18 @@ def _persist_carried_interest(scheme, aggregates: dict, wf: dict, fp: dict):
     _take('carry_amount_net',        'carry_amount_net')
     _take('gp_clawback_provision',   'gp_clawback_provision')
 
+    # Fix 2 (2026-07-06) — Universal carry_amount_net derivation.
+    # If no explicit "Net Carry" cell survived extraction OR reconciliation
+    # (e.g. Sequoia only publishes "Carry Escrow Balance" — correctly
+    # mapped to gp_clawback_provision by Fix D — with no separate net-carry
+    # number), derive net = gross − clawback. Only fires when the
+    # authoritative field is still empty AND both inputs are populated;
+    # extracted values always win.
+    if defaults.get('carry_amount_net') is None:
+        _derived_net = _derive_carry_net(aggregates or {}, wf)
+        if _derived_net is not None:
+            defaults['carry_amount_net'] = _d(_derived_net)
+
     status = _str((wf or {}).get('carry_status'), 16).lower()
     if status in ('indicative', 'crystallised', 'paid'):
         defaults['calculation_status'] = status
@@ -2390,38 +2607,34 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
             # of the fallback order so the user understands the choice.
             _method = agg.get('net_irr_method')
             _ladder_note = (
-                'Priority order: 1) Fund-level XIRR on CapitalCall + Distribution '
-                '(ILPA Net IRR)  →  2) Cost-weighted average of per-investment IRR '
-                '(Gross)  →  3) Fund-level XIRR on Investment cashflows → LP terminal '
-                '(Gross approx).'
+                'Ladder (Option B, 2026-07-07): '
+                '1) Priority 1 XIRR on real dated CapitalCall + Distribution + terminal NAV  '
+                '→  2) Extracted directly from a workbook cell (net_irr_stated)  '
+                '→  3) Insufficient-data blank with itemised reason.'
             )
-            if _method == 'capitalcall_distribution_xirr':
+            if _method == 'priority1_xirr':
                 return (
-                    'Priority 1 (chosen): Fund-level XIRR on CapitalCall + Distribution. ' + _ladder_note,
+                    'Priority 1 (chosen): XIRR on real dated cashflows + terminal NAV. ' + _ladder_note,
                     f'XIRR over {{ {_atomic_call_count} calls totalling −₹{T(_atomic_call_total)} Cr, '
                     f'{_atomic_dist_count} distributions totalling +₹{T(_atomic_dist_total)} Cr, '
                     f'terminal Atomic FV +₹{T(_atomic_fv)} Cr at as_of_date }}'
                 )
-            if _method == 'cost_weighted_per_investment_irr':
-                _cw_num = agg.get('total_invested_capital') or Decimal('0')
+            if _method == 'extracted_cell':
                 return (
-                    'Priority 2 (chosen): Cost-weighted average of per-investment IRR (Gross). ' + _ladder_note,
-                    f'SUM(Investment.total_invested × Investment.irr_pct) / SUM(Investment.total_invested), '
-                    f'across {_cw_num} Cr of workbook-reported IRRs'
+                    'Priority 2 (chosen): Extracted directly from the workbook cell (net_irr_stated). ' + _ladder_note,
+                    'The fund file publishes an explicit Net IRR value in a cell '
+                    '(verified provenance). No XIRR computation performed — the '
+                    'workbook author\'s stated Net IRR is used as-is.'
                 )
-            if _method == 'investment_cashflow_xirr':
-                return (
-                    'Priority 3 (chosen): Fund-level XIRR on Investment cashflows → LP terminal (Gross approx). ' + _ladder_note,
-                    f'XIRR over {{ Investment cost outflows totalling '
-                    f'−₹{T(agg.get("total_invested_capital"))} Cr, '
-                    f'{_atomic_dist_count} distributions totalling +₹{T(_atomic_dist_total)} Cr, '
-                    f'terminal Atomic FV +₹{T(_atomic_fv)} Cr at as_of_date }}'
-                )
-            # No tier produced a value — surface why in the description
+            _reason = (agg.get('reasons') or {}).get('net_irr') if isinstance(agg.get('reasons'), dict) else None
             return (
-                'Net IRR unavailable: no priority tier produced a plausible value. ' + _ladder_note,
-                'No valid cashflow series could be constructed from CapitalCall, '
-                'per-investment IRR, or Investment cost + terminal FV.'
+                'Net IRR unavailable: ' + (_reason or 'insufficient data.') + ' ' + _ladder_note,
+                _reason or (
+                    'Neither Priority 1 (XIRR on real dated cashflows + terminal '
+                    'NAV) nor Priority 2 (extracted workbook cell) produced a '
+                    'value. See the "reasons" block for the itemised list of '
+                    'missing inputs.'
+                )
             )
         return (None, None)
 
@@ -2538,8 +2751,10 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
         'net_irr':                  agg.get('net_irr'),
         # Universal Net-IRR method tag — passes the tier used (Priority 1/2/3)
         # into FundMetric.notes so the frontend can display which computation
-        # produced the value. Values: 'capitalcall_distribution_xirr',
-        # 'cost_weighted_per_investment_irr', 'investment_cashflow_xirr'.
+        # produced the value. Values (Option B, 2026-07-07):
+        #   'priority1_xirr'    — XIRR on real dated cashflows + terminal NAV
+        #   'extracted_cell'    — value published in the workbook
+        #   'insufficient_data' — no computable value; see reasons['net_irr']
         'net_irr_method':           agg.get('net_irr_method'),
         # Totals — aggregator-derived
         'committed_capital':        agg.get('total_committed_capital'),
@@ -2566,7 +2781,19 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
         # values take precedence over formula-computed 0 when atomic ledger
         # lacks per-event GP carry data). Added 2026-06-30.
         'carry_amount_gross':       _zero_if_roc(_first_present(agg.get('carry_amount_gross'),  (wf or {}).get('carry_amount_gross'))),
-        'carry_amount_net':         _zero_if_roc(_first_present(agg.get('carry_amount_net'),    (wf or {}).get('net_carry'), (wf or {}).get('carry_amount_net'))),
+        'carry_amount_net':         _zero_if_roc(_first_present(
+            agg.get('carry_amount_net'),
+            (wf or {}).get('net_carry'),
+            (wf or {}).get('carry_amount_net'),
+            # Fix 2 (2026-07-06) — Universal derivation fallback.
+            # When no explicit "Net Carry" candidate survives the reconciler
+            # (Sequoia case: only "Carry Escrow Balance" was published, and
+            # Fix D correctly reassigned it to clawback), derive
+            #   carry_amount_net = carry_amount_gross − gp_clawback_provision
+            # from the values that ARE known. Fully deterministic; never
+            # fires when an explicit net-carry number was extracted.
+            _derive_carry_net(agg, wf),
+        )),
         'gp_clawback_provision':    _zero_if_roc(_first_present(agg.get('gp_clawback_provision'), (wf or {}).get('clawback_provision'), (wf or {}).get('gp_clawback_provision'))),
         'gp_catchup_amount':        _zero_if_roc(_first_present(agg.get('gp_catchup_amount'),   (wf or {}).get('step_3_catchup_amount'), (wf or {}).get('gp_catchup_amount'))),
         'preferred_return_amount':  _first_present(agg.get('preferred_return_amount'),          (wf or {}).get('step_2_preferred_return'), (wf or {}).get('preferred_return_amount')),
@@ -2585,9 +2812,9 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
 
     count = 0
     _NET_IRR_METHOD_LABELS = {
-        'capitalcall_distribution_xirr': 'Priority 1: Fund-level XIRR on CapitalCall + Distribution',
-        'cost_weighted_per_investment_irr': 'Priority 2: Cost-weighted average of per-investment IRR',
-        'investment_cashflow_xirr': 'Priority 3: Fund-level XIRR on Investment cashflows → LP terminal',
+        'priority1_xirr': 'Calculated — XIRR on real dated cashflows (capital calls + distributions + terminal NAV)',
+        'extracted_cell': 'Extracted — Net IRR read directly from a labelled workbook cell',
+        'insufficient_data': 'Insufficient data — cannot compute or extract; see reasons below',
     }
     for key, raw_value in metric_map.items():
         # net_irr_method is metadata (routes through the metric_map so the
@@ -2599,8 +2826,12 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
         if val is None:
             continue
         prov = _provenance_for(key, raw_value)
-        # For net_irr: attach the priority-tier method used, and a human label
-        # so the frontend can print "Method used: Priority X — <label>".
+        # For net_irr: attach the priority-tier method used, a human label,
+        # and the itemised reasons dict emitted by compute_all_fund_aggregates.
+        # The frontend renders every reason key under the "Method used" panel
+        # so the user sees exactly what inputs were present, what formula
+        # ran, and (in Case 1) both the calculated + extracted values when
+        # they disagree.
         if key == 'net_irr':
             _method_code = agg.get('net_irr_method')
             if _method_code:
@@ -2609,10 +2840,18 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
                     _method_code, _method_code
                 )
                 prov['net_irr_priority_ladder'] = [
-                    'Priority 1: Fund-level XIRR on CapitalCall + Distribution (ILPA Net IRR)',
-                    'Priority 2: Cost-weighted average of per-investment IRR (Gross)',
-                    'Priority 3: Fund-level XIRR on Investment cashflows → LP terminal (Gross approx)',
+                    'Case 1 — Both calculated & extracted present → prefer calculated; show both if they disagree',
+                    'Case 2 — Only calculated → use calculated',
+                    'Case 3 — Only extracted → use extracted (Priority 1 inputs incomplete)',
+                    'Case 4 — Neither → blank with itemised reason',
                 ]
+                _reasons_dict = (agg or {}).get('reasons') or {}
+                for _rk in (
+                    'net_irr_source', 'net_irr_stated_alt', 'net_irr_terminal',
+                ):
+                    _rv = _reasons_dict.get(_rk)
+                    if _rv:
+                        prov[_rk] = _rv
         # For active_fair_value, supplement with the live DB breakdown so
         # the panel can show "= co1 + co2 + ..." with real numbers.
         if key == 'active_fair_value' and contributing_companies:
@@ -2708,9 +2947,22 @@ def _build_pl_line_item_alias_map() -> dict:
     routes to the same canonical key, so no model-layer change is needed.
     """
     from .canonical_schema import CANONICAL_VALUE_CATEGORIES
-    cat = CANONICAL_VALUE_CATEGORIES.get('pl_line_items', {})
+    # Fix 1 (2026-07-06) — fund-level metrics (net_irr / tvpi / portfolio_fv)
+    # are valid BvA line items (present in LINE_ITEM_CHOICES) but they live
+    # in the `fund_metrics` category of the canonical schema, not
+    # `pl_line_items`. Merge both so BvA sheets that publish "Net IRR" /
+    # "TVPI" / "Portfolio FV" alongside "Portfolio Revenue" / "EBITDA"
+    # all resolve. Universal — every fund whose BvA sheet mixes fund and
+    # portfolio metrics benefits; per-company BvA sheets are unaffected
+    # because their line items match on the pl_line_items branch.
+    merged: dict[str, str] = {}
+    for cat_key in ('pl_line_items', 'fund_metrics'):
+        for canonical_key, description in (
+            CANONICAL_VALUE_CATEGORIES.get(cat_key) or {}
+        ).items():
+            merged.setdefault(canonical_key, description)
     alias_map = {}
-    for canonical_key, description in cat.items():
+    for canonical_key, description in merged.items():
         # Description shape: "Alias1 / Alias2 / Alias3 — long explanation"
         head = description.split('—', 1)[0].strip() if '—' in description else description.strip()
         for alias in head.split('/'):
@@ -2819,7 +3071,17 @@ def _persist_budget_vs_actual(organization, fund, rows: list) -> int:
         return 0
 
     fallback_period = None
-    if any(isinstance(r, dict) and not r.get('period') for r in rows):
+    # Fix 1 (2026-07-06) — trigger fallback when ANY row's period is missing
+    # OR unparseable (e.g. Sequoia BvA has period='994' — Gemini misassigned
+    # the "Total" numeric column to the period slot). Old rule (`not
+    # r.get('period')`) missed those cases and dropped every row for
+    # `no_period`. Universal — files whose periods parse cleanly still see
+    # zero effect (fallback is never consulted).
+    _needs_fallback = any(
+        isinstance(r, dict) and _bva_parse_period(r.get('period')) is None
+        for r in rows
+    )
+    if _needs_fallback:
         latest_nav = (NAVRecord.objects.filter(scheme__fund=fund)
                       .order_by('-nav_date').first())
         if latest_nav and latest_nav.nav_date:
@@ -2827,7 +3089,7 @@ def _persist_budget_vs_actual(organization, fund, rows: list) -> int:
             fy_end = y + 1 if m > 3 else y   # Indian FY ends 31 March
             fallback_period = {'period_year': fy_end, 'period_type': 'annual'}
             logger.info(
-                f'[phase2.bva] period fallback: no period column in sheet — '
+                f'[phase2.bva] period fallback: unparseable / missing period — '
                 f'using FY {fy_end - 1}-{str(fy_end)[-2:]} (from latest NAV '
                 f'{latest_nav.nav_date.isoformat()})'
             )
@@ -2836,14 +3098,61 @@ def _persist_budget_vs_actual(organization, fund, rows: list) -> int:
     skipped_no_co = 0
     skipped_no_line = 0
     skipped_no_period = 0
+    # Fix 1 (2026-07-06) — Fund-level BVA rows.
+    # Some workbooks (Sequoia MIS "Budget vs Actual" sheet) publish BvA at
+    # the fund aggregate level: line_item="Portfolio Revenue" / "EBITDA" /
+    # "Portfolio FV" / "Net IRR" / "TVPI" with budget + actual + variance
+    # but NO per-company scoping. Attach the fund-aggregate sentinel
+    # PortfolioCompany so these rows persist through the existing lookup
+    # chain unchanged. Sentinel is created lazily via all_objects (custom
+    # manager hides it from every user-facing query).
+    #
+    # Universal: the same sentinel is reused by the KPI persister for
+    # fund-level Monthly P&L rows. Per-company BvA rows keep the existing
+    # path and never touch the sentinel.
+    from dataimport.phase6_extractor.unified_builder import (
+        FUND_AGGREGATE_SENTINEL,
+    )
+    _sentinel_co = None
+    def _get_sentinel_co():
+        nonlocal _sentinel_co
+        if _sentinel_co is not None:
+            return _sentinel_co
+        _sentinel_co = PortfolioCompany.all_objects.filter(
+            organization=organization, name=FUND_AGGREGATE_SENTINEL,
+        ).first()
+        if _sentinel_co is None:
+            _sentinel_co, _ = PortfolioCompany.all_objects.update_or_create(
+                organization=organization,
+                name=FUND_AGGREGATE_SENTINEL,
+                defaults={
+                    'is_active': False,
+                    'is_aggregate': True,
+                    'sector': '__fund_aggregate__',
+                    'description': (
+                        'Sentinel row for fund-level aggregate KPIs '
+                        '(Monthly P&L, Budget vs Actual). Not a real '
+                        'portfolio company — excluded from every '
+                        'user-facing query by the default manager.'
+                    ),
+                },
+            )
+        return _sentinel_co
+
     for row in rows:
         if not isinstance(row, dict):
             continue
         co_name = _str(row.get('company_name'), 255)
         line_item_raw = row.get('line_item')
-        if not co_name or not line_item_raw:
+        if not line_item_raw:
             continue
-        co = PortfolioCompany.objects.filter(organization=organization, name=co_name).first()
+        if not co_name:
+            # Fund-level row — route to the sentinel PortfolioCompany.
+            co = _get_sentinel_co()
+        else:
+            co = PortfolioCompany.objects.filter(
+                organization=organization, name=co_name,
+            ).first()
         if not co:
             skipped_no_co += 1
             continue
@@ -2986,16 +3295,77 @@ def _persist_portfolio_kpis(organization, scheme, rows: list) -> int:
             period_date = fallback_period_date
         if period_date is None:
             continue
-        co = PortfolioCompany.objects.filter(organization=organization, name=co_name).first()
+        # Fix C — Fund-level P&L sentinel handling.
+        # unified_builder pivots fund-level Monthly P&L rows into KPI shape
+        # tagged with a sentinel company_name. Auto-create the sentinel
+        # PortfolioCompany + Investment shell (is_aggregate=True hides them
+        # from every user-facing query via the custom manager) so the KPI
+        # derivation ladder below runs unchanged and every fund-level P&L
+        # row lands in PortfolioKPI. Universal — fires only for the
+        # sentinel name; every other row goes through the regular path.
+        from dataimport.phase6_extractor.unified_builder import (
+            FUND_AGGREGATE_SENTINEL,
+        )
+        if co_name == FUND_AGGREGATE_SENTINEL:
+            co = PortfolioCompany.all_objects.filter(
+                organization=organization, name=co_name,
+            ).first()
+            if co is None:
+                co, _ = PortfolioCompany.all_objects.update_or_create(
+                    organization=organization,
+                    name=co_name,
+                    defaults={
+                        'is_active': False,
+                        'is_aggregate': True,
+                        'sector': '__fund_aggregate__',
+                        'description': (
+                            'Sentinel row for fund-level aggregate KPIs '
+                            '(Monthly P&L, Budget vs Actual). Not a real '
+                            'portfolio company — excluded from every '
+                            'user-facing query by the default manager.'
+                        ),
+                    },
+                )
+        else:
+            co = PortfolioCompany.objects.filter(
+                organization=organization, name=co_name,
+            ).first()
         if not co:
             continue
-        inv = Investment.objects.filter(scheme=scheme, portfolio_company=co).first()
+        # For the sentinel case, use `all_objects` so the newly-added
+        # Investment default manager (which hides is_aggregate=True rows)
+        # doesn't hide our own shell from ourselves on re-imports.
+        _inv_qs = Investment.all_objects if co.is_aggregate else Investment.objects
+        inv = _inv_qs.filter(scheme=scheme, portfolio_company=co).first()
         if inv is None:
-            # PortfolioKPI.investment is a required FK. Skip rows where no
-            # Investment exists for this (scheme, company) — happens when the
-            # KPI sheet covers a company whose investment row was not
-            # extracted (rare) or doesn't exist in source. Universal.
-            continue
+            if co.is_aggregate:
+                # Sentinel shell Investment — anchors PortfolioKPI FK without
+                # touching real Investment analytics. Zero commit / zero cost;
+                # investment_date pinned to fund's earliest anchor so ordering
+                # (tranche → exit) never treats it as a real deployment.
+                inv_date_hint = (
+                    getattr(scheme, 'first_close_date', None)
+                    or getattr(scheme, 'final_close_date', None)
+                )
+                if inv_date_hint is None and fallback_period_date is not None:
+                    inv_date_hint = fallback_period_date
+                inv, _ = Investment.all_objects.update_or_create(
+                    scheme=scheme,
+                    portfolio_company=co,
+                    defaults={
+                        'company_name': co_name,
+                        'total_invested': Decimal('0'),
+                        'investment_date': inv_date_hint,
+                        'sector': '__fund_aggregate__',
+                        'status': 'active',
+                    },
+                )
+            else:
+                # PortfolioKPI.investment is a required FK. Skip rows where no
+                # Investment exists for this (scheme, company) — happens when
+                # the KPI sheet covers a company whose investment row was not
+                # extracted (rare) or doesn't exist in source. Universal.
+                continue
 
         # ── Universal kpi_name/kpi_value discriminator routing ──────────
         # Some workbooks compress multiple SaaS metrics into ONE value
@@ -3067,9 +3437,20 @@ def _persist_portfolio_kpis(organization, scheme, rows: list) -> int:
             row.setdefault('gross_profit', gp)
             row.setdefault('gross_margin_pct', (gp / _rev) * Decimal('100'))
             # EBITDA = Revenue - COGS - OpEx (R&D + S&M + G&A). Excludes D&A.
-            ebitda = _rev - _cogs - _rd - _mktg - _ga
-            row.setdefault('ebitda', ebitda)
-            row.setdefault('ebitda_margin_pct', (ebitda / _rev) * Decimal('100'))
+            computed_ebitda = _rev - _cogs - _rd - _mktg - _ga
+            row.setdefault('ebitda', computed_ebitda)
+            # EBITDA margin — use the row's EBITDA (explicit from the sheet
+            # if present, else the computed value). Universal correctness:
+            # fund-level P&L sheets often publish EBITDA directly without an
+            # OpEx breakdown, in which case computed_ebitda collapses to
+            # gross_profit (rev-cogs-0-0-0) and would report the wrong
+            # margin. `setdefault` above preserved the explicit value; read
+            # it back here so the margin matches whatever ebitda we actually
+            # persist.
+            _row_ebitda = _d(row.get('ebitda'))
+            if _row_ebitda is not None:
+                row.setdefault('ebitda_margin_pct',
+                               (_row_ebitda / _rev) * Decimal('100'))
 
         # CAC = S&M spend / new customers acquired. Convert Cr → INR
         # (₹1 Cr = ₹1,00,00,000) so the tile shows a real per-customer cost.
@@ -3092,6 +3473,56 @@ def _persist_portfolio_kpis(organization, scheme, rows: list) -> int:
         _cac = _d(row.get('cac'))
         if _ltv and _cac and _cac > 0:
             row.setdefault('ltv_cac_ratio', _ltv / _cac)
+
+        # ── Fix E — Universal SaaS + Commerce KPI back-fills ────────────
+        # Every fund's KPI / SaaS Metrics sheet publishes a slightly
+        # different subset. The dashboard renders the same tile grid for
+        # every fund, so blanks look like broken extraction even when the
+        # underlying value is trivially derivable from what IS present.
+        # Each block below fires only when its inputs exist AND the target
+        # field is currently missing (`setdefault`), so a value published
+        # directly by the sheet always wins over a derived one.
+        # Universal — no fund-specific mapping.
+
+        # MRR ↔ ARR bidirectional (SaaS textbook: ARR = MRR × 12).
+        _mrr = _d(row.get('mrr'))
+        _arr_now = _d(row.get('arr'))
+        if _mrr and _arr_now is None:
+            row.setdefault('arr', _mrr * Decimal('12'))
+        elif _arr_now and _mrr is None:
+            row.setdefault('mrr', _arr_now / Decimal('12'))
+
+        # AOV / GMV / Orders triangle — any two derives the third.
+        _gmv    = _d(row.get('gmv'))
+        _orders = _d(row.get('orders'))
+        _aov    = _d(row.get('aov'))
+        if _gmv and _orders and _orders > 0 and _aov is None:
+            # AOV: rupees per order. GMV usually in Cr; convert to ₹.
+            row.setdefault('aov', (_gmv * Decimal('10000000')) / _orders)
+        elif _gmv and _aov and _aov > 0 and _orders is None:
+            row.setdefault('orders', (_gmv * Decimal('10000000')) / _aov)
+        elif _orders and _aov and _orders > 0 and _aov > 0 and _gmv is None:
+            # Reverse: infer GMV in Cr from orders × AOV(₹).
+            row.setdefault('gmv', (_orders * _aov) / Decimal('10000000'))
+
+        # Churn from customer flow when explicit churn rate absent.
+        _churn_cust = _d(_first_present(
+            row.get('churned_customers'), row.get('lost_customers'),
+            row.get('churn_count')))
+        if (_churn_cust is not None and _cust and _cust > 0
+                and row.get('churn_rate') in (None, '')):
+            row.setdefault('churn_rate', (_churn_cust / _cust) * Decimal('100'))
+
+        # Revenue back-fill from GMV when the sheet only publishes GMV
+        # (marketplaces / commerce funds). Uses take-rate if published;
+        # otherwise skipped (we never fabricate a rate).
+        _take_rate_pct = _d(_first_present(
+            row.get('take_rate_pct'), row.get('take_rate'),
+            row.get('commission_pct')))
+        if (row.get('revenue') in (None, '')
+                and _gmv and _gmv > 0
+                and _take_rate_pct and _take_rate_pct > 0):
+            row.setdefault('revenue', _gmv * _take_rate_pct / Decimal('100'))
 
         for fname in kpi_fields:
             val = _d(row.get(fname))

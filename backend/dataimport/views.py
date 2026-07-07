@@ -60,8 +60,8 @@ logger = logging.getLogger(__name__)
 # Startup banner — emitted once at import time so the active extractor path
 # and Gemini model are visible in every server log.
 import os as _os_boot
-_boot_phase6 = _os_boot.environ.get('USE_PHASE6', 'false').lower() in ('true', '1', 'yes')
-_boot_phase3 = _os_boot.environ.get('USE_PHASE3', 'true').lower() in ('true', '1', 'yes')
+_boot_phase6 = _os_boot.environ.get('USE_PHASE6', 'true').lower() in ('true', '1', 'yes')
+_boot_phase3 = _os_boot.environ.get('USE_PHASE3', 'false').lower() in ('true', '1', 'yes')
 _boot_model = _os_boot.environ.get('GEMINI_MODEL', 'gemini-2.5-flash')
 _boot_vertex = _os_boot.environ.get('GOOGLE_GENAI_USE_VERTEXAI', 'False').lower() in ('true', '1', 'yes')
 _boot_backend = 'Vertex AI (ADC)' if _boot_vertex else 'AI Studio (api_key)'
@@ -278,12 +278,12 @@ def _import_event_generator(job, user):
     """
     import django.db
     import os as _os
-    # Phase 6 (semantic classify + deterministic Python rows) — takes priority
-    # when USE_PHASE6=true. Otherwise Phase 3 (Flavor A+B parallel layers) —
-    # DEFAULT-ON. Set USE_PHASE3=false to fall back to the single-call extractor
-    # (emergency only).
-    _USE_PHASE6 = _os.environ.get('USE_PHASE6', 'false').lower() in ('true', '1', 'yes')
-    _USE_PHASE3 = _os.environ.get('USE_PHASE3', 'true').lower() in ('true', '1', 'yes')
+    # Phase 6 (semantic classify + deterministic Python rows) — DEFAULT-ON.
+    # Phase 3 (Flavor A+B parallel layers) is legacy and only runs when
+    # explicitly opted in via USE_PHASE3=true. Set USE_PHASE6=false AND
+    # USE_PHASE3=false to fall back to the single-call extractor (emergency).
+    _USE_PHASE6 = _os.environ.get('USE_PHASE6', 'true').lower() in ('true', '1', 'yes')
+    _USE_PHASE3 = _os.environ.get('USE_PHASE3', 'false').lower() in ('true', '1', 'yes')
 
     pending_files = list(job.files.filter(status='pending'))
     if not pending_files:

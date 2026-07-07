@@ -13,10 +13,225 @@ This module is where all shape-translation happens — extractors emit domain-
 agnostic dicts; here we route them into the correct top-level bucket and
 translate label slugs → canonical persister field names.
 """
+import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from .coercers import extract_pct
+
+
+# ── Fund-level P&L pivot (Fix C) ────────────────────────────────────────────
+# Sentinel PortfolioCompany name used to attach fund-level KPIs (Monthly P&L,
+# BvA, aggregate metrics) to the existing PortfolioKPI table. The persister
+# auto-creates a real PortfolioCompany row with is_aggregate=True the first
+# time it sees this name; the custom manager hides that row from every
+# user-facing query. Universal — every fund that publishes fund-level P&L
+# lands in the same slot; no per-fund configuration.
+FUND_AGGREGATE_SENTINEL = '__FUND_PORTFOLIO_AGGREGATE__'
+
+# Universal P&L line-item label → canonical KPI field name.
+# The persister's derivation block (revenue - cogs - opex → EBITDA + margins)
+# consumes these canonical field names, so once we pivot line_item rows onto
+# these fields the existing derivation ladder runs unchanged.
+_PL_LINE_ITEM_ALIAS: dict[str, str] = {
+    # Revenue
+    'revenue': 'revenue',
+    'portfolio revenue': 'revenue',
+    'total revenue': 'revenue',
+    'net revenue': 'revenue',
+    'net sales': 'revenue',
+    'gross revenue': 'revenue',
+    'top line': 'revenue',
+    'turnover': 'revenue',
+    'sales': 'revenue',
+    'operating revenue': 'revenue',
+    # COGS
+    'cogs': 'cogs',
+    'portfolio cogs': 'cogs',
+    'cost of goods sold': 'cogs',
+    'cost of revenue': 'cogs',
+    'cost of sales': 'cogs',
+    'direct cost': 'cogs',
+    'direct costs': 'cogs',
+    # Gross profit — "gross margin" alone is ambiguous with the ratio
+    # (Gross Margin %), so we only accept the unambiguous "gross profit" here.
+    'gross profit': 'gross_profit',
+    # Operating expenses
+    'r d cost': 'rd_cost',
+    'r and d': 'rd_cost',
+    'r and d cost': 'rd_cost',
+    'research and development': 'rd_cost',
+    'rnd': 'rd_cost',
+    'marketing cost': 'marketing_cost',
+    's and m': 'marketing_cost',
+    's and m cost': 'marketing_cost',
+    'sales and marketing': 'marketing_cost',
+    'sales marketing': 'marketing_cost',
+    'sm cost': 'marketing_cost',
+    'g and a': 'g_and_a',
+    'g and a cost': 'g_and_a',
+    'general and admin': 'g_and_a',
+    'general and administration': 'g_and_a',
+    'sga': 'g_and_a',
+    # EBITDA / Depreciation / PAT
+    'ebitda': 'ebitda',
+    'operating profit': 'ebitda',
+    'operating income': 'ebitda',
+    'depreciation': 'depreciation',
+    'depreciation and amortisation': 'depreciation',
+    'depreciation and amortization': 'depreciation',
+    'd and a': 'depreciation',
+    'pat': 'pat',
+    'net income': 'pat',
+    'net profit': 'pat',
+    'profit after tax': 'pat',
+    'bottom line': 'pat',
+    # Balance-sheet + cash lines that also appear on portfolio-level BS/CF sheets
+    'total assets': 'total_assets',
+    'total debt': 'total_debt',
+    'cash and equivalents': 'cash_balance',
+    'cash balance': 'cash_balance',
+    'net worth': 'net_worth',
+}
+
+
+# Canonical fields that represent COSTS / EXPENSES. Sheets in accounting
+# convention publish these as negative numbers (visual subtraction from the
+# preceding subtotal). We store the mathematical magnitude — always positive
+# — so the persister's derivation ladder (rev - cogs → gross_profit) yields
+# the right sign. Applied at pivot time in _pivot_fund_level_pl. Universal.
+_COST_FIELDS = {
+    'cogs', 'rd_cost', 'marketing_cost', 'g_and_a', 'depreciation',
+    'tax', 'finance_cost',
+}
+
+# Longest-alias-first list — used for substring matching so labels like
+# "(-) COGS / Cost of Services" resolve to `cogs` (not to a partial hit
+# on `revenue` embedded in "cost of revenue"). Rebuilt on module import.
+_PL_ALIAS_KEYS_LONGEST_FIRST = sorted(
+    _PL_LINE_ITEM_ALIAS.keys(), key=len, reverse=True,
+)
+
+
+def _canon_pl_line_item(text: Any) -> str | None:
+    """Normalise a P&L line-item label and look up its canonical field name.
+
+    Universal — case-insensitive, punctuation-insensitive, unit-suffix stripped.
+    Percentage-suffixed rows (Gross Margin %, EBITDA Margin) are intentionally
+    skipped: the persister re-derives those ratios from the amount inputs, and
+    accepting the pre-computed % here would double-count and mis-map the value.
+    Returns None when the label doesn't match a known P&L / BS line item; the
+    caller then leaves the row alone (no fabrication).
+    """
+    if text is None:
+        return None
+    raw = str(text)
+    # Percentage rows are derived quantities — skip.
+    if '%' in raw:
+        return None
+    s = raw.lower()
+    s = re.sub(r'\([^)]*\)', ' ', s)          # strip "(Cr)", "(₹Cr)", "(-)" etc.
+    s = re.sub(r'\s*&\s*', ' and ', s)        # 'D&A' → 'd and a' (before punctuation strip)
+    s = re.sub(r'[^a-z0-9\s]+', ' ', s)       # keep letters/digits/spaces
+    s = re.sub(r'\s+', ' ', s).strip()
+    if not s:
+        return None
+    # Ratio-flavoured labels (e.g. "EBITDA Margin", "Gross Margin", "Debt to
+    # Equity Ratio") are always derived percentages; skip so we don't
+    # accidentally store a fraction (0.221 = 22.1%) as an amount field.
+    if re.search(r'\bmargin\b|\bratio\b', s):
+        return None
+    # Exact match first — cheapest and unambiguous.
+    exact = _PL_LINE_ITEM_ALIAS.get(s)
+    if exact:
+        return exact
+    # Longest-alias-first substring match — resolves accounting-style labels
+    # like "less cogs cost of services" or "gross profit before depreciation"
+    # without falling back to a shorter-alias false positive.
+    for alias in _PL_ALIAS_KEYS_LONGEST_FIRST:
+        if ' ' in alias:
+            if alias in s:
+                return _PL_LINE_ITEM_ALIAS[alias]
+        else:
+            # Single-word alias — require token boundary so 'revenue' doesn't
+            # match inside 'cost of revenue' (which should map to cogs).
+            if re.search(rf'\b{re.escape(alias)}\b', s):
+                return _PL_LINE_ITEM_ALIAS[alias]
+    return None
+
+
+def _pivot_fund_level_pl(pl_rows: list[dict]) -> list[dict]:
+    """Group fund-level P&L rows by period → one dict per period with canonical
+    field names, ready for the KPI persister's derivation ladder.
+
+    Fund-level rows are identified by:
+      • presence of `line_item` (or `label` / `metric`)
+      • presence of a period signal (`period` field OR `valuation_date`)
+      • presence of a numeric value (`period_value`, `value`, `amount`)
+      • absence of `company_name` (per-company rows keep the existing path)
+
+    Universal — matches every fund that publishes fund-level Monthly P&L in
+    a Line Item × Period matrix. No sheet-name / fund-name hardcoding.
+    Rows that don't match this signature are ignored (returned as empty list),
+    leaving the caller's per-company routing untouched.
+    """
+    if not pl_rows:
+        return []
+    pivoted: dict[str, dict] = {}
+    for r in pl_rows:
+        if not isinstance(r, dict):
+            continue
+        if r.get('company_name'):
+            continue
+        line_item = r.get('line_item') or r.get('label') or r.get('metric')
+        canon_field = _canon_pl_line_item(line_item)
+        if not canon_field:
+            continue
+        period_label = r.get('period')
+        period_end = r.get('valuation_date') or r.get('period_end')
+        # Pick the raw value: prefer explicit period_value, then any numeric
+        # canonical variant, then generic 'value' / 'amount'.
+        raw_val = (r.get('period_value')
+                   if 'period_value' in r else None)
+        if raw_val is None:
+            raw_val = r.get('value') if 'value' in r else None
+        if raw_val is None:
+            raw_val = r.get('amount') if 'amount' in r else None
+        if raw_val is None:
+            continue
+        try:
+            num_val = Decimal(str(raw_val).replace(',', '').strip())
+        except (ValueError, InvalidOperation, AttributeError):
+            continue
+        # Fix 3 — Cost-field sign normalisation. Accounting-format sheets
+        # publish costs as negative numbers (visual subtraction from the
+        # subtotal row above). The persister's derivation ladder
+        # (revenue - cogs = gross_profit) expects the mathematical
+        # magnitude, so we take abs() for known cost canonical fields.
+        # Non-cost fields (revenue, ebitda, pat) preserve their sign so
+        # an operating LOSS remains negative.
+        if canon_field in _COST_FIELDS and num_val < 0:
+            num_val = -num_val
+        # Group key: prefer date-shaped period_end for correct ordering,
+        # else fall back to the raw period label, else a single-slot 'total'
+        # (used by the headerless-MIS rescue — one aggregate row per fund).
+        if period_end:
+            group_key = str(period_end)
+        elif period_label:
+            group_key = str(period_label)
+        else:
+            group_key = '__fund_total__'
+        slot = pivoted.setdefault(group_key, {
+            'company_name': FUND_AGGREGATE_SENTINEL,
+        })
+        if period_label and 'period' not in slot:
+            slot['period'] = period_label
+        if period_end and 'period_end' not in slot:
+            slot['period_end'] = period_end
+        # Universal non-clobber: keep first-seen value if the same canonical
+        # field is set by two different line-item labels (unlikely but safe).
+        slot.setdefault(canon_field, num_val)
+    return list(pivoted.values())
 
 
 # ── Fund master: label-slug → persister field name ──────────────────────────
@@ -112,11 +327,35 @@ _FUND_MASTER_SLUG_ALIAS: dict[str, str] = {
     'portfolio_moic_x': 'moic',
     'net_irr_estimated': 'net_irr',
     'net_irr_estimated_pct': 'net_irr',
+    'net_irr_post_fees_carry': 'net_irr',
+    'gross_irr_pre_fees': 'gross_irr',
     'dpi_estimated': 'dpi',
     'dpi_estimated_x': 'dpi',
     'rvpi_estimated': 'rvpi',
     'rvpi_estimated_x': 'rvpi',
     'deployment': 'deployment_pct',
+    # Solution D — Fund_Master summary-block aliases (Sequoia-style
+    # PERFORMANCE SUMMARY rows). Additive: each aliases an EXISTING
+    # canonical field, never introduces a new one. Files that don't
+    # publish these labels see no behavior change.
+    'lp_distributions_cumulative': 'total_distributions',
+    'lp_distributions': 'total_distributions',
+    'total_lp_distributions': 'total_distributions',
+    'total_lp_distributions_cumulative': 'total_distributions',
+    'exit_proceeds_cumulative': 'total_realised_proceeds',
+    'cumulative_exit_proceeds': 'total_realised_proceeds',
+    'preferred_return_accrued': 'preferred_return_amount',
+    'preferred_return_amount': 'preferred_return_amount',
+    'carry_provision_escrow': 'carry_amount_net',
+    'carry_escrow_balance': 'carry_amount_net',
+    'active_portfolio_fv': 'total_portfolio_fv',
+    'active_portfolio_cost': 'active_portfolio_cost',
+    'closing_fund_nav': 'total_nav',
+    'net_asset_value_closing': 'total_nav',
+    'nav_per_unit_rs': 'nav_per_unit',
+    'nav_per_unit': 'nav_per_unit',
+    'unrealised_gain_fv_cost': 'unrealized_gain',
+    'unrealised_gain': 'unrealized_gain',
 }
 
 
@@ -174,6 +413,34 @@ _WATERFALL_AGG_ALIAS: dict[str, str] = {
     # LP share
     'lp_share_from_step_4':                'lp_total_return',
     'lp_total_return':                     'lp_total_return',
+    # Solution D — Waterfall / Fund_Master summary aliases (Sequoia
+    # WATERFALL sheet + Fund_Master PERFORMANCE SUMMARY block).
+    # All map to metric names the reconciler + persister recognize
+    # (carry_amount_gross, carry_amount_net, carry_base, etc.). No new
+    # canonical fields are introduced — files that don't publish these
+    # labels are unaffected.
+    'profit_above_hurdle':                 'carry_base',
+    'carry_provision_20':                  'carry_amount_gross',
+    'carry_provision':                     'carry_amount_gross',
+    'preferred_return_accrued':            'preferred_return_amount',
+    # Fix D (2026-07-06 Sequoia clawback fix) — "Carry Escrow Balance" and
+    # "Carry Provision (Escrow)" are amounts HELD ASIDE against future
+    # clawback, not the final net carry. Aliasing to gp_clawback_provision
+    # is semantically correct AND surfaces the value on the dashboard's
+    # "Clawback Provision" tile. Downstream Python still computes
+    # carry_amount_net = carry_amount_gross - gp_clawback_provision.
+    # Universal: files using explicit "Net Carry" labels use different
+    # aliases (net_carry, carry_amount_net_after_holdback) that still
+    # map to carry_amount_net unchanged.
+    'carry_provision_escrow':              'gp_clawback_provision',
+    'carry_escrow_balance':                'gp_clawback_provision',
+    'lp_distributions_cumulative':         'total_distributions',
+    'lp_distributions':                    'total_distributions',
+    'total_lp_distributions_cumulative':   'total_distributions',
+    'exit_proceeds_cumulative':            'total_realised_proceeds',
+    'cumulative_exit_proceeds':            'total_realised_proceeds',
+    'gross_value_exits_active_fv':         'gross_portfolio_value',
+    'gross_value':                         'gross_portfolio_value',
 }
 
 
@@ -314,12 +581,101 @@ def build_unified_json(per_sheet: dict, workbook_data: dict) -> dict:
 
     capital_calls_events = events_by_dom.get('capital_calls', [])
     capital_calls_rows = by_dom.get('capital_calls', [])
-    capital_calls = capital_calls_events if capital_calls_events else capital_calls_rows
+
+    # Fix A — row-shape filter for the capital_calls bucket.
+    #
+    # When Gemini classifies a sheet as `capital_calls` domain, Stage 2 emits
+    # EVERY row from that sheet into this bucket. But CAPITAL_CALLS sheets in
+    # real workbooks often have TWO sections:
+    #   (1) top: call-level rows with call_date + amount columns  ← real calls
+    #   (2) bottom: LP-level "capital call tracking" rows with
+    #       investor_name + commitment_amount + per-call allocations
+    #
+    # Without filtering, section (2) rows land in capital_calls without any
+    # call_date, and the persister's date fallback turns them into phantom
+    # rows dated today. This poisons Priority 1 XIRR (dated cashflows).
+    #
+    # Universal rule: a real capital call ALWAYS has at least one of these
+    # call-EVENT signals. LP-commitment/KYC rows never carry any of them.
+    #
+    # Tightened 2026-07-07 after enriching CAPITAL_CALLS_FIELDS aliases.
+    # Broader signals (call_percentage, total_call_amount, purpose) CAN
+    # appear on LP-level rows too — e.g. an LP-pivot column called "% of
+    # Commit" would alias to call_percentage; "Total Called (Cr)" to
+    # total_call_amount. Restricting to strict event-shape signals
+    # (date/number/ref) guarantees LP rows never leak into capital_calls
+    # regardless of how the alias index is enriched in the future.
+    _CALL_SHAPE_SIGNALS = ('call_date', 'call_number', 'call_ref')
+
+    def _looks_like_capital_call(row: dict) -> bool:
+        if not isinstance(row, dict):
+            return False
+        for k in _CALL_SHAPE_SIGNALS:
+            v = row.get(k)
+            if v not in (None, '', [], {}):
+                return True
+        return False
+
+    def _split(rows):
+        keep, reroute = [], []
+        for r in rows:
+            (keep if _looks_like_capital_call(r) else reroute).append(r)
+        return keep, reroute
+
+    _cc_events_keep, _cc_events_reroute = _split(capital_calls_events)
+    _cc_rows_keep,   _cc_rows_reroute   = _split(capital_calls_rows)
+    capital_calls = _cc_events_keep if _cc_events_keep else _cc_rows_keep
+
+    # Reroute LP-shape rows to the commitments bucket so their commitment /
+    # KYC info isn't lost when the LP_Register sheet is thin or missing. Dedup
+    # by investor_name against the commitments already built above (line 579).
+    _reroute = [r for r in (_cc_events_reroute + _cc_rows_reroute)
+                if isinstance(r, dict) and r.get('investor_name')]
+    if _reroute:
+        _seen_names = {c.get('investor_name') for c in commitments if c.get('investor_name')}
+        for r in _reroute:
+            _n = r.get('investor_name')
+            if _n and _n not in _seen_names:
+                commitments.append(dict(r))
+                investors.append(dict(r))
+                _seen_names.add(_n)
 
     dist_events = events_by_dom.get('exits_distributions', [])
     dist_rows = by_dom.get('exits_distributions', [])
+
+    # Solution A — widened distribution routing.
+    # A row is a Distribution when EITHER it has an explicit distribution_date
+    # OR it carries a distribution-signature field (numeric distribution_number
+    # OR total_gross_amount + period) AND does NOT carry an exit_date.
+    # This lets stacked-section extracted rows (Sequoia "DISTRIBUTION SCHEDULE"
+    # sub-table below Exits) reach the persister even without an explicit
+    # date column. exit_date exclusion prevents double-classification.
+    #
+    # Junk-row guard: distribution_number must be numeric-shaped (not a
+    # validation footer like "Validation: Sum distributions = ..."). Rejects
+    # the row-below-data trailer common in structured mock sheets.
+    def _looks_like_distribution(r: dict) -> bool:
+        if r.get('exit_date'):
+            return False
+        if r.get('distribution_date'):
+            return True
+        dn = r.get('distribution_number')
+        # Require distribution_number to be numeric OR a short numeric-looking
+        # string. Reject long text (validation footers etc.).
+        dn_is_numeric = isinstance(dn, (int, float, Decimal)) or (
+            isinstance(dn, str) and len(dn) < 12
+            and any(ch.isdigit() for ch in dn)
+        )
+        has_amount = (r.get('total_gross_amount') is not None
+                      or r.get('total_net_amount') is not None)
+        if dn_is_numeric and has_amount:
+            return True
+        if r.get('period') and has_amount:
+            return True
+        return False
+
     distributions = [e for e in dist_events if e.get('distribution_date')] \
-        + [r for r in dist_rows if r.get('distribution_date')]
+        + [r for r in dist_rows if _looks_like_distribution(r)]
 
     exit_rows = by_dom.get('exits_distributions', [])
     exits = [r for r in exit_rows if r.get('exit_date')]
@@ -448,6 +804,65 @@ def build_unified_json(per_sheet: dict, workbook_data: dict) -> dict:
         if any(k in row for k in _NAV_SIGNATURE):
             nav_records.append(row)
 
+    # Fix 3 — universal wide-period NAV rescue.
+    #
+    # Some workbooks publish NAV as a pivot: row-labels are balance-sheet
+    # components ("Closing Fund NAV", "Portfolio Fair Value"), columns are
+    # periods (Oct-24, Nov-24, …). extract_wide_period unpivots these to
+    # {line_item, period, period_value} rows. The tabular NAV_SIGNATURE
+    # match above doesn't catch them because they carry line_item shape,
+    # not balance-sheet aggregate fields. This block detects the wide-
+    # period rows whose line_item aliases match a NAV concept and emits
+    # one NAV record per period, letting the persister's period→date
+    # helper handle the FY/quarter/month parsing.
+    #
+    # Non-regressing: dedup by period label against nav_records that
+    # already carry that period, and against nav_date directly. Sheets
+    # with proper tabular NAV extraction (Bharatcrest 13 monthly rows,
+    # Trivesta 19) emit no line_item-shape rows and see zero change.
+    _NAV_LINE_ITEM_ALIASES = {
+        'closing_fund_nav', 'closing_nav', 'total_nav', 'net_asset_value',
+        'fund_nav', 'net_nav', 'total_fund_nav', 'gross_nav',
+        'closing_fund_nav_cr', 'closing_nav_cr', 'total_fund_nav_cr',
+        'closing_nav_before_carry', 'net_asset_value_closing_nav',
+    }
+    _existing_period_labels: set = set()
+    for _r in nav_records:
+        for _k in ('nav_date', 'period', 'date', 'period_end',
+                   'quarter', 'month', 'financial_year'):
+            _v = _r.get(_k)
+            if _v:
+                _existing_period_labels.add(str(_v))
+    for _dom in ('nav_accounting', 'nav_calculation'):
+        for _row in by_dom.get(_dom, []):
+            if not isinstance(_row, dict):
+                continue
+            _li = (_row.get('line_item') or _row.get('metric_name')
+                   or _row.get('component'))
+            _period = (_row.get('period') or _row.get('period_end')
+                       or _row.get('quarter') or _row.get('month'))
+            _value = _row.get('period_value')
+            if _value is None:
+                _value = _row.get('value')
+            if not _li or not _period or _value is None:
+                continue
+            _slug = re.sub(r'[^a-z0-9]+', '_', str(_li).lower()).strip('_')
+            if _slug not in _NAV_LINE_ITEM_ALIASES:
+                continue
+            if str(_period) in _existing_period_labels:
+                continue
+            try:
+                if isinstance(_value, Decimal):
+                    _num = _value
+                else:
+                    _num = Decimal(str(_value).replace(',', '').strip())
+            except (ValueError, InvalidOperation, AttributeError):
+                continue
+            if _num == 0:
+                continue
+            nav_records.append({'period': _period, 'total_nav': _num})
+            _existing_period_labels.add(str(_period))
+
     # Universal KV → single NAV record synthesis (added 2026-07-03).
     # Some NAV Calculation sheets are 100% key-value (True North's NAV
     # Calculation has 4 KV sections: Investable Funds, NAV Summary, QoQ Bridge,
@@ -484,7 +899,20 @@ def build_unified_json(per_sheet: dict, workbook_data: dict) -> dict:
         'accrued_fees': 'management_fee_payable',
     }
     if not any(r.get('total_nav') for r in nav_records):
-        nav_calc_kv = kv_by_dom.get('nav_calculation') or {}
+        # Solution D+ (2026-07-06 Sequoia fix) — check BOTH domain buckets.
+        # Gemini legitimately classifies a NAV sheet as either
+        # `nav_calculation` OR `nav_accounting` depending on which sections
+        # dominate (Investable Funds walk vs Balance Sheet aggregates). We
+        # merge both KV pools with nav_calculation winning on collision so
+        # behavior stays deterministic for files that already extracted
+        # correctly under nav_calculation (True North).
+        # Universal: guarded by "nav_records has no total_nav yet" — files
+        # with proper tabular NAV extraction (Trivesta 36 monthly rows) skip
+        # this entirely and are unaffected.
+        nav_calc_kv = {}
+        for _dom in ('nav_calculation', 'nav_accounting'):
+            for _k, _v in (kv_by_dom.get(_dom) or {}).items():
+                nav_calc_kv.setdefault(_k, _v)
         if nav_calc_kv:
             synthetic: dict = {}
             for src_slug, dst_field in _NAV_KV_SLUG_TO_FIELD.items():
@@ -520,6 +948,18 @@ def build_unified_json(per_sheet: dict, workbook_data: dict) -> dict:
     portfolio_kpis_periodic: list[dict] = []
     budget_vs_actual_rows: list[dict] = []
     for r in pl_all:
+        # Fix B (2026-07-06 Sequoia BVA fix) — BVA detection MUST run before
+        # the company_name gate. Sequoia's Budget vs Actual sheet publishes
+        # FUND-LEVEL rows (line_item=Portfolio Revenue, budget=254, actual=241,
+        # variance_pct=-0.051) with no per-company scoping. Under the old
+        # rule these rows got skipped (no company_name), leaving BVA empty
+        # AND monthly_pl_rows populated with BVA-shaped noise.
+        # Universal: files that DO scope BVA per-company (has both
+        # company_name AND budget+actual) still land in budget_vs_actual —
+        # the router just no longer requires a company scope.
+        if _is_bva_row(r):
+            budget_vs_actual_rows.append(r)
+            continue
         if not r.get('company_name'):
             continue
         # Universal: normalise the period field. Persister expects `period`,
@@ -527,10 +967,29 @@ def build_unified_json(per_sheet: dict, workbook_data: dict) -> dict:
         if 'period' not in r:
             r['period'] = (r.get('financial_year') or r.get('fy')
                            or r.get('period_end') or r.get('period_start'))
-        if _is_bva_row(r):
-            budget_vs_actual_rows.append(r)
-        else:
-            portfolio_kpis_periodic.append(r)
+        portfolio_kpis_periodic.append(r)
+
+    # Fix C — Fund-level Monthly P&L pivot.
+    # Sheets like "Monthly P&L (MIS)" publish a Line Item × Period matrix
+    # (Portfolio Revenue / EBITDA / COGS × Oct-24 / Nov-24 / ...). After the
+    # extractors.py wide-period rescue, these come through as unpivoted
+    # {line_item, period, valuation_date, period_value} rows with NO
+    # company_name. The current loop above skips them (needs company_name).
+    #
+    # _pivot_fund_level_pl re-groups them by period → one dict per period
+    # carrying canonical KPI fields (revenue, cogs, ebitda, pat, ...) and
+    # attaches the FUND_AGGREGATE_SENTINEL company_name so the persister's
+    # KPI derivation ladder (revenue-cogs → gross_profit / gross_margin_pct,
+    # then EBITDA + ebitda_margin_pct) runs unchanged. The persister
+    # auto-creates a real PortfolioCompany with is_aggregate=True for the
+    # sentinel; the custom manager hides it from every user-facing query.
+    #
+    # Universal: applies to every fund whose MIS sheet publishes fund-level
+    # P&L; funds without such a sheet see zero pivoted rows and no behaviour
+    # change.
+    fund_level_pl = _pivot_fund_level_pl(pl_all)
+    if fund_level_pl:
+        portfolio_kpis_periodic.extend(fund_level_pl)
 
     # Universal merge: KPI-shape rows extracted from the valuations_kpis domain
     # (SaaS Metrics sheets, KPI matrix wide-period unpivots) join the periodic
@@ -552,6 +1011,68 @@ def build_unified_json(per_sheet: dict, workbook_data: dict) -> dict:
         'monthly_burn': 'gross_burn',
         'cash': 'cash_balance',
         'runway': 'runway_months',
+        # Solution F — widen KPI aliases so more Excel spellings map to
+        # the canonical fields the persister writes. Additive only:
+        # each src → dst pair fills dst ONLY when dst is already blank.
+        # ── Revenue variants ─────────────────────────────
+        'rev': 'revenue',
+        'revenue_cr': 'revenue',
+        'net_revenue': 'revenue',
+        'net_sales': 'revenue',
+        'total_revenue': 'revenue',
+        'topline': 'revenue',
+        'turnover': 'revenue',
+        # ── SaaS: MRR / ARR variants ────────────────────
+        'monthly_recurring_revenue': 'mrr',
+        'monthly_recurring': 'mrr',
+        'monthly_saas_revenue': 'mrr',
+        'arr_cr': 'arr',
+        'annual_recurring_revenue': 'arr',
+        'annualised_run_rate': 'arr',
+        'annualized_run_rate': 'arr',
+        'annual_revenue_run_rate': 'arr',
+        # ── Commerce KPIs ───────────────────────────────
+        'gmv_cr': 'gmv',
+        'gross_merch_value': 'gmv',
+        'gross_sales_value': 'gmv',
+        'total_gmv': 'gmv',
+        'order_count': 'orders',
+        'total_orders': 'orders',
+        'no_of_orders': 'orders',
+        'transactions': 'orders',
+        'average_order_value': 'aov',
+        'avg_order_value': 'aov',
+        'avg_transaction_value': 'aov',
+        'average_ticket_size': 'aov',
+        'return_rate_pct': 'returns_pct',
+        'return_rate': 'returns_pct',
+        'rto_pct': 'returns_pct',
+        'product_return_pct': 'returns_pct',
+        'product_returns_pct': 'returns_pct',
+        'repeat_customer_rate': 'repeat_pct',
+        'repeat_rate': 'repeat_pct',
+        'retention_rate': 'repeat_pct',
+        'retention_pct': 'repeat_pct',
+        'customer_retention_pct': 'repeat_pct',
+        # ── CAC / LTV variants ──────────────────────────
+        'customer_acquisition_cost': 'cac',
+        'blended_cac': 'cac',
+        'cost_to_acquire': 'cac',
+        'customer_lifetime_value': 'ltv',
+        'clv': 'ltv',
+        # ── Margins ─────────────────────────────────────
+        'gross_profit_margin': 'gross_margin_pct',
+        'gross_profit_pct': 'gross_margin_pct',
+        'gm_pct': 'gross_margin_pct',
+        'operating_margin': 'ebitda_margin_pct',
+        # ── Retention / churn spellings ─────────────────
+        'net_revenue_retention': 'nrr',
+        'net_dollar_retention': 'nrr',
+        'ndr': 'nrr',
+        'net_retention': 'nrr',
+        'monthly_churn': 'churn_rate',
+        'revenue_churn': 'churn_rate',
+        'customer_churn': 'churn_rate',
     }
     for r in valuations_kpi_rows:
         if not r.get('company_name'):

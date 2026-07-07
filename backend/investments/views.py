@@ -976,14 +976,25 @@ def portfolio_saas_metrics(request):
     GET /api/portfolio/saas-metrics/?fund=<id>
     Returns SaaS-specific KPIs (MRR, ARR, NRR, Churn, CAC, LTV) per company.
     """
+    # Slug variants accepted per canonical SaaS metric. Includes BOTH
+    # hyphen and underscore forms because the KPI persister slugifies
+    # multi-word field names with an underscore (`churn_rate`,
+    # `ltv_cac_ratio`, `gross_margin_pct`) while some human-authored
+    # KPIDefinition rows use hyphens (`churn-rate`, `ltv-cac`). Without
+    # the underscore variants the persisted burn_runway data never
+    # matches this whitelist and the dashboard stays blank.
     SAAS_SLUGS = {
         'mrr':           ('mrr', 'monthly-recurring-revenue', 'monthly-revenue'),
         'arr':           ('arr', 'annual-recurring-revenue', 'annual-revenue-run-rate'),
-        'churn_rate':    ('churn-rate', 'churn', 'revenue-churn', 'customer-churn', 'monthly-churn'),
-        'nrr':           ('nrr', 'net-revenue-retention', 'net-dollar-retention', 'ndr', 'net-retention'),
+        'churn_rate':    ('churn-rate', 'churn_rate', 'churn', 'revenue-churn',
+                          'customer-churn', 'monthly-churn'),
+        'nrr':           ('nrr', 'net-revenue-retention', 'net-dollar-retention',
+                          'ndr', 'net-retention'),
         'cac':           ('cac', 'customer-acquisition-cost', 'blended-cac'),
-        'ltv':           ('ltv', 'clv', 'customer-ltv', 'lifetime-value', 'customer-lifetime-value'),
-        'ltv_cac_ratio': ('ltv-cac', 'ltv-cac-ratio', 'ltv-cac-multiple'),
+        'ltv':           ('ltv', 'clv', 'customer-ltv', 'lifetime-value',
+                          'customer-lifetime-value'),
+        'ltv_cac_ratio': ('ltv-cac', 'ltv_cac_ratio', 'ltv-cac-ratio',
+                          'ltv-cac-multiple'),
     }
     all_slugs = [s for slugs in SAAS_SLUGS.values() for s in slugs]
 
@@ -1324,21 +1335,37 @@ def portfolio_kpi_tracking(request):
 # Pass 6 percentage-derivation step (e.g. ebitda-pct = ebitda / revenue * 100)
 # and stored under the *-pct / *-margin slugs.
 _KPI_COL_SLUGS = {
-    'gmv':      ['gmv', 'gmv-rs-cr', 'gmvcr'],
-    'revenue':  ['rev', 'revenue', 'revenue-rs-cr', 'revenuecr'],
-    'gross_m':  ['gross-margin-pct', 'gross-margin', 'gross-m', 'gross-margin-percent'],
-    'ebitda':   ['ebitda-pct', 'ebitda-margin', 'ebitda-margin-pct', 'ebitda-margin-percent'],
-    'orders':   ['orders', 'order-book', 'order-book-rs-cr'],
-    'aov':      ['aov'],
-    'returns':  ['returns-pct', 'returns', 'returns-percent'],
-    'cac':      ['cac'],
-    'repeat':   ['repeat-pct', 'repeat', 'repeat-percent'],
+    'gmv':      ['gmv', 'gmv-rs-cr', 'gmvcr', 'gmv_cr'],
+    'revenue':  ['rev', 'revenue', 'revenue-rs-cr', 'revenuecr', 'revenue_cr',
+                 'total_revenue', 'net_sales'],
+    'gross_m':  ['gross-margin-pct', 'gross-margin', 'gross-m',
+                 'gross-margin-percent', 'gross_margin_pct', 'gross_margin',
+                 'gross_m', 'gross_profit_pct'],
+    'ebitda':   ['ebitda-pct', 'ebitda-margin', 'ebitda-margin-pct',
+                 'ebitda-margin-percent', 'ebitda_margin_pct',
+                 'ebitda_margin', 'ebitda_pct'],
+    'orders':   ['orders', 'order-book', 'order-book-rs-cr', 'order_count',
+                 'total_orders', 'transactions'],
+    'aov':      ['aov', 'average_order_value', 'avg_order_value'],
+    'returns':  ['returns-pct', 'returns', 'returns-percent', 'returns_pct',
+                 'return_rate_pct', 'rto_pct'],
+    'cac':      ['cac', 'customer_acquisition_cost', 'blended_cac'],
+    'repeat':   ['repeat-pct', 'repeat', 'repeat-percent', 'repeat_pct',
+                 'repeat_customer_rate', 'retention_pct'],
 }
-# Reverse: slug → canonical column
+# Universal Fix B (2026-07-06) — Persister writes KPIDefinition.slug in
+# underscore-normalised form (e.g. `gross_margin_pct`, `ebitda_margin_pct`);
+# some older code paths and reference data write hyphenated forms
+# (`gross-margin-pct`). Build a slug→column index that normalises BOTH
+# separators so either dialect resolves to the same column. Universal —
+# every fund benefits, no per-slug hand-maintenance beyond the mapping above.
+def _canon_kpi_slug(s: str) -> str:
+    return (s or '').strip().lower().replace('_', '-')
+
 _SLUG_TO_COL = {}
 for _col, _slugs in _KPI_COL_SLUGS.items():
     for _s in _slugs:
-        _SLUG_TO_COL[_s] = _col
+        _SLUG_TO_COL[_canon_kpi_slug(_s)] = _col
 
 
 @api_view(['GET'])
@@ -1405,41 +1432,35 @@ def portfolio_kpi_matrix(request):
     for name, cd in company_data.items():
         cd['fv'] = sum(inv_fv.get(iid, 0) for iid in cd['inv_ids'])
 
-    # Get KPI data — latest value per company per canonical column
-    all_target_slugs = list(_SLUG_TO_COL.keys())
+    # Get KPI data — latest value per company per canonical column. Pull the
+    # full KPI set for these investments in one query then dispatch by
+    # canon-slug (underscores collapsed to hyphens, lowercased) so both
+    # persister-side and reference-side dialects resolve.
     kpi_qs = PortfolioKPI.objects.filter(
         investment_id__in=all_inv_ids,
-        kpi_definition__slug__in=all_target_slugs,
     ).select_related('investment', 'kpi_definition').order_by('-period')
 
     company_kpis = defaultdict(dict)  # company_name → {col: value}
+    _canon_col_slugs = {col: [_canon_kpi_slug(cs) for cs in slugs]
+                        for col, slugs in _KPI_COL_SLUGS.items()}
     for k in kpi_qs:
-        col = _SLUG_TO_COL.get(k.kpi_definition.slug)
-        if not col:
-            continue
+        canon = _canon_kpi_slug(k.kpi_definition.slug)
         name = k.investment.company_name
-        if col not in company_kpis[name]:
+        # Fast exact-canon match first — covers 99% of persister-written rows.
+        col = _SLUG_TO_COL.get(canon)
+        if col and col not in company_kpis[name]:
             company_kpis[name][col] = float(k.value)
-
-    # Also check for KPIs that have partial slug match (e.g. 'arr-rs-cr' contains 'arr')
-    # Fetch ALL KPIs for these investments and do broader matching
-    remaining_kpi_qs = PortfolioKPI.objects.filter(
-        investment_id__in=all_inv_ids,
-    ).exclude(
-        kpi_definition__slug__in=all_target_slugs,
-    ).select_related('investment', 'kpi_definition').order_by('-period')
-
-    # Broader slug matching: check if any canonical slug is contained in the actual slug
-    for k in remaining_kpi_qs:
-        slug = k.kpi_definition.slug.lower()
-        name = k.investment.company_name
-        for col, col_slugs in _KPI_COL_SLUGS.items():
+            continue
+        # Substring fallback for hand-authored slugs like 'arr-rs-cr' or
+        # 'ebitda-margin-inr' where the canonical token sits inside a
+        # decorated variant. Longest-token-first isn't necessary here because
+        # each column's slug list already lists specific variants first.
+        for col, cslugs in _canon_col_slugs.items():
             if col in company_kpis.get(name, {}):
                 continue
-            for cs in col_slugs:
-                if cs in slug or slug in cs:
-                    if col not in company_kpis[name]:
-                        company_kpis[name][col] = float(k.value)
+            for cs in cslugs:
+                if cs in canon or canon in cs:
+                    company_kpis[name][col] = float(k.value)
                     break
 
     # Normalize percent columns: values < 1 are fractions → multiply by 100

@@ -10,6 +10,20 @@ from django.conf import settings
 from django.db import models
 
 
+class _NonAggregatePortfolioCompanyManager(models.Manager):
+    """Default manager: hides sentinel `is_aggregate=True` rows.
+
+    Fund-level aggregate metrics (fund-wide P&L, KPI totals) piggy-back on
+    the PortfolioCompany table via a hidden sentinel row. Every user-facing
+    query (views / reports / dashboards / chatbot / risk-score / MIS) uses
+    `.objects` and therefore automatically excludes these sentinels — no
+    per-callsite change needed. The persister explicitly uses `all_objects`
+    when it needs to look up / create the sentinel.
+    """
+    def get_queryset(self):
+        return super().get_queryset().exclude(is_aggregate=True)
+
+
 class PortfolioCompany(models.Model):
     """
     First-class portfolio company record.
@@ -49,6 +63,14 @@ class PortfolioCompany(models.Model):
     )
     description = models.TextField(blank=True)
     is_active = models.BooleanField(default=True)
+    is_aggregate = models.BooleanField(
+        default=False,
+        help_text=(
+            'Sentinel row that stores fund-level aggregate metrics '
+            '(fund-wide P&L, KPI totals) rather than a real portfolio '
+            'company. Always excluded from company / investment listings.'
+        ),
+    )
 
     # Listing status — for Quoted & Unquoted analysis
     is_quoted = models.BooleanField(
@@ -69,13 +91,47 @@ class PortfolioCompany(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # Managers.
+    # `objects` transparently excludes is_aggregate=True rows so every
+    # user-facing query (views / reports / dashboards / chatbot / risk-score
+    # / MIS / exporter) automatically ignores the fund-level sentinel row.
+    # `all_objects` is the explicit escape hatch — only the persister uses
+    # it, and only when it needs to look up / create the sentinel.
+    objects = _NonAggregatePortfolioCompanyManager()
+    all_objects = models.Manager()
+
     class Meta:
         ordering = ['name']
         unique_together = ('organization', 'name')
         verbose_name_plural = 'portfolio companies'
+        base_manager_name = 'all_objects'  # keep FK reverse relations unfiltered
 
     def __str__(self):
         return self.name
+
+
+class _NonAggregateInvestmentManager(models.Manager):
+    """Default manager — hides shell Investment rows whose portfolio_company
+    is the fund-aggregate sentinel. Mirrors the PortfolioCompany manager so
+    every user-facing query (KPI matrix, dashboards, MIS, reports, chatbot,
+    risk score, exports) automatically excludes the sentinel investment,
+    while the persister still finds / updates it via `all_objects`.
+
+    Implementation note: Investment.portfolio_company is nullable, so a naive
+    `.exclude(portfolio_company__is_aggregate=True)` compiles to a LEFT OUTER
+    JOIN. PostgreSQL forbids `SELECT ... FOR UPDATE` on the nullable side of
+    an outer join, which crashes every `Investment.objects.update_or_create`
+    call (persister writes hit this on every import). Using an
+    `id__in=<subquery>` form emits a plain WHERE-NOT-IN over the base table
+    with no join, so `select_for_update` works. Semantically identical.
+    """
+    def get_queryset(self):
+        aggregate_ids = PortfolioCompany.all_objects.filter(
+            is_aggregate=True,
+        ).values('id')
+        return super().get_queryset().exclude(
+            portfolio_company_id__in=aggregate_ids,
+        )
 
 
 class Investment(models.Model):
@@ -194,6 +250,12 @@ class Investment(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # See _NonAggregateInvestmentManager docstring — `objects` transparently
+    # hides the fund-aggregate sentinel shell; `all_objects` is the escape
+    # hatch used only by the persister when it needs to reach the shell.
+    objects = _NonAggregateInvestmentManager()
+    all_objects = models.Manager()
+
     class Meta:
         ordering = ['company_name']
         # Natural key includes `stage` so that two rounds of the same company+
@@ -201,6 +263,10 @@ class Investment(models.Model):
         # Investment rows. Without `stage` the persister collapses multi-round
         # investments into one row and loses per-round cost basis / FMV / IRR.
         unique_together = ('scheme', 'company_name', 'instrument_type', 'stage')
+        # Reverse relations (e.g. PortfolioCompany.investments) must see all
+        # rows including sentinels so persister update_or_create still finds
+        # existing shells. Matches the pattern used on PortfolioCompany.
+        base_manager_name = 'all_objects'
 
     def __str__(self):
         return f'{self.company_name} ({self.get_instrument_type_display()}) — {self.scheme}'
