@@ -5,19 +5,34 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Environment-aware .env loading.
-#   TFAI_ENV=local  -> .env.local   (your Mac)
-#   TFAI_ENV=dev    -> .env.dev     (staging on the EC2 web server)
-#   TFAI_ENV=prod   -> .env.prod    (production on the EC2 web server)
-#   TFAI_ENV unset  -> .env         (legacy; current tunneled config)
+# Environment-aware .env loading. Strictly 3 supported environments:
+#   TFAI_ENV=local        -> .env.local        (this Mac)
+#   TFAI_ENV=development  -> .env.development  (dev / integration server)
+#   TFAI_ENV=production   -> .env.production   (live customer-serving deploy)
+#
+# TFAI_ENV MUST be set at boot — there is no silent fallback file. This
+# prevents "operator forgot to pick an env" incidents from silently loading
+# stale creds.
+_ALLOWED_TFAI_ENVS = ('local', 'development', 'production')
 TFAI_ENV = os.getenv('TFAI_ENV', '').strip()
-if TFAI_ENV:
-    _env_file = BASE_DIR / f'.env.{TFAI_ENV}'
-    if not _env_file.exists():
-        raise RuntimeError(f'TFAI_ENV={TFAI_ENV} requested but {_env_file} not found')
-    load_dotenv(_env_file)
-else:
-    load_dotenv(BASE_DIR / '.env')
+if not TFAI_ENV:
+    raise RuntimeError(
+        'TFAI_ENV env var MUST be set to one of: '
+        + ', '.join(_ALLOWED_TFAI_ENVS)
+        + ' (e.g. `export TFAI_ENV=local` before starting Django).'
+    )
+if TFAI_ENV not in _ALLOWED_TFAI_ENVS:
+    raise RuntimeError(
+        f'TFAI_ENV={TFAI_ENV!r} is not supported. '
+        f'Allowed values: {", ".join(_ALLOWED_TFAI_ENVS)}.'
+    )
+_env_file = BASE_DIR / f'.env.{TFAI_ENV}'
+if not _env_file.exists():
+    raise RuntimeError(
+        f'TFAI_ENV={TFAI_ENV} requested but {_env_file} not found. '
+        f'Copy backend/.env.example to {_env_file} and fill in real values.'
+    )
+load_dotenv(_env_file)
 
 SECRET_KEY = os.getenv('SECRET_KEY', 'fallback-secret-key-change-in-production')
 DEBUG = os.getenv('DEBUG', 'True') == 'True'

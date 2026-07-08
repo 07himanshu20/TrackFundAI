@@ -5,29 +5,34 @@
 # logs, OS junk, IDE settings, venvs, build artifacts, ML/AI artifacts.
 
 # ---- Secrets & environment ----
-# Every .env-format file is ignored by default (they contain real secrets).
+# Strict 3-environment layout: local / development / production.
+# All .env-format files are ignored by default — they carry real secrets
+# (DB creds, SECRET_KEY, GCP project IDs, Redis passwords, etc.).
 .env
 .env.*
 *.env
 *.env.*
 
-# --- Explicit allowlist: files that are safe to commit ---
-# These carry NO secrets — only public URLs, feature flags, or CHANGEME-*
-# placeholders. Committing them makes environment setup reviewable in PRs.
+# --- Explicit allowlist: templates only ---
+# These carry NO secrets — only CHANGEME-* placeholders + comments.
+# They exist so a new operator can `cp .env.example .env.<env>` and see
+# exactly which vars matter for each environment.
 !backend/.env.example
-!backend/.env.staging.template
 !frontend/.env.example
-!frontend/.env.development
-!frontend/.env.production
 
-# --- Frontend runtime env.js (the ACTIVE per-machine copy) ---
-# env.js is NOT committed. Operators pick which environment by copying:
-#   Local dev:       cp frontend/env.local.js    frontend/env.js
-#   Staging deploy:  cp frontend/env.staging.js  frontend/env.js
-# The two source-of-truth files (env.local.js, env.staging.js) ARE committed.
+# --- Frontend runtime env.js (per-machine ACTIVE copy) ---
+# env.js is NOT committed. Operators pick an environment by copying:
+#   Local:        cp frontend/env.local.js       frontend/env.js
+#   Development:  cp frontend/env.development.js frontend/env.js
+#   Production:   cp frontend/env.production.js  frontend/env.js
+# The three source files (env.local.js, env.development.js, env.production.js)
+# contain hosting URLs and are gitignored. env.example.js is the committed
+# blueprint (safe to review in PRs).
 frontend/env.js
-!frontend/env.local.js
-!frontend/env.staging.js
+frontend/env.local.js
+frontend/env.development.js
+frontend/env.production.js
+!frontend/env.example.js
 
 # ---- Databases ----
 # Local SQLite (pre-Postgres migration) and any future dumps.
