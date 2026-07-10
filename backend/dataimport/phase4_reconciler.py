@@ -63,8 +63,13 @@ LABEL_WHITELIST: Dict[str, Tuple[Tuple[str, ...], Tuple[str, ...]]] = {
     'carry_amount_gross': (
         # "gross carry", "carry (gross)", "gross carried interest", "carried interest gross" — canonical
         # "carry provision" — Sequoia-style label; provision means what's set aside as gross carry
+        # Fix (2026-07-10) — Added "gp carry gross" and "gp carry entitlement"
+        # to cover Bharatcrest's Carry_Clawback header style ("GP CARRY GROSS
+        # – ENTITLEMENT"). Universal — matches any file whose CA writes labels
+        # in the "GP CARRY <TYPE>" order rather than "<TYPE> Carry" order.
         ('gross carry', 'carry (gross)', 'gross carried interest', 'carried interest gross',
-         'carry provision', 'carried interest provision'),
+         'carry provision', 'carried interest provision',
+         'gp carry gross', 'gp carry entitlement'),
         # "escrow"/"escrow balance" refer to net-after-holdback → belong to carry_amount_net
         ('allocated', 'allocation', 'p&l', 'profit share', 'profit allocation',
          'net carry', 'net of', 'after clawback', 'after holdback', 'distributed',
@@ -75,8 +80,13 @@ LABEL_WHITELIST: Dict[str, Tuple[Tuple[str, ...], Tuple[str, ...]]] = {
         # required_any; escrow amounts are held AGAINST clawback, so they
         # now route to gp_clawback_provision instead. Universal: files that
         # publish "Net Carry" or "Carry (Net)" continue to hit this metric.
+        # Fix (2026-07-10) — Added "gp carry net" to cover Bharatcrest's
+        # Carry_Clawback header style ("GP CARRY NET – After Holdback & After
+        # Clawback"). The forbidden list still blocks the intermediate "Before
+        # Clawback" variant, so only the semantically-final net carry is
+        # accepted. Universal — matches any file using "GP CARRY NET" style.
         ('net carry', 'carry (net)', 'net carried interest', 'carried interest net',
-         'carry net of clawback', 'carry after clawback'),
+         'carry net of clawback', 'carry after clawback', 'gp carry net'),
         ('gross', 'allocated', 'allocation', 'before clawback', 'before holdback',
          'provision', 'escrow'),
     ),
@@ -105,9 +115,14 @@ LABEL_WHITELIST: Dict[str, Tuple[Tuple[str, ...], Tuple[str, ...]]] = {
     'carry_base': (
         # "carry base", "profit pool", "distributable profit", "available for carry" — canonical
         # "profit above hurdle" — Sequoia label; profit above hurdle = carry base
+        # Fix (2026-07-10) — Added "profit above capital" to cover Bharatcrest's
+        # Carry_Clawback wording ("Total Profit above Capital (= Net
+        # Distributions – Capital Called, INR Cr)"). Same semantic — total
+        # profit that the carry percentage is applied to. Universal: any file
+        # that publishes this label style routes correctly.
         ('carry base', 'profit pool', 'distributable profit', 'available for carry',
          'profit available', 'residual after preferred', 'profit above hurdle',
-         'hurdle profit', 'profits above hurdle'),
+         'hurdle profit', 'profits above hurdle', 'profit above capital'),
         ('rate', 'percentage'),
     ),
     'lp_total_return': (
@@ -298,6 +313,24 @@ _METRIC_ALIASES: Dict[str, str] = {
     'irr':                         'net_irr',
     'net_irr_pct':                 'net_irr',
     'gross_irr_pct':               'gross_irr',
+    # Fix (2026-07-10) — Metric-name alignment between the unified_builder
+    # workbook_aggregate emitter (which uses "gp_"-prefixed keys per its
+    # _WATERFALL_AGG_ALIAS map) and the persister (which reads "carry_amount_*"
+    # keys). Without these aliases the reconciler puts extracted values into
+    # keys nobody reads, and the persister falls back to formula-computed
+    # values — invisible unless a fund publishes summary carry cells (only
+    # Bharatcrest does today). Additive: no metric is renamed away from a
+    # previously-read key.
+    'gp_carry_amount':             'carry_amount_gross',
+    'gp_carry_amount_net':         'carry_amount_net',
+    # `gp_carry_amount_net_final` = final take-home net after both holdback
+    # AND clawback deductions. Same canonical destination as gp_carry_amount_net
+    # so the label whitelist for `carry_amount_net` gets to distinguish the
+    # intermediate ("Before Clawback" — forbidden) from the final ("After
+    # Clawback" — accepted) via first-credible-match logic.
+    'gp_carry_amount_net_final':   'carry_amount_net',
+    'gp_carry_holdback_amount':    'gp_holdback_escrow',
+    'gp_total_distribution':       'gp_carry_distributed',
 }
 
 

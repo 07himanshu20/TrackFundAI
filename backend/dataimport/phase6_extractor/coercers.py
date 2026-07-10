@@ -185,3 +185,42 @@ def extract_pct(v: Any) -> Optional[Decimal]:
     if m:
         return Decimal(m.group(1))
     return None
+
+
+# ── Universal percentage-form normaliser (Fix U4) ──────────────────────────
+# Some Excels write "0.08" for a field meaning "8% hurdle" (fraction form)
+# instead of "8.00" (percentage form). Downstream code divides by 100 to
+# convert percentage → ratio, so a fraction-form input silently collapses
+# to 0.08% (0.0008) and every carry / hurdle / clawback figure computed
+# from it goes to near-zero.
+#
+# The safe converter below only rewrites values that are UNAMBIGUOUSLY
+# fractions. Real Indian AIF ranges:
+#   Hurdle           6% – 12%           (fraction 0.06 – 0.12)
+#   Carry            15% – 25%          (fraction 0.15 – 0.25)
+#   Management fee   1.5% – 2.5%        (fraction 0.015 – 0.025)
+#   GP holdback      20% – 30%          (fraction 0.20 – 0.30)
+#   Sponsor commit   2.5% – 5%          (fraction 0.025 – 0.05)
+#
+# Every real fraction sits well below 0.5. Every real percentage-form
+# value is at 1.0 or above. Values in (0.5, 1.0) never occur legitimately
+# — the 0.5 threshold gives a safe "gap" so we never over-correct.
+_FRACTION_UPPER_BOUND = Decimal('0.5')
+
+
+def normalize_percentage_value(v: Any) -> Optional[Decimal]:
+    """Return the value in PERCENT form (e.g. 8.00 for 8% hurdle).
+    Accepts either "8", "8%", "0.08", or Decimal('0.08') and returns
+    Decimal('8'). Returns None on non-numeric input.
+
+    Safe by construction — only fractions in (0, 0.5) get multiplied by
+    100. Values ≥ 0.5 (which covers every real Indian AIF percentage,
+    including small ones like 1.5% mgmt fee) are returned unchanged.
+    Legitimate 0% is returned as 0.
+    """
+    d = to_decimal(v)
+    if d is None:
+        return None
+    if d > 0 and d < _FRACTION_UPPER_BOUND:
+        return d * Decimal('100')
+    return d

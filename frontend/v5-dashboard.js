@@ -777,13 +777,13 @@ const _METRIC_COPY = {
   },
   carry_amount_net: {
     label: 'Net Carry',
-    meaning: "GP's actual performance fee after subtracting the clawback provision.",
-    formula: 'Gross Carry − Clawback provision',
+    meaning: "GP's actual take-home performance fee: what was distributed to the GP minus the amount held in escrow (holdback) minus any clawback owed back to LPs. For open funds where no carry has been paid yet, this is 0.",
+    formula: 'Distributed to GP − Holdback Escrow − Clawback Provision',
   },
   carry_base: {
     label: 'Carry Base',
-    meaning: 'The amount remaining for carry after LPs receive their capital back and preferred return. Must be positive for carry to be earned.',
-    formula: '(Distributions + NAV) − Called Capital − Preferred Return',
+    meaning: 'Total profit above capital — the pool that carry is calculated from. Distributions plus residual (unrealised) fair value, minus the capital called from LPs. Must be positive for GP to earn any carry.',
+    formula: '(Distributions + Residual NAV) − Called Capital',
   },
   preferred_return_amount: {
     label: 'Preferred Return (Hurdle)',

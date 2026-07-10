@@ -307,6 +307,23 @@ INVESTORS_AML_FIELDS = {
     'str_reference': 'STR reference number',
     'risk_assessment_date': 'Date of last risk assessment',
     'risk_notes': 'AML risk assessment notes',
+    # Fix U2A — LP investor sheets in Mock format publish per-LP totals
+    # (Commitment, Drawdown, Distributions Received) on the same investor
+    # register sheet that carries AML/KYC fields. Adding cumulative_called
+    # and cumulative_distributed here means "Drawdown" columns on such a
+    # combined sheet get captured regardless of which of the three LP-facing
+    # domains Gemini picks.
+    'commitment_amount': 'Total LP commitment amount — Commitment, Commitment(₹Cr), Committed Capital',
+    'cumulative_called': (
+        'Per-LP cumulative drawdown to date — Drawdown, Drawdown Amount, '
+        'Drawn Capital, Capital Drawn, Called to Date, Contributed Capital, '
+        'LP Contributions, Cumulative Called, Funded Capital, Paid-in Capital'
+    ),
+    'cumulative_distributed': (
+        'Per-LP cumulative distributions received to date — Distributions Received, '
+        'Distributions to Date, Cumulative Distributions, Total Distributed, '
+        'LP Distributions'
+    ),
 }
 
 COMMITMENTS_FIELDS = {
@@ -318,6 +335,20 @@ COMMITMENTS_FIELDS = {
     'units_allocated': 'Units allocated to this LP',
     'side_letter_exists': 'Whether a side letter exists for this LP',
     'commitment_status': 'Status: active, defaulted, transferred, cancelled',
+    # Fix U2A — per-LP cumulative totals often published on the LP register
+    # sheet (e.g. Multiples IV "Investors & LPs" tab). Without these fields,
+    # Gemini has no canonical target for the "Drawdown" / "Contributions" /
+    # "Distributions Received" columns and the values silently drop out.
+    'cumulative_called': (
+        'Per-LP cumulative drawdown to date — Drawdown, Drawdown Amount, '
+        'Drawn Capital, Capital Drawn, Called to Date, Contributed Capital, '
+        'LP Contributions, Cumulative Called, Funded Capital, Paid-in Capital'
+    ),
+    'cumulative_distributed': (
+        'Per-LP cumulative distributions received to date — Distributions, '
+        'Distributions Received, Distributions to Date, Cumulative Distributions, '
+        'Total Distributed, LP Distributions'
+    ),
 }
 
 CAPITAL_CALLS_FIELDS = {
@@ -671,11 +702,24 @@ FUND_PL_BS_FIELDS = {
 
 LP_CAPITAL_ACCOUNTS_FIELDS = {
     'investor_name': 'LP / Investor name',
-    'commitment': 'Total commitment amount',
+    'commitment': 'Total commitment amount — Commitment, Commitment(₹Cr), Committed Capital, Total Commitment',
     'contributions': 'Total contributions / capital called to date',
     'distributions': 'Total distributions received to date',
     'carried_interest': 'Carried interest allocation',
     'ending_balance': 'Ending capital account balance',
+    # Fix U2A — same enrichment as COMMITMENTS_FIELDS. LP register sheets are
+    # sometimes classified as lp_capital_accounts, so the aliases must exist
+    # on both domains for Gemini + the alias index to catch "Drawdown" columns.
+    'cumulative_called': (
+        'Per-LP cumulative drawdown to date — Drawdown, Drawdown Amount, '
+        'Drawn Capital, Capital Drawn, Called to Date, Contributed Capital, '
+        'LP Contributions, Cumulative Called, Funded Capital, Paid-in Capital'
+    ),
+    'cumulative_distributed': (
+        'Per-LP cumulative distributions received to date — Distributions Received, '
+        'Distributions to Date, Cumulative Distributions, Total Distributed, '
+        'LP Distributions'
+    ),
 }
 
 NAV_CALCULATION_FIELDS = {

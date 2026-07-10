@@ -17,7 +17,44 @@ import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from .coercers import extract_pct
+from .coercers import extract_pct, normalize_percentage_value
+
+
+# ── Fix U1 — Sheet-name-aware bundled exit-vs-distribution detection ───────
+#
+# Universal rule that respects the user's core requirement:
+# "An exit is only a distribution when the workbook publishes them together
+# on the same sheet — otherwise they are semantically distinct events."
+#
+# A sheet is BUNDLED when its name contains BOTH:
+#   • an exit-family token   ('exit', 'realiz', 'realis')
+#   • a distribution-family token ('distribution', 'payout')
+#
+# Example bundled sheets (returns True):
+#     "Exits & Distributions"                (Multiples IV, Edelweiss III)
+#     "Exit and Distribution Register"
+#     "EXITS_DISTRIBUTIONS"
+#     "Realizations & Distributions"
+#     "Payouts and Exits"
+#
+# NOT bundled — separate concerns (returns False):
+#     "EXITS"                                (TrackFundAI Master v2)
+#     "Exits"
+#     "Distributions"                        (AI_Trivesta, Bharatcrest)
+#     "Realised_Proceeds"                    (AI_Trivesta, Bharatcrest)
+#     "Exit Register"
+#     "Distribution Ledger"
+#
+# For a bundled sheet, every row with an exit_date is ALSO a distribution
+# to LPs. For a non-bundled sheet, exit rows stay exits only (no distribution
+# copy is created) — matching the user's constraint exactly.
+def _sheet_bundles_exit_and_distribution(sheet_name: str) -> bool:
+    if not sheet_name:
+        return False
+    s = sheet_name.lower()
+    has_exit = ('exit' in s) or ('realiz' in s) or ('realis' in s)
+    has_dist = ('distribution' in s) or ('payout' in s)
+    return has_exit and has_dist
 
 
 # ── Fund-level P&L pivot (Fix C) ────────────────────────────────────────────
@@ -262,7 +299,16 @@ _FUND_MASTER_SLUG_ALIAS: dict[str, str] = {
     'fund_corpus': 'corpus_target',
     'investable_funds_9_exp': 'investable_funds',
     'gp_commitment_inr_cr': 'sponsor_commitment_amount',
-    'gp_commitment': 'sponsor_commitment_pct',
+    # Fix (2026-07-10) — Removed the ambiguous `'gp_commitment': 'sponsor_commitment_pct'`
+    # mapping. "GP Commitment" alone is unit-ambiguous: it can be an amount
+    # (25 Cr) OR a percentage (2.5%). Files that publish both (AI_Trivesta,
+    # Bharatcrest) put the amount row first, so the bare `gp_commitment`
+    # slug used to be captured as an AMOUNT but routed to sponsor_commitment_pct
+    # — showing "25% Sponsor Commitment" instead of the correct 2.5%.
+    # We now only route unit-qualified slugs, which extract_key_value emits
+    # when the label ends with "(%)" or "(INR Cr)".
+    'gp_commitment_pct':    'sponsor_commitment_pct',
+    'sponsor_commitment_pct': 'sponsor_commitment_pct',
     'lp_aggregate_commitment_inr_cr': 'total_committed_capital',
     'total_lp_commitments_cr': 'total_committed_capital',
     # Dates
@@ -400,7 +446,15 @@ _WATERFALL_AGG_ALIAS: dict[str, str] = {
     # Net carry
     'gp_carry_net':                        'gp_carry_amount_net',
     'gp_carry_net_after_holdback_before_clawback': 'gp_carry_amount_net',
-    'gp_carry_net_after_holdback_clawback': 'gp_carry_amount_net_final',
+    # Fix (2026-07-10) — The original key `gp_carry_net_after_holdback_clawback`
+    # never matched Bharatcrest's real label "GP CARRY NET – After Holdback &
+    # After Clawback (INR Cr)" because the slugger produces the word "after"
+    # TWICE (one for holdback, one for clawback). The correct slug is
+    # `gp_carry_net_after_holdback_after_clawback`. Keeping both keys so any
+    # future file that uses a shorter phrasing ("After Holdback Clawback")
+    # continues to route.
+    'gp_carry_net_after_holdback_clawback':       'gp_carry_amount_net_final',
+    'gp_carry_net_after_holdback_after_clawback': 'gp_carry_amount_net_final',
     # Preferred return / catchup
     'total_preferred_return_accrued':      'preferred_return_amount',
     'preferred_return':                    'preferred_return_amount',
@@ -444,6 +498,196 @@ _WATERFALL_AGG_ALIAS: dict[str, str] = {
 }
 
 
+# ── Fix U3 — Substring label rules for aggregate emission ────────────────
+#
+# The two slug-alias dicts above (_FUND_MASTER_SLUG_ALIAS, _WATERFALL_AGG_ALIAS)
+# rely on exact slug match. Any Excel that uses slightly different wording
+# for a well-known metric ("Total Distributions Made", "Cash Returned to LPs",
+# "Distributions Paid to Partners") silently drops the value.
+#
+# This dict fixes that with the SAME pattern the phase-4 reconciler already
+# uses (phase4_reconciler.LABEL_WHITELIST). For each metric:
+#     (required_any, forbidden_any)
+# The ORIGINAL human label (lower-cased) must contain at least one substring
+# from required_any AND none from forbidden_any.
+#
+# This ADDS to the existing slug maps — it does not replace them. When both
+# fire on the same fund_kv, the slug map wins (first-writer). So no existing
+# behaviour regresses.
+#
+# The reconciler's LABEL_WHITELIST provides a second layer of protection:
+# even if a mislabelled value slips through here, the reconciler rejects
+# it before it becomes a persisted metric.
+_METRIC_LABEL_RULES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    # Capital totals
+    'total_capital_called': (
+        ('capital called', 'called capital', 'drawn down', 'drawdown',
+         'total drawn', 'paid-in capital', 'paid in capital',
+         'contributed capital', 'contributions to date'),
+        ('committed', 'uncalled', 'undrawn', 'remaining', 'per lp',
+         'per investor', 'rate', '%'),
+    ),
+    'total_committed_capital': (
+        ('committed capital', 'total commitment', 'total committed',
+         'aggregate commitment', 'commitments raised', 'total lp commitment',
+         'lp commitment', 'fund commitment'),
+        ('called', 'drawn', 'uncalled', 'undrawn', 'remaining', 'per lp',
+         'per investor', 'rate', '%'),
+    ),
+    'total_uncalled_capital': (
+        ('uncalled', 'undrawn', 'unfunded', 'remaining commitment',
+         'available for drawdown'),
+        ('called', 'drawn', 'paid-in', 'rate', '%'),
+    ),
+    'total_distributions': (
+        ('distributions made', 'distributions paid', 'total distributions',
+         'lp distributions', 'net distributions', 'cash returned to lps',
+         'cash returned', 'returned to lps', 'distributions to partners'),
+        ('per lp', 'per investor', 'unrealised', 'unrealized', 'fv',
+         'fair value', 'gp carry', 'management fee', 'interim only', 'rate'),
+    ),
+    'total_realised_proceeds': (
+        ('realised proceeds', 'realized proceeds', 'realised value',
+         'realized value', 'exit proceeds', 'cash realised', 'cash realized',
+         'cumulative exits', 'exit realisations'),
+        ('unrealised', 'unrealized', 'fair value', 'fv', 'per company'),
+    ),
+    # Waterfall / carry
+    'carry_base': (
+        ('carry base', 'profit pool', 'distributable profit',
+         'available for carry', 'profit above hurdle', 'profits above hurdle',
+         'hurdle profit', 'profit above capital'),
+        ('rate', '%', 'pct'),
+    ),
+    'preferred_return_amount': (
+        ('preferred return', 'hurdle return', 'pref return',
+         'priority return', 'hurdle amount', 'preferred return accrued',
+         'total preferred return'),
+        # Fix (2026-07-10) — Previously the required token "pref return"
+        # matched TrackFundAI Master v2's label "Average Hold Period for
+        # Pref Return (yrs)" which stores 4.55 years, NOT an INR amount.
+        # Adding duration keywords to forbidden blocks these false positives
+        # while every legitimate "Total Preferred Return Accrued (INR Cr)"
+        # style label continues to pass.
+        ('rate', '%', 'pct', 'yrs', 'years',
+         'hold period', 'holding period', 'period for'),
+    ),
+    'gp_catchup_amount': (
+        ('catch-up', 'catchup', 'catch up amount', 'gp catch'),
+        ('preferred', 'hurdle', 'rate', '%'),
+    ),
+    'gp_carry_amount': (
+        ('gross carry', 'gp carry gross', 'carry (gross)',
+         'gross carried interest', 'carried interest gross',
+         'gp carry entitlement', 'carry provision',
+         'carried interest provision', 'total gp carry'),
+        ('net carry', 'net of', 'after clawback', 'after holdback',
+         'distributed', 'escrow', 'p&l', 'profit share', 'per lp', 'rate', '%'),
+    ),
+    'gp_carry_amount_net': (
+        ('net carry', 'gp carry net', 'carry (net)',
+         'net carried interest', 'carried interest net',
+         'carry net of clawback', 'carry after clawback',
+         'gp carry after clawback', 'gp carry after holdback'),
+        ('gross', 'before clawback', 'before holdback', 'provision',
+         'escrow', 'per lp', 'rate', '%'),
+    ),
+    'gp_total_distribution': (
+        ('gp carry distributed', 'gp distributed', 'gp total distribution',
+         'gp share', 'general partner share', 'gp distributed carry'),
+        # Fix (2026-07-10) — Previously the required token "gp share" matched
+        # TrackFundAI Master v2's label "Catch-Up Rate (GP share)" where the
+        # value 1.0 is a RATIO (100% catch-up), not a distributed AMOUNT.
+        # Adding rate/catch-up keywords to forbidden blocks these false
+        # positives while every legitimate "GP CARRY GROSS – DISTRIBUTED"
+        # or "GP Total Distribution" style label continues to pass.
+        ('per lp', 'per gp', 'entitlement', 'net',
+         'rate', 'catch-up', 'catch up', 'catch_up', '%'),
+    ),
+    'gp_clawback_provision': (
+        ('clawback', 'claw-back', 'clawback provision', 'clawback amount',
+         'clawback reserve', 'clawback holdback'),
+        # 'net carry' / 'gross carry' / 'carry net' / 'carry gross' — those
+        # labels ARE net-carry / gross-carry fields even when they mention
+        # clawback ("carry net after clawback"). Reject them here so they
+        # route to gp_carry_amount_net / gp_carry_amount instead.
+        ('paid', 'released', 'reversed', 'per lp', 'rate', '%',
+         'net carry', 'gross carry', 'carry net', 'carry gross',
+         'carry (net)', 'carry (gross)'),
+    ),
+    'gp_carry_holdback_amount': (
+        ('holdback in escrow', 'gp holdback escrow', 'gp holdback amount',
+         'escrow balance', 'carry escrow', 'gp escrow'),
+        ('rate', '%', 'clawback'),
+    ),
+    'lp_total_return': (
+        ('lp total return', 'lp share from step', 'lp residual',
+         'lp distribution total', 'limited partner share'),
+        ('per lp', 'individual lp', 'per investor', 'gp'),
+    ),
+    # Portfolio value
+    'total_unrealised_fv_holding': (
+        ('unrealised fair value', 'unrealized fair value',
+         'unrealised fv', 'unrealised portfolio fv',
+         'fair value of holdings', 'portfolio fair value', 'total fv',
+         'residual value', 'residual nav', 'fmv'),
+        ('per lp', 'per investor', 'per company', 'realised', 'realized',
+         'cost'),
+    ),
+    'fund_nav_latest': (
+        ('closing fund nav', 'net asset value', 'closing nav', 'fund nav'),
+        ('per unit', 'per share', 'per lp', 'per investor', 'opening'),
+    ),
+}
+
+
+def _emit_label_rule_aggregates(kv: dict, sheet_label: str) -> list[dict]:
+    """Walk every (label, value) pair in a KV dict and emit a
+    workbook_aggregates[] entry when the ORIGINAL label matches one of the
+    metric substring rules. Uses the `__labels__` side-channel written by
+    extract_key_value so we score the human label, not the slugged form.
+
+    Returns a list of dicts shaped like Phase-4 reconciler's expected input:
+        {metric, value, label_text, sheet, cell}
+    """
+    if not isinstance(kv, dict) or '__labels__' not in kv:
+        return []
+    labels: dict = kv.get('__labels__') or {}
+    if not isinstance(labels, dict):
+        return []
+    emitted: list[dict] = []
+    seen_metrics: set[str] = set()
+    for slug_key, human_label in labels.items():
+        if not isinstance(human_label, str) or not human_label:
+            continue
+        v = kv.get(slug_key)
+        if v is None or isinstance(v, dict):
+            continue
+        # Value must be numeric-coercible — non-numbers are labels, not metrics
+        try:
+            num = float(str(v).replace(',', '').strip())
+        except (ValueError, TypeError, AttributeError):
+            continue
+        lo = human_label.lower()
+        for metric, (required_any, forbidden_any) in _METRIC_LABEL_RULES.items():
+            if metric in seen_metrics:
+                continue  # first-match-wins per metric
+            if not any(tok in lo for tok in required_any):
+                continue
+            if any(tok in lo for tok in forbidden_any):
+                continue
+            emitted.append({
+                'metric': metric,
+                'value': num,
+                'label_text': human_label,
+                'sheet': sheet_label,
+                'cell': 'phase6_label_rule',
+            })
+            seen_metrics.add(metric)
+            break
+    return emitted
+
+
 _PCT_FIELDS = {
     'hurdle_rate_pct', 'carry_pct', 'management_fee_pct', 'management_fee_pct_post',
     'sponsor_commitment_pct', 'carry_percentage', 'hurdle_rate',
@@ -460,7 +704,12 @@ def _remap_fund_master(fund_kv: dict) -> dict:
         if isinstance(v, dict):  # ignore side-channel dicts
             continue
         if canon in _PCT_FIELDS:
-            v = extract_pct(v) or v
+            # Fix U4 — normalise fraction-form percentages (0.08 → 8) before
+            # further processing. `normalize_percentage_value` is a no-op for
+            # values already in percent form (8, 20, 2.5), so this is safe
+            # for every fund that stores percentages the usual way.
+            norm = normalize_percentage_value(v)
+            v = norm if norm is not None else (extract_pct(v) or v)
         out.setdefault(canon, v)
     return out
 
@@ -474,7 +723,9 @@ def _remap_waterfall(wf_kv: dict, fm: dict) -> dict:
         if isinstance(v, dict):
             continue
         if canon in _PCT_FIELDS:
-            v = extract_pct(v) or v
+            # Fix U4 — see _remap_fund_master for rationale.
+            norm = normalize_percentage_value(v)
+            v = norm if norm is not None else (extract_pct(v) or v)
         out.setdefault(canon, v)
     for src, dst in (('carry_pct', 'carry_percentage'),
                      ('hurdle_rate_pct', 'hurdle_rate'),
@@ -537,15 +788,32 @@ def build_unified_json(per_sheet: dict, workbook_data: dict) -> dict:
     events_by_dom: dict[str, list[dict]] = {}
     lines_by_dom: dict[str, list[dict]] = {}
 
+    # Fix U1 — Stamp every row/event with its source sheet name so downstream
+    # routing (specifically _looks_like_distribution below) can honour the
+    # user's rule: an exit becomes a distribution ONLY when the sheet name
+    # bundles both concepts (e.g. "Exits & Distributions"). The stamp is a
+    # silent metadata field — persister's _apply_model_defaults filters
+    # unknown keys, so nothing downstream is affected.
+    # Fix U3 — Also keep per-sheet KV dicts so the label-rule aggregate
+    # emitter can attribute each match to a real sheet name.
+    kv_by_sheet: list[tuple[str, str, dict]] = []  # (sheet_name, domain, kv)
+
     for sn, info in per_sheet.items():
         d = info.get('domain')
         if not d:
             continue
         if 'rows' in info:
+            for _r in info['rows']:
+                if isinstance(_r, dict):
+                    _r.setdefault('__source_sheet__', sn)
             by_dom.setdefault(d, []).extend(info['rows'])
         if 'kv' in info:
             kv_by_dom.setdefault(d, {}).update(info['kv'])
+            kv_by_sheet.append((sn, d, info['kv']))
         if 'events' in info:
+            for _e in info['events']:
+                if isinstance(_e, dict):
+                    _e.setdefault('__source_sheet__', sn)
             events_by_dom.setdefault(d, []).extend(info['events'])
         if 'line_items' in info:
             lines_by_dom.setdefault(d, []).extend(info['line_items'])
@@ -643,22 +911,31 @@ def build_unified_json(per_sheet: dict, workbook_data: dict) -> dict:
     dist_events = events_by_dom.get('exits_distributions', [])
     dist_rows = by_dom.get('exits_distributions', [])
 
-    # Solution A — widened distribution routing.
-    # A row is a Distribution when EITHER it has an explicit distribution_date
-    # OR it carries a distribution-signature field (numeric distribution_number
-    # OR total_gross_amount + period) AND does NOT carry an exit_date.
-    # This lets stacked-section extracted rows (Sequoia "DISTRIBUTION SCHEDULE"
-    # sub-table below Exits) reach the persister even without an explicit
-    # date column. exit_date exclusion prevents double-classification.
+    # Solution A — widened distribution routing (existing behaviour).
+    # A row is a Distribution when it has an explicit distribution_date OR
+    # it carries a distribution-signature field (numeric distribution_number
+    # OR total_gross_amount + period).
+    #
+    # Fix U1 — Sheet-name-aware exit-vs-distribution: for a row that ONLY
+    # has an exit_date, promote it to distribution IF AND ONLY IF its source
+    # sheet name bundles both concepts. See `_sheet_bundles_exit_and_distribution`
+    # at the top of this module for the exact detection rule. Non-bundled
+    # sheets (e.g. AI_Trivesta's "Realised_Proceeds", Trivesta Master's
+    # "EXITS") continue to route their rows to exits[] only — respecting
+    # the user's rule that "exit ≠ distribution unless the workbook bundles
+    # them together on the same sheet".
     #
     # Junk-row guard: distribution_number must be numeric-shaped (not a
     # validation footer like "Validation: Sum distributions = ..."). Rejects
     # the row-below-data trailer common in structured mock sheets.
     def _looks_like_distribution(r: dict) -> bool:
-        if r.get('exit_date'):
-            return False
         if r.get('distribution_date'):
             return True
+        if r.get('exit_date'):
+            # Fix U1 — sheet-bundled: only then does exit imply distribution.
+            return _sheet_bundles_exit_and_distribution(
+                r.get('__source_sheet__') or ''
+            )
         dn = r.get('distribution_number')
         # Require distribution_number to be numeric OR a short numeric-looking
         # string. Reject long text (validation footers etc.).
@@ -674,8 +951,50 @@ def build_unified_json(per_sheet: dict, workbook_data: dict) -> dict:
             return True
         return False
 
+    def _project_bundled_exit_as_distribution(r: dict) -> dict:
+        """Fix U1 helper — shallow-copy an exit row into distribution shape.
+        Only fills fields that are missing/zero on the copy:
+          distribution_date  ← exit_date (if not already set)
+          total_gross_amount ← proceeds (if empty/zero)
+          total_net_amount   ← proceeds (if empty/zero)
+        The exit row itself is untouched — it remains in exits[] with its
+        exit_date preserved. This is a NEW record in distributions[].
+        """
+        d = dict(r)
+        if not d.get('distribution_date') and d.get('exit_date'):
+            d['distribution_date'] = d['exit_date']
+        proceeds = d.get('proceeds')
+        if proceeds is not None:
+            try:
+                proc_dec = Decimal(str(proceeds).replace(',', '').strip())
+            except (InvalidOperation, ValueError, AttributeError):
+                proc_dec = None
+            if proc_dec is not None and proc_dec > 0:
+                def _is_zero_or_none(v):
+                    if v in (None, ''):
+                        return True
+                    try:
+                        return Decimal(str(v).replace(',', '').strip()) == 0
+                    except (InvalidOperation, ValueError, AttributeError):
+                        return False
+                if _is_zero_or_none(d.get('total_gross_amount')):
+                    d['total_gross_amount'] = proc_dec
+                if _is_zero_or_none(d.get('total_net_amount')):
+                    d['total_net_amount'] = proc_dec
+        return d
+
+    # Assemble distributions[] — events with a date, plus rows that pass
+    # _looks_like_distribution. Bundled-sheet exit rows are projected into
+    # distribution shape (proceeds → gross/net) so the persister can save
+    # them to lp.Distribution correctly. Non-bundled exit rows are excluded
+    # from distributions[] entirely.
+    def _to_distribution_row(r: dict) -> dict:
+        if r.get('exit_date') and not r.get('distribution_date'):
+            return _project_bundled_exit_as_distribution(r)
+        return r
+
     distributions = [e for e in dist_events if e.get('distribution_date')] \
-        + [r for r in dist_rows if _looks_like_distribution(r)]
+        + [_to_distribution_row(r) for r in dist_rows if _looks_like_distribution(r)]
 
     exit_rows = by_dom.get('exits_distributions', [])
     exits = [r for r in exit_rows if r.get('exit_date')]
@@ -1145,6 +1464,36 @@ def build_unified_json(per_sheet: dict, workbook_data: dict) -> dict:
         canon = _WATERFALL_AGG_ALIAS.get(slug_k)
         if canon:
             _emit_agg(canon, v, 'fund_scheme_master', slug_k, fm_labels.get(slug_k, ''))
+
+    # Fix U3 — Label-rule aggregate emission.
+    #
+    # The two slug-alias loops above catch every metric whose label was hand-
+    # coded into _WATERFALL_AGG_ALIAS. Anything with a slightly different
+    # wording (e.g. AI_Trivesta's "Total Distributions Made (INR Cr)" whose
+    # slug is `total_distributions_made` — not in the map) is dropped.
+    #
+    # The label-rule emitter fills those gaps: it walks each KV's __labels__
+    # side-channel and matches the ORIGINAL human label against substring
+    # rules per metric. First-match-wins per metric via the shared `_agg_seen`
+    # set below, so any metric already captured by the slug loops is skipped.
+    # Additive: files whose slug maps already fired see NO change.
+    #
+    # We scan every KV sheet (not just waterfall_carry / fund_scheme_master)
+    # because some funds publish carry aggregates on NAV_CALC or Fund_Cashflows
+    # style sheets that Gemini classifies under other domains.
+    for _sn, _dom, _kv in kv_by_sheet:
+        for entry in _emit_label_rule_aggregates(_kv, _sn):
+            metric = entry['metric']
+            if metric in _agg_seen:
+                continue
+            workbook_aggregates.append({
+                'metric': metric,
+                'value': entry['value'],
+                'label_text': entry['label_text'],
+                'sheet': _sn,
+                'cell': entry['cell'],
+            })
+            _agg_seen.add(metric)
 
     unified = {
         'fund_master': fund_master,

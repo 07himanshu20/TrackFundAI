@@ -368,6 +368,35 @@ def extract_key_value(sheet_rows: list[tuple]) -> dict[str, Any]:
         s = slug(label_short) or slug(label)
         if not s:
             continue
+
+        # Fix (2026-07-10) — trailing-parenthesis semantic disambiguation.
+        # When two rows in the same KV sheet share a base label but differ
+        # only by the trailing "(...)" unit hint — e.g.
+        #     "GP Commitment (INR Cr) | 25"      ← 25 crore, an AMOUNT
+        #     "GP Commitment (%)      | 2.50%"   ← 2.5%, a PERCENTAGE
+        # the current strip-parens-then-slug collapses both to the same slug
+        # `gp_commitment` and the first-writer-wins rule silently drops the
+        # semantically-distinct second row.
+        #
+        # Fix: when the trailing parenthesis carries a recognised unit
+        # marker, emit an ADDITIONAL slug that includes a unit suffix
+        # (`_pct` for %/percent, `_inr_cr` for INR Cr, etc.). Both slugs
+        # get stored so downstream consumers can pick the semantically
+        # correct one via the alias map. Universal — works for any
+        # `<Field> (<unit>)` pattern.
+        s_extra: str | None = None
+        _paren = re.search(r'\(([^)]+)\)\s*$', label)
+        if _paren:
+            _u = _paren.group(1).strip().lower()
+            _u = re.sub(r'\s+', ' ', _u)
+            if _u in ('%', 'pct', 'percent', 'p.a.', 'p.a', 'per annum',
+                      '% p.a.', 'per year'):
+                s_extra = s + '_pct'
+            elif re.match(r'^(inr|₹|rs|rs\.|usd|eur|gbp)\s*(cr|crore|crores|lakh|lakhs|mn|million|bn|billion)?$', _u):
+                # Preserve unit in slug when it disambiguates AMOUNT vs PCT
+                _unit_tail = 'inr_cr' if ('cr' in _u or _u in ('inr', '₹', 'rs', 'rs.')) else 'amount'
+                s_extra = s + '_' + _unit_tail
+
         v: Any = None
         d = to_decimal(val_val)
         if d is not None:
@@ -380,9 +409,12 @@ def extract_key_value(sheet_rows: list[tuple]) -> dict[str, Any]:
                 v = to_str(val_val)
         if v is None:
             continue
-        if s not in out:
-            out[s] = v
-            labels[s] = label
+        # Store under short slug (backwards-compat) AND the unit-qualified
+        # slug (when present) — first-writer-wins per slug.
+        for _slug in (s, s_extra):
+            if _slug and _slug not in out:
+                out[_slug] = v
+                labels[_slug] = label
     if labels:
         out['__labels__'] = labels
     return out

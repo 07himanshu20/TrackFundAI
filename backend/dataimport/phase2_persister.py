@@ -458,6 +458,9 @@ def persist_phase2(data: dict, import_file, organization, user,
 
     fm = data.get('fund_master') or {}
     fp = data.get('fund_performance') or {}
+    # Fix U6a — pull waterfall_kv early so _persist_scheme can read LPA-declared
+    # holdback / hurdle / carry from it when Fund_Overview does not carry them.
+    wf_for_scheme = data.get('waterfall') or {}
 
     fund_name = _str(fm.get('fund_name'), 255)
     if not fund_name:
@@ -471,7 +474,7 @@ def persist_phase2(data: dict, import_file, organization, user,
         # ---- Fund ----
         _p(81, 'Persistence: Fund + Scheme…')
         fund = _persist_fund(organization, fund_name, fm, user)
-        scheme = _persist_scheme(fund, scheme_name, fm)
+        scheme = _persist_scheme(fund, scheme_name, fm, wf_for_scheme)
         import_file.fund = fund
         import_file.fund_name = fund_name
         import_file.save(update_fields=['fund', 'fund_name'])
@@ -578,17 +581,36 @@ def persist_phase2(data: dict, import_file, organization, user,
                 line_dist = (DistributionLineItem.objects.filter(commitment=c)
                              .aggregate(s=Sum('net_amount'))['s']) or Decimal('0')
 
-                new_called = line_called if line_called > 0 else None
-                new_dist   = line_dist   if line_dist   > 0 else None
+                # Priority ladder for cumulative_called / cumulative_distributed:
+                #   1. Extractor-populated value from the LP register (e.g. the
+                #      "Drawdown(₹Cr)" column) — trust it; the fund manager
+                #      published this figure explicitly. Do NOT overwrite.
+                #   2. Sum of per-LP LineItem rows (CapitalCallLineItem /
+                #      DistributionLineItem) when the workbook publishes them.
+                #   3. Pro-rata fallback based on commitment share.
+                #
+                # Fix (2026-07-10): Priority 3 used to overwrite Priority 1 —
+                # if the LP register said Temasek drew 202 Cr but the total
+                # CapitalCall sheet only had 125 Cr, the pro-rata overwrote
+                # 202 with commitment_share × 125 (= 8.20 Cr) and destroyed
+                # the extracted signal. Now Priority 1 is treated as final.
+                existing_called = c.cumulative_called
+                existing_dist   = c.cumulative_distributed
+                is_extracted_called = existing_called is not None and existing_called > 0
+                is_extracted_dist   = existing_dist   is not None and existing_dist   > 0
+
+                new_called = None if is_extracted_called else (line_called if line_called > 0 else None)
+                new_dist   = None if is_extracted_dist   else (line_dist   if line_dist   > 0 else None)
 
                 # Pro-rate fallback when LineItems missing AND we have a
-                # commitment share to apply.
+                # commitment share to apply. Only fires when Priority 1 was
+                # also empty (extracted value absent) — never overrides.
                 if (new_called is None or new_dist is None) and \
                    c.commitment_amount and scheme_total_committed > 0:
                     share = c.commitment_amount / scheme_total_committed
-                    if new_called is None and scheme_total_called > 0:
+                    if new_called is None and not is_extracted_called and scheme_total_called > 0:
                         new_called = (scheme_total_called * share).quantize(Decimal('0.01'))
-                    if new_dist is None and scheme_total_dist > 0:
+                    if new_dist is None and not is_extracted_dist and scheme_total_dist > 0:
                         new_dist = (scheme_total_dist * share).quantize(Decimal('0.01'))
 
                 changed = False
@@ -797,23 +819,52 @@ def _persist_fund(organization, fund_name: str, fm: dict, user):
     return fund
 
 
-def _persist_scheme(fund, scheme_name: str, fm: dict):
+def _persist_scheme(fund, scheme_name: str, fm: dict, wf: dict | None = None):
+    """Persist a Scheme. `wf` is the waterfall_kv dict — used for LPA fields
+    (holdback, hurdle, carry) that some funds publish on their dedicated
+    waterfall / terms sheet rather than on Fund_Overview. Default {} for
+    callers who don't have a waterfall context.
+    """
     from funds.models import Scheme
 
+    wf = wf or {}
     defaults = {}
     _set_if(defaults, 'vintage_year', _int(fm.get('vintage_year')))
     _set_if(defaults, 'first_close_date', _date(fm.get('first_close_date')))
     _set_if(defaults, 'final_close_date', _date(fm.get('final_close_date')))
     _set_if(defaults, 'scheme_size', _d(fm.get('scheme_size') or fm.get('corpus_target')))
     _set_if(defaults, 'tenure_years', _int(fm.get('tenure_years')))
-    _set_if(defaults, 'hurdle_rate_pct', _d(fm.get('hurdle_rate_pct')))
-    _set_if(defaults, 'carry_pct', _d(fm.get('carry_pct')))
+    # Fix U4 lives at extraction time (normalize_percentage_value in unified_builder).
+    # By the time values reach here they're already in percent form (8.00, 20.00);
+    # _d() just parses them numerically. If Fix U4 ever misses a fraction, the
+    # scheme just stores 0.08 and downstream waterfall math produces near-zero —
+    # loud and easy to spot on the dashboard.
+    _set_if(defaults, 'hurdle_rate_pct', _d(_first_present(
+        fm.get('hurdle_rate_pct'),
+        wf.get('hurdle_rate'),
+        wf.get('hurdle_rate_pct'),
+    )))
+    _set_if(defaults, 'carry_pct', _d(_first_present(
+        fm.get('carry_pct'),
+        wf.get('carry_percentage'),
+        wf.get('carry_pct'),
+    )))
     _set_if(defaults, 'carry_type', _str(fm.get('carry_type'), 10).lower() or 'european')
+    # Fix U6a — GP holdback lives on the waterfall / clawback sheet in most
+    # AIF workbooks (AI_Trivesta's Waterfall_Inputs, TrackFundAI Master's
+    # MASTER_INPUTS Clawback Reserve %, Bharatcrest's Carry_Clawback). Read
+    # from BOTH fund_master and waterfall_kv so we capture whichever tab
+    # the fund manager chose. `_first_present` returns the first non-null.
     _set_if(defaults, 'gp_holdback_pct', _d(_first_present(
         fm.get('gp_holdback_pct'),
         fm.get('escrow_holdback_pct'),
         fm.get('clawback_holdback_pct'),
         fm.get('holdback_pct'),
+        fm.get('clawback_reserve_pct'),
+        wf.get('gp_holdback_pct'),
+        wf.get('clawback_holdback'),
+        wf.get('escrow_holdback_pct'),
+        wf.get('clawback_reserve_pct'),
     )))
     _set_if(defaults, 'management_fee_basis', _str(fm.get('management_fee_basis'), 16).lower() or 'committed')
     _set_if(defaults, 'management_fee_pct', _d(fm.get('management_fee_pct')))
@@ -2526,17 +2577,87 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
         except (ValueError, TypeError):
             return str(v)
 
-    _wf_total_dist   = _d(_first_present(wf.get('total_distributions'), fp.get('total_distributions')))
-    _wf_called       = _d(_first_present(wf.get('total_capital_called'), fp.get('total_called_capital')))
-    _wf_pref         = _d(_first_present(wf.get('step_2_preferred_return'), wf.get('preferred_return_amount')))
-    _wf_nav          = _d(fp.get('fund_nav_latest'))
-    _wf_carry_gross  = _d(_first_present(wf.get('carry_amount_gross'), fp.get('carry_amount_gross')))
-    _wf_clawback     = _d(_first_present(wf.get('clawback_provision'), fp.get('gp_clawback_provision')))
-    _wf_catchup      = _d(wf.get('step_3_catchup_amount'))
+    # Fix (2026-07-10) — Provenance values now read from `aggregates` FIRST.
+    # Aggregates is the authoritative post-reconciler dict that CarriedInterest
+    # / FundMetric were actually written from. Reading from raw `wf` / `fp`
+    # first (as previous code did) produced "?" in the substituted formula
+    # for every fund whose Fund_Overview did not publish a matching aggregate
+    # cell — even though the number was computed correctly downstream.
+    # Universal: aggregates always has these keys (computed_from_db or
+    # extracted_verified); fall back to wf/fp only for legacy paths.
+    _agg_prov = aggregates or {}
+    _wf_total_dist   = _d(_first_present(
+        _agg_prov.get('total_distributions'),
+        wf.get('total_distributions'), fp.get('total_distributions')))
+    _wf_called       = _d(_first_present(
+        _agg_prov.get('total_capital_called'),
+        wf.get('total_capital_called'), fp.get('total_called_capital')))
+    _wf_pref         = _d(_first_present(
+        _agg_prov.get('preferred_return_amount'),
+        wf.get('step_2_preferred_return'), wf.get('preferred_return_amount')))
+    # Fix (2026-07-10) — carry_base uses RESIDUAL NAV (sum of per-investment
+    # fair_value_of_holding), not accounting NAV. `total_unrealised_fv_holding`
+    # is the authoritative residual computed by compute_all_fund_aggregates.
+    _wf_residual_nav = _d(_first_present(
+        _agg_prov.get('total_unrealised_fv_holding'),
+        _agg_prov.get('active_fair_value'),
+        fp.get('fund_nav_latest')))
+    _wf_nav          = _d(_first_present(
+        _agg_prov.get('fund_nav_latest'),
+        fp.get('fund_nav_latest')))
+    _wf_carry_gross  = _d(_first_present(
+        _agg_prov.get('carry_amount_gross'),
+        wf.get('carry_amount_gross'), fp.get('carry_amount_gross')))
+    _wf_clawback     = _d(_first_present(
+        _agg_prov.get('gp_clawback_provision'),
+        wf.get('clawback_provision'), fp.get('gp_clawback_provision')))
+    _wf_catchup      = _d(_first_present(
+        _agg_prov.get('gp_catchup_amount'),
+        wf.get('step_3_catchup_amount')))
     _wf_step4b       = _d(wf.get('step_4b_gp_residual_carry'))
-    _wf_carry_pct    = _d(wf.get('carry_percentage'))
-    _wf_hurdle       = _d(wf.get('hurdle_rate'))
+    _wf_carry_pct    = _d(_first_present(
+        wf.get('carry_percentage'),
+        getattr(scheme, 'carry_pct', None)))
+    _wf_hurdle       = _d(_first_present(
+        wf.get('hurdle_rate'),
+        getattr(scheme, 'hurdle_rate_pct', None)))
     _wf_years        = _d(wf.get('step_2_years_compounded'))
+    # Actual holdback rate used in the computation — from Scheme, not
+    # hardcoded. Feeds the clawback / gp_holdback provenance strings so
+    # the user sees the LPA-declared value.
+    _wf_holdback_pct = _d(getattr(scheme, 'gp_holdback_pct', None))
+
+    # Fix (2026-07-10) — For carry-component amounts whose semantic is
+    # "0 = no carry activity yet" (fund open, GP hasn't been paid),
+    # substitute Decimal('0') when the aggregator returned None. Matches
+    # the CarriedInterest model's NOT NULL DEFAULT 0 for these fields, so
+    # the provenance panel shows "₹0 Cr" instead of "₹? Cr" — which
+    # matches what the dashboard tile shows.
+    #
+    # Universal: applies to gp_clawback_provision (open funds show 0),
+    # gp_catchup_amount (no distributions yet → 0 catchup), and
+    # gp_carry_holdback_amount (nothing paid → nothing held back).
+    #
+    # NOTE: percentages (hurdle_rate, carry_pct, holdback_pct) are NOT
+    # defaulted to 0 — an unknown rate is genuinely unknown, and showing
+    # "0%" would be misleading. Percentages stay as None → "?" so the
+    # user knows the LPA field is missing.
+    if _wf_clawback is None:
+        _wf_clawback = Decimal('0')
+    if _wf_catchup is None:
+        _wf_catchup = Decimal('0')
+
+    # Additional carry components read from aggregates for the Net Carry
+    # formula. These are the SAME three inputs the aggregator uses to
+    # compute carry_amount_net internally (phase4_derivations line 1439/1443
+    # for gp_data_captured funds, 1425/1428 for formula-derived funds).
+    # Universal — all three default to 0 for open funds with no GP payout.
+    _wf_gp_distributed  = _d(_agg_prov.get('gp_carry_distributed'))
+    _wf_gp_holdback_amt = _d(_agg_prov.get('gp_holdback_escrow'))
+    if _wf_gp_distributed is None:
+        _wf_gp_distributed = Decimal('0')
+    if _wf_gp_holdback_amt is None:
+        _wf_gp_holdback_amt = Decimal('0')
 
     # ── Atomic per-event breakdown (used in provenance to show real numbers
     # instead of generic "XIRR solver over ..." placeholder).
@@ -2564,17 +2685,50 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
         # Each entry: (description, template, substituted with real numbers)
         T = _fmt_num
         if metric_key == 'carry_base':
-            return ('Total Value − Called − Preferred Return',
-                    f'(₹{T(_wf_total_dist)} Cr + ₹{T(_wf_nav)} Cr) − ₹{T(_wf_called)} Cr − ₹{T(_wf_pref)} Cr')
+            # Fix U5 provenance: match the actual formula in
+            # phase4_derivations._compute_european_waterfall — carry_base is
+            # "total profit above capital" = (realised + residual NAV) − called.
+            # NO preferred_return subtraction here — that happens later in the
+            # catch-up / step-4 split, not in the base itself. Matches the
+            # Bharatcrest Carry_Clawback ground truth cell "Total Profit above
+            # Capital = 1430.60".
+            return ('(Distributions + Residual NAV) − Called Capital',
+                    f'(₹{T(_wf_total_dist)} Cr + ₹{T(_wf_residual_nav)} Cr) − ₹{T(_wf_called)} Cr')
         if metric_key == 'carry_amount_gross':
+            # Two equivalent forms — the one that shows real numbers first:
+            #   (a) 20% × carry_base                    ← always populated
+            #   (b) GP Catch-up + GP share of residual  ← only when the
+            #                                             per-step decomposition
+            #                                             was published
+            if _wf_carry_pct is not None and _wf_total_dist is not None \
+                    and _wf_residual_nav is not None and _wf_called is not None:
+                _base_num = (_wf_total_dist + _wf_residual_nav - _wf_called)
+                if _base_num < 0:
+                    _base_num = Decimal('0')
+                return (f'{T(_wf_carry_pct)}% × Carry Base',
+                        f'{T(_wf_carry_pct)}% × ₹{T(_base_num)} Cr')
             return ('GP Catch-up + GP share of residual after catch-up',
                     f'₹{T(_wf_catchup)} Cr + ₹{T(_wf_step4b)} Cr')
         if metric_key == 'carry_amount_net':
-            return ('Gross Carry − Clawback Provision',
-                    f'₹{T(_wf_carry_gross)} Cr − ₹{T(_wf_clawback)} Cr')
+            # Match the actual aggregator computation (phase4_derivations
+            # line 1443 for gp_data_captured funds; line 1428 else):
+            #     net = distributed_to_GP − holdback − clawback
+            # For open funds with no GP payout yet, all three inputs are 0,
+            # so the formula honestly shows "0 − 0 − 0 = 0" instead of the
+            # arithmetically-inconsistent "gross − 0 = 0" the old formula
+            # produced. For Bharatcrest-style closed distributions, the
+            # three real values show (296.12 − 59.22 − 10 = 226.90).
+            return ('Distributed to GP − Holdback Escrow − Clawback Provision',
+                    f'₹{T(_wf_gp_distributed)} Cr − ₹{T(_wf_gp_holdback_amt)} Cr − ₹{T(_wf_clawback)} Cr')
         if metric_key == 'gp_clawback_provision':
-            return ('20% of Gross Carry (default LPA escrow)',
-                    f'₹{T(_wf_carry_gross)} Cr × 20%')
+            # Fix U6 provenance: no hardcoded 20%. Use the LPA-declared
+            # Scheme.gp_holdback_pct when present; otherwise show that the
+            # LPA is silent (no invented number).
+            if _wf_holdback_pct is not None:
+                return (f'{T(_wf_holdback_pct)}% of Gross Carry (LPA escrow rate)',
+                        f'₹{T(_wf_carry_gross)} Cr × {T(_wf_holdback_pct)}%')
+            return ('Clawback provision (LPA holdback rate not published)',
+                    f'—')
         if metric_key == 'preferred_return_amount':
             return ('LP Called × ((1 + hurdle)^years − 1)',
                     f'₹{T(_wf_called)} Cr × ((1 + {T(_wf_hurdle)}%)^{T(_wf_years)} − 1)')

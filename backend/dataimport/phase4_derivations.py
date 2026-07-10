@@ -412,11 +412,15 @@ def compute_waterfall_for_scheme(scheme, as_of=None) -> dict:
     hurdle_pct = _safe_decimal(scheme.hurdle_rate_pct)
     carry_pct = _safe_decimal(scheme.carry_pct)
     inception = scheme.first_close_date or getattr(scheme.fund, 'inception_date', None)
-    # Default holdback policy (universal industry standard): 20% of carry
-    # distributed sits in escrow. If a fund's LPA differs, store on Scheme;
-    # extend this read when that field exists. Until then 20% is the SEBI /
-    # ILPA default and matches every AIF we have on file.
-    holdback_pct = Decimal('0.20')
+    # Fix U6b — Removed the hardcoded `Decimal('0.20')` default. Holdback is
+    # now driven strictly by Scheme.gp_holdback_pct (populated at import time
+    # by _persist_scheme reading from fund_master OR waterfall_kv). When the
+    # LPA is silent, holdback_pct stays None and every holdback-dependent
+    # output field returns None as well — the dashboard shows "—" instead of
+    # a fabricated 20%. This does NOT affect carry_amount_net, which uses the
+    # identity  net = gross − clawback  and does not require holdback.
+    scheme_holdback = _safe_decimal(getattr(scheme, 'gp_holdback_pct', None))
+    holdback_pct = (scheme_holdback / Decimal('100')) if scheme_holdback is not None else None
 
     missing = []
     if hurdle_pct is None:
@@ -515,8 +519,42 @@ def compute_waterfall_for_scheme(scheme, as_of=None) -> dict:
     preferred_return = preferred_return.quantize(Decimal('0.01'))
 
     # ── Step 3 — GP Catch-Up (100% to GP until carry% of profit-above-RoC)
-    # carry_base = total profit above capital
-    carry_base = max(Decimal('0'), total_distributed - total_called)
+    # Fix U5 — Open-fund carry_base includes residual (unrealised) fair value.
+    #
+    # Prior formula (`total_distributed − total_called`) is correct only for
+    # CLOSED funds where residual portfolio value = 0. For an OPEN fund with
+    # significant unrealised gains (typical mid-life PE/VC), realised
+    # distributions are naturally less than called capital → carry_base
+    # collapses to 0 → every downstream carry field goes to 0.
+    #
+    # Definition preserved (matches Bharatcrest's ground-truth Carry_Clawback
+    # sheet at R37): carry_base = "Total Profit above Capital" =
+    #     (realised_distributions + residual_fair_value_holding) − called
+    #
+    # For closed funds, residual = 0 → formula collapses EXACTLY to the
+    # previous form (`realised − called`), so no regression. Residual is
+    # sourced from Valuation.fair_value_of_holding (preferred) with a
+    # fair_value fallback; synthetic mark-to-cost rows are excluded (they
+    # are cost, not fair value). If no Valuation data was captured,
+    # residual = 0 → also collapses to the previous form.
+    from investments.models import Investment as _Investment, Valuation as _Valuation
+    from django.db.models import OuterRef as _OuterRef, Subquery as _Subquery
+    from django.db.models.functions import Coalesce as _Coalesce
+    _latest_holding = _Valuation.objects.filter(
+        investment=_OuterRef('pk'),
+    ).exclude(
+        methodology='derived_from_cost_x_scheme_markup',
+    ).order_by('-valuation_date').annotate(
+        _holding=_Coalesce('fair_value_of_holding', 'fair_value'),
+    ).values('_holding')[:1]
+    residual_nav = Decimal('0')
+    for _inv in _Investment.objects.filter(scheme=scheme).annotate(
+        _latest_fv=_Subquery(_latest_holding),
+    ):
+        if _inv._latest_fv:
+            residual_nav += _safe_decimal(_inv._latest_fv, Decimal('0'))
+    total_value = total_distributed + residual_nav
+    carry_base = max(Decimal('0'), total_value - total_called)
     carry_pct_decimal = carry_pct / Decimal('100')  # 20.00 → 0.20
 
     # GP entitlement = carry% of carry_base (the total carry GP earns over
@@ -548,7 +586,11 @@ def compute_waterfall_for_scheme(scheme, as_of=None) -> dict:
     )
 
     # Holdback escrow = holdback_pct × gp_distributed
-    gp_holdback = (holdback_pct * gp_distributed).quantize(Decimal('0.01'))
+    # Fix U6b — When the LPA is silent about the holdback rate, gp_holdback
+    # is None (not 0, not a fabricated 20%). Downstream callers must treat
+    # None as "not derivable" and the dashboard shows "—" for the escrow tile.
+    gp_holdback = ((holdback_pct * gp_distributed).quantize(Decimal('0.01'))
+                   if holdback_pct is not None else None)
 
     # Net carry = gross entitlement − clawback (after holdback covers).
     # When escrow ≥ clawback, the net to GP is entitlement − clawback.
@@ -1079,6 +1121,25 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
                        .aggregate(s=Sum('total_call_amount'))['s']) or Decimal('0')
     db_total_committed = (Commitment.objects.filter(scheme=scheme)
                           .aggregate(s=Sum('commitment_amount'))['s']) or Decimal('0')
+
+    # Fix U2B — LP register cumulative_called fallback for total_called.
+    #
+    # Some workbooks (Mock format: Multiples IV, Edelweiss III) publish only
+    # the LATEST pending call on the Capital Calls sheet (1 row) while the
+    # cumulative-drawn total lives on the LP register's `Drawdown` column.
+    # Sum(CapitalCall) is 125 Cr for Multiples IV; sum(Commitment.cumulative_called)
+    # is 3,164 Cr. The larger value is closer to reality — LP drawdowns
+    # are literally the received capital, they cannot be overstated.
+    #
+    # Only kicks in when the LP-register total materially exceeds CapitalCall
+    # sum (> ×2), preventing accidental override when the two ledgers agree
+    # or are minor variants of each other. Files where the CapitalCall
+    # ledger is complete (AI_Trivesta, Bharatcrest, TrackFundAI Master) see
+    # no change — Sum(CapitalCall) already dominates.
+    db_lp_called = (Commitment.objects.filter(scheme=scheme)
+                    .aggregate(s=Sum('cumulative_called'))['s']) or Decimal('0')
+    if db_lp_called > 0 and db_lp_called > db_total_called * Decimal('2'):
+        db_total_called = db_lp_called
     db_total_invested = (Investment.objects.filter(scheme=scheme)
                          .aggregate(s=Sum('total_invested'))['s']) or Decimal('0')
     db_total_realised = (ExitEvent.objects.filter(investment__scheme=scheme)
@@ -1282,7 +1343,26 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
                 pass
         py_pref = py_pref.quantize(Decimal('0.01'))
 
-        py_carry_base = max(Decimal('0'), total_distributed - total_called).quantize(Decimal('0.01'))
+        # Fix U5 — carry_base uses (realised + residual_NAV) − called so open
+        # funds with unrealised gains produce a non-zero indicative carry.
+        # Uses the same residual-NAV source as _compute_european_waterfall
+        # (Valuation.fair_value_of_holding, then fair_value). For closed
+        # funds residual = 0 → same value as the previous formula.
+        _lh = Valuation.objects.filter(
+            investment=OuterRef('pk'),
+        ).exclude(
+            methodology='derived_from_cost_x_scheme_markup',
+        ).order_by('-valuation_date').annotate(
+            _holding=Coalesce('fair_value_of_holding', 'fair_value'),
+        ).values('_holding')[:1]
+        _residual_nav = Decimal('0')
+        for _inv in Investment.objects.filter(scheme=scheme).annotate(
+            _latest_fv=Subquery(_lh),
+        ):
+            if _inv._latest_fv:
+                _residual_nav += _safe_decimal(_inv._latest_fv, Decimal('0'))
+        py_total_value = total_distributed + _residual_nav
+        py_carry_base = max(Decimal('0'), py_total_value - total_called).quantize(Decimal('0.01'))
         py_catchup_uncapped = (py_pref * carry_d / one_minus_carry).quantize(Decimal('0.01'))
         py_avail_after_roc_pref = max(Decimal('0'),
                                       total_distributed - min(total_called, total_distributed) - py_pref)
@@ -1314,10 +1394,14 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
         actual_gp_distributed = (gp_component_sum + carry_event_sum).quantize(Decimal('0.01'))
         gp_data_captured = actual_gp_distributed > 0
 
-        # Holdback % — LPA-specific value on Scheme, falling back to industry
-        # default 20% (SEBI / ILPA standard) when LPA didn't publish it.
+        # Fix U6b — Holdback % strictly from Scheme.gp_holdback_pct (populated
+        # from LPA fields at import time). When the LPA is silent, holdback_rate
+        # is None and every holdback-derived output field returns None below
+        # (formula_gp_holdback, gp_holdback). No fabricated 20% is used.
+        # `carry_amount_net` still computes via the identity `gross − clawback`
+        # so the primary carry field never depends on holdback.
         scheme_holdback_pct = _safe_decimal(getattr(scheme, 'gp_holdback_pct', None))
-        holdback_rate = (scheme_holdback_pct / Decimal('100')) if scheme_holdback_pct else Decimal('0.20')
+        holdback_rate = (scheme_holdback_pct / Decimal('100')) if scheme_holdback_pct is not None else None
 
         # Atomic-Python assignments — extracted facts win.
         carry_base           = py_carry_base
@@ -1334,21 +1418,35 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
         py_step4_pool = max(Decimal('0'), py_avail_after_roc_pref - py_catchup)
         py_step4_gp = (py_step4_pool * carry_d).quantize(Decimal('0.01'))
         formula_gp_distributed = (py_catchup + py_step4_gp).quantize(Decimal('0.01'))
-        formula_gp_holdback = (holdback_rate * formula_gp_distributed).quantize(Decimal('0.01'))
+        # Fix U6b — when holdback_rate is None (LPA silent), formula_gp_holdback
+        # is None as well. Downstream, `gp_holdback` is either the extracted
+        # cell value (Bharatcrest publishes 59.22 explicitly) OR None. Callers
+        # persist None as NULL, so the escrow tile shows "—".
+        formula_gp_holdback = ((holdback_rate * formula_gp_distributed).quantize(Decimal('0.01'))
+                               if holdback_rate is not None else None)
         formula_gp_clawback = max(Decimal('0'),
                                   formula_gp_distributed - py_carry_gross).quantize(Decimal('0.01'))
-        formula_gp_net = (formula_gp_distributed - formula_gp_holdback
-                          - formula_gp_clawback).quantize(Decimal('0.01'))
+        # net = distributed − holdback − clawback; when holdback is None fall
+        # back to  distributed − clawback  (the "identity" net-carry that does
+        # not depend on holdback).
+        formula_gp_net = ((formula_gp_distributed - formula_gp_holdback - formula_gp_clawback).quantize(Decimal('0.01'))
+                          if formula_gp_holdback is not None
+                          else (formula_gp_distributed - formula_gp_clawback).quantize(Decimal('0.01')))
 
         if gp_data_captured:
             # We have REAL per-event GP carry data → trustworthy clawback math.
             gp_carry_distributed = actual_gp_distributed
-            gp_holdback = (holdback_rate * actual_gp_distributed).quantize(Decimal('0.01'))
+            gp_holdback = ((holdback_rate * actual_gp_distributed).quantize(Decimal('0.01'))
+                           if holdback_rate is not None else None)
             gp_clawback = max(Decimal('0'),
                               actual_gp_distributed - py_carry_gross).quantize(Decimal('0.01'))
             # Net = gross distributed − holdback − clawback (matches CA's
             # worked-example output exactly: 296.12 − 59.22 − 10 = 226.90).
-            gp_carry_net = (actual_gp_distributed - gp_holdback - gp_clawback).quantize(Decimal('0.01'))
+            # When holdback is None, drop the − holdback term so the identity
+            # `net = distributed − clawback` still runs.
+            gp_carry_net = ((actual_gp_distributed - gp_holdback - gp_clawback).quantize(Decimal('0.01'))
+                            if gp_holdback is not None
+                            else (actual_gp_distributed - gp_clawback).quantize(Decimal('0.01')))
         else:
             # No per-event carry-split data. Use formula-derived defaults for
             # gross / distributed / net, BUT leave clawback as None so the
