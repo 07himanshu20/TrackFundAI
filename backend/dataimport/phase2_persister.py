@@ -36,6 +36,27 @@ def _first_present(*values):
     return None
 
 
+def _total_fair_value_metric(*, active_fv, realised) -> Optional[Decimal]:
+    """Universal 'Total Fair Value' = Active FV + Realised Proceeds from Exits.
+
+    Matches the AIF industry-standard formula and Excel Cover 'Total FV
+    Unrealised (B8) + Total Realised Proceeds (B9)'. Both inputs are
+    optional individually — if either is present, the sum is meaningful
+    (the missing side is treated as 0). Returns None only when BOTH inputs
+    are absent, so the FundMetric loop skips writing the row for funds with
+    no valuations AND no exits (e.g. a brand-new fund pre-drawdown).
+
+    Universal: works on any fund regardless of workbook layout — the two
+    inputs are already normalised by the aggregator (holding basis for
+    Active FV, ExitEvent-derived for Realised).
+    """
+    a = _d(active_fv)
+    r = _d(realised)
+    if a is None and r is None:
+        return None
+    return (a or Decimal('0')) + (r or Decimal('0'))
+
+
 def _derive_carry_net(agg: dict, wf: dict):
     """Universal fallback: carry_amount_net = carry_amount_gross − gp_clawback.
 
@@ -2429,18 +2450,21 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
     # tiles reflect only real source-reported valuations. The per-investment
     # FV column still shows synthetic estimates (read directly from Valuation).
     # Universal — synthetic rows are tagged at creation time.
-    # FV precedence: prefer `fair_value` (what the Cover/Summary sheet
-    # reports and what Excel-generating fund managers show as "Total FV"),
-    # fall back to `fair_value_of_holding`. For workbooks that populate only
-    # one column, the persister mirrors it into both — so both funds
-    # (equity-reporting like Multiples and holding-only like AI_Trivesta)
-    # yield the same authoritative number here.
+    # FV precedence (2026-07-11 flip): prefer `fair_value_of_holding` (the
+    # FUND'S stake in the company — what an LP would actually get) and fall
+    # back to `fair_value` (the company's total equity value) only when the
+    # workbook doesn't publish a per-holding column. Universal:
+    #   • Single-FV-column workbooks mirror both fields at persist time, so
+    #     preferring either column yields the identical number.
+    #   • Multi-column workbooks (distinct Equity Val vs FV Holding) now use
+    #     the LP-stake column — matches Excel Cover 'Total FV Unrealised'
+    #     (SUM VALUATIONS!P) and the industry-standard AIF convention.
     latest_per_inv = Valuation.objects.filter(
         investment=OuterRef('pk'),
     ).exclude(
         methodology='derived_from_cost_x_scheme_markup',
     ).order_by('-valuation_date').annotate(
-        holding_or_equity=Coalesce('fair_value', 'fair_value_of_holding'),
+        holding_or_equity=Coalesce('fair_value_of_holding', 'fair_value'),
     ).values('holding_or_equity')[:1]
     inv_qs = Investment.objects.filter(scheme=scheme).annotate(
         latest_fv=Subquery(latest_per_inv),
@@ -2678,6 +2702,9 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
     _atomic_fv = _d(_agg_local.get('total_unrealised_fv_holding')) or active_fv
     # Total invested (cost basis denominator for MOIC)
     _atomic_invested = _d(_agg_local.get('total_invested_capital'))
+    # Realised proceeds (numerator addend for Gross MOIC) — matches Excel B9
+    # 'Total Realised Proceeds' and ExitEvent.proceeds. Universal.
+    _atomic_realised = _d(_agg_local.get('total_realised_proceeds')) or Decimal('0')
 
     def _canonical_formula(metric_key):
         """Return (formula_template, substituted_formula) for derived metrics.
@@ -2743,8 +2770,30 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
         # the extracted (often inflated) fund_nav, which made the audit drawer
         # show different inputs than what the tile value was computed from.
         if metric_key == 'tvpi':
-            return ('(Total Distributions + Atomic FV) / Called Capital',
-                    f'(₹{T(_atomic_dist_total)} Cr + ₹{T(_atomic_fv)} Cr) / ₹{T(_atomic_call_total)} Cr')
+            # Show ONLY the formula for the P-tier that actually fired.
+            # The priority-ladder section elsewhere on the panel lists all
+            # four tiers with a "Used" badge on the chosen one, so the user
+            # already sees the alternatives — this section is strictly the
+            # arithmetic that produced the displayed value.
+            _tvpi_code = agg.get('tvpi_method')
+            _tvpi_dist_val = _d(agg.get('total_distributions')) or Decimal('0')
+            _tvpi_res_val  = _d(_first_present(
+                agg.get('total_unrealised_fv_holding'),
+                agg.get('active_fair_value'))) or Decimal('0')
+            _tvpi_fund_nav = _d(agg.get('fund_nav_latest')) or Decimal('0')
+            _tvpi_called   = _d(agg.get('total_capital_called')) or Decimal('0')
+            if _tvpi_code == 'p1_computed_with_distributions':
+                return ('P1: (Total Distributions + Residual NAV) / Total Called Capital',
+                        f'(₹{T(_tvpi_dist_val)} Cr + ₹{T(_tvpi_res_val)} Cr) / ₹{T(_tvpi_called)} Cr')
+            if _tvpi_code == 'p2_computed_fund_nav_over_called':
+                return ('P2: Fund NAV / Total Called Capital',
+                        f'₹{T(_tvpi_fund_nav)} Cr / ₹{T(_tvpi_called)} Cr')
+            if _tvpi_code == 'p3_extracted_cell':
+                return ('P3: Extracted directly from a workbook cell labelled "TVPI" / "Net MOIC"',
+                        'value read directly from workbook — no arithmetic')
+            # p4_insufficient_data or None — value is blank, no arithmetic to show
+            return ('P4: Insufficient data — no formula produced a value',
+                    'see the Missing inputs table for the specific inputs absent')
         if metric_key == 'dpi':
             return ('Total Distributions / Called Capital',
                     f'₹{T(_atomic_dist_total)} Cr / ₹{T(_atomic_call_total)} Cr')
@@ -2752,8 +2801,15 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
             return ('Atomic FV (sum of source Valuations) / Called Capital',
                     f'₹{T(_atomic_fv)} Cr / ₹{T(_atomic_call_total)} Cr')
         if metric_key == 'moic':
-            return ('(Total Distributions + Atomic FV) / Total Invested Capital',
-                    f'(₹{T(_atomic_dist_total)} Cr + ₹{T(_atomic_fv)} Cr) / ₹{T(_atomic_invested)} Cr')
+            # Gross MOIC (universal AIF industry-standard, matches Excel row 15
+            # `(B8 + B9) / B7`): numerator uses Realised Proceeds — full exit
+            # cashback — NOT LP Distributions. The aggregator switched to this
+            # formula on 2026-07-11; the provenance panel must reflect it.
+            # 2026-07-11: renamed "Atomic FV" -> "Active Fair Value" and
+            # "Total Invested Capital" -> "Total Cost" so the formula reads
+            # the same as the KPI tiles + AIF industry convention.
+            return ('(Realised Proceeds + Active Fair Value) / Total Cost',
+                    f'(₹{T(_atomic_realised)} Cr + ₹{T(_atomic_fv)} Cr) / ₹{T(_atomic_invested)} Cr')
         if metric_key == 'net_irr':
             # Method-aware formula display. Net IRR is computed via a 3-tier
             # priority ladder in phase4; the description shown here reflects
@@ -2917,37 +2973,50 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
         'invested_cost':            agg.get('total_invested_capital'),
         'realized_proceeds':        agg.get('total_realised_proceeds'),
         'lp_distributions':         agg.get('total_distributions'),
-        # Universal FV tile: prefer real-source aggregate → then any
-        # DB Valuation FV sum (includes synthetic) → then the fund's NAV FMV.
-        # This guarantees the dashboard tile shows a number for every fund,
-        # even those whose workbook has no dedicated Valuations sheet — the
-        # NAV walk's Unrealised FMV column is authoritative in that case.
-        # Prefer the portfolio-equity FV (matches Cover Total Fair Value on
-        # workbooks with FV Holding vs Equity Val distinction). Falls back
-        # to LP-holding FV, then live-DB FV sum, then extracted NAV. Universal.
-        'active_fair_value':        (agg.get('total_portfolio_fv')
-                                     or agg.get('total_unrealised_fv_holding')
+        # Universal FV tile (2026-07-11 semantic clarification):
+        #
+        #   active_fair_value  =  fund's stake in still-held positions only
+        #                         (mark-to-market of unrealised portfolio,
+        #                          on LP-holding basis — matches Excel B8
+        #                          "Total FV Unrealised" / SUM VALUATIONS!P).
+        #
+        #   total_fair_value   =  active_fair_value + realised_proceeds
+        #                         (industry-standard "Total Fair Value" for
+        #                          AIFs — matches Excel Cover B8 + B9).
+        #
+        # Fallback ladder for active_fair_value: prefer LP-holding basis
+        # (total_unrealised_fv_holding) — fall back to equity-basis
+        # (total_portfolio_fv) only when the workbook has no per-holding
+        # column, then to live-DB FV sum, then to extracted NAV. Universal.
+        'active_fair_value':        (agg.get('total_unrealised_fv_holding')
+                                     or agg.get('total_portfolio_fv')
                                      or active_fv
                                      or agg.get('fund_nav_latest')),
+        'total_fair_value':         _total_fair_value_metric(
+                                        active_fv=(agg.get('total_unrealised_fv_holding')
+                                                   or agg.get('total_portfolio_fv')
+                                                   or active_fv
+                                                   or agg.get('fund_nav_latest')),
+                                        realised=agg.get('total_realised_proceeds'),
+                                    ),
         'fund_nav':                 agg.get('fund_nav_latest'),
         # Waterfall — aggregator-derived (extracted-first, else Python)
         # Waterfall metrics with Phase-3 wf-block fallback (Gemini-extracted
         # values take precedence over formula-computed 0 when atomic ledger
         # lacks per-event GP carry data). Added 2026-06-30.
         'carry_amount_gross':       _zero_if_roc(_first_present(agg.get('carry_amount_gross'),  (wf or {}).get('carry_amount_gross'))),
-        'carry_amount_net':         _zero_if_roc(_first_present(
+        # Net Carry uses the AIF-standard formula (Gross × (1 − Clawback %))
+        # via the aggregator's P1/P2/P3 ladder. NO _zero_if_roc wrapping —
+        # if the aggregator emits None with carry_net_method='p3_insufficient_
+        # data', we want that None to flow through so the persister writes a
+        # blank FundMetric row with the itemised missing-inputs table (rather
+        # than a misleading ₹0). If the aggregator gives a real value we use
+        # that; fallback to extracted-cell candidates from Gemini's wf block.
+        'carry_amount_net':         _first_present(
             agg.get('carry_amount_net'),
             (wf or {}).get('net_carry'),
             (wf or {}).get('carry_amount_net'),
-            # Fix 2 (2026-07-06) — Universal derivation fallback.
-            # When no explicit "Net Carry" candidate survives the reconciler
-            # (Sequoia case: only "Carry Escrow Balance" was published, and
-            # Fix D correctly reassigned it to clawback), derive
-            #   carry_amount_net = carry_amount_gross − gp_clawback_provision
-            # from the values that ARE known. Fully deterministic; never
-            # fires when an explicit net-carry number was extracted.
-            _derive_carry_net(agg, wf),
-        )),
+        ),
         'gp_clawback_provision':    _zero_if_roc(_first_present(agg.get('gp_clawback_provision'), (wf or {}).get('clawback_provision'), (wf or {}).get('gp_clawback_provision'))),
         'gp_catchup_amount':        _zero_if_roc(_first_present(agg.get('gp_catchup_amount'),   (wf or {}).get('step_3_catchup_amount'), (wf or {}).get('gp_catchup_amount'))),
         'preferred_return_amount':  _first_present(agg.get('preferred_return_amount'),          (wf or {}).get('step_2_preferred_return'), (wf or {}).get('preferred_return_amount')),
@@ -2970,14 +3039,62 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
         'extracted_cell': 'Extracted — Net IRR read directly from a labelled workbook cell',
         'insufficient_data': 'Insufficient data — cannot compute or extract; see reasons below',
     }
+    _CARRY_METHOD_LABELS = {
+        'p1_extracted_cell':    'P1 — Extracted from workbook (a Carry_Clawback / Fund_Overview / WATERFALL_EUR cell)',
+        'p2_computed_formula':  'P2 — Computed via universal formula: carry_pct × max(0, (Realised + Residual NAV) − Called). European Whole-Fund + 100% GP Catch-Up (ILPA standard).',
+        'p3_insufficient_data': 'P3 — Insufficient data. Cannot compute AND no workbook cell available. See "Missing inputs" table.',
+    }
+    _CARRY_PRIORITY_LADDER = [
+        'P1 — Extract directly from a published workbook cell (Carry_Clawback / Fund_Overview / WATERFALL_EUR). Wins whenever the CA has written a "GP Total Carry" / "Carry Provision" value.',
+        'P2 — Compute via the universal formula. Waterfall variant is fixed to European Whole-Fund with 100% GP Catch-Up. Formula: Carry = carry_pct × max(0, (Realised Proceeds + Residual NAV) − Called Capital).',
+        'P3 — Blank. Neither extract nor compute produced a value; the "Missing inputs" table lists exactly which inputs are absent.',
+    ]
+    _CARRY_NET_METHOD_LABELS = {
+        'p1_extracted_cell':    'P1 — Extracted from workbook (a "Net Carry" / "Carry Payable" / "Performance Fee Payable" cell)',
+        'p2_computed_formula':  'P2 — Computed via AIF-standard formula: Net = Gross Carry × (1 − Clawback Reserve %). Universal across every European whole-fund AIF.',
+        'p3_insufficient_data': 'P3 — Insufficient data. Either Gross Carry or Clawback Reserve % is unavailable. See "Missing inputs" table.',
+    }
+    _CARRY_NET_PRIORITY_LADDER = [
+        'P1 — Extract directly from a published workbook cell (MASTER_INPUTS "Performance Fee / Carry Payable" / Fund_Overview "Net Carry" / any labelled net-carry balance).',
+        'P2 — Compute via the AIF-standard formula. Net Carry = Gross Carry × (1 − Clawback Reserve %). Clawback Reserve % is a mandatory LPA disclosure (typically 20–30%).',
+        'P3 — Blank. Either Gross Carry could not be derived, or Clawback Reserve % is not published on Scheme.gp_holdback_pct.',
+    ]
+    _TVPI_METHOD_LABELS = {
+        'p1_computed_with_distributions':   'P1 — Computed via Formula 1 (fund has distributions): Net MOIC = (Total Distributions + Residual NAV) / Total Called Capital.',
+        'p2_computed_fund_nav_over_called': 'P2 — Computed via Formula 2 (pre-distribution phase): Net MOIC = Fund NAV / Total Called Capital.',
+        'p3_extracted_cell':                'P3 — Extracted directly from a workbook cell labelled "TVPI" / "Net MOIC".',
+        'p4_insufficient_data':             'P4 — Insufficient data. Neither formula could be computed AND no extracted cell available. See "Missing inputs" table.',
+    }
+    _TVPI_PRIORITY_LADDER = [
+        'P1 — Formula 1 (used when the fund has distributed to LPs): Net MOIC = (Total Distributions + Residual NAV) / Total Called Capital. LP-perspective TVPI, matches ILPA standard.',
+        'P2 — Formula 2 (fallback for pre-distribution funds): Net MOIC = Fund NAV / Total Called Capital. Uses accounting NAV as a proxy when no cash has flowed out yet.',
+        'P3 — Extract directly from a published workbook cell labelled "TVPI" / "Net MOIC" (CA-provided headline value).',
+        'P4 — Blank. None of Formula 1, Formula 2, or a published cell could produce a value. See the "Missing inputs" table for the specific inputs absent.',
+    ]
+    # Metrics for which a P-blank row still gets persisted (so the frontend
+    # can render the sliding panel and explain what's missing). For every
+    # other metric, val is None → skip.
+    _P3_BLANK_KEYS = {'carry_base', 'carry_amount_gross', 'carry_amount_net', 'tvpi'}
     for key, raw_value in metric_map.items():
-        # net_irr_method is metadata (routes through the metric_map so the
-        # frontend can read it via FundMetric.inputs_used), not a metric.
-        # Skip its own FundMetric row.
-        if key == 'net_irr_method':
+        # net_irr_method / carry_method are metadata routed through metric_map
+        # so the frontend can read them via FundMetric.inputs_used. Skip their
+        # own FundMetric rows.
+        if key in ('net_irr_method',):
             continue
         val = _d(raw_value)
-        if val is None:
+        _carry_method_code     = agg.get('carry_method')
+        _carry_net_method_code = agg.get('carry_net_method')
+        _tvpi_method_code      = agg.get('tvpi_method')
+        # Allow P-blank rows through for carry/tvpi keys so the sidebar panel
+        # can render "insufficient data" with the itemised missing inputs
+        # table. For every other metric, val=None still skips.
+        _is_p3_gross_key = (key in ('carry_base', 'carry_amount_gross')
+                            and _carry_method_code == 'p3_insufficient_data')
+        _is_p3_net_key   = (key == 'carry_amount_net'
+                            and _carry_net_method_code == 'p3_insufficient_data')
+        _is_p4_tvpi_key  = (key == 'tvpi'
+                            and _tvpi_method_code == 'p4_insufficient_data')
+        if val is None and not (_is_p3_gross_key or _is_p3_net_key or _is_p4_tvpi_key):
             continue
         prov = _provenance_for(key, raw_value)
         # For net_irr: attach the priority-tier method used, a human label,
@@ -3006,6 +3123,83 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
                     _rv = _reasons_dict.get(_rk)
                     if _rv:
                         prov[_rk] = _rv
+        # ── Universal Fund NAV provenance ─────────────────────────────
+        # Attach the P1/P2 tier code, formula, both values (computed and
+        # extracted), the source cell for the extracted value, and the full
+        # 7-component input table. The frontend sidebar reads inputs_used
+        # to render the professional NAV panel with a component table plus
+        # an "also extracted from workbook" row when the two disagree.
+        if key == 'fund_nav':
+            _nav_prov = (agg or {}).get('fund_nav_provenance') or {}
+            if _nav_prov:
+                prov['fund_nav_method']        = _nav_prov.get('method')
+                prov['fund_nav_method_label']  = _nav_prov.get('method_label')
+                prov['fund_nav_formula']       = _nav_prov.get('formula')
+                prov['fund_nav_priority_ladder'] = [
+                    'P1 — Compute via the universal AIF NAV formula. All 7 balance-sheet components (Realised, Unrealised, Cash, Receivables, Mgmt Fee, Carry, Other Liabilities) must be present. When available, the computed value ALWAYS wins over the extracted cell.',
+                    'P2 — Fall back to the extracted "TOTAL FUND NAV" cell from the workbook when any component is missing.',
+                ]
+                prov['fund_nav_computed_value']  = _nav_prov.get('computed_value')
+                prov['fund_nav_extracted_value'] = _nav_prov.get('extracted_value')
+                prov['fund_nav_extracted_source'] = _nav_prov.get('extracted_source') or {}
+                prov['fund_nav_components']     = _nav_prov.get('components') or {}
+                prov['fund_nav_missing_inputs'] = _nav_prov.get('missing_inputs') or []
+                _c = prov['fund_nav_components']
+                _rs = _c.get('receivables_split') or {}
+                _os = _c.get('other_liab_split') or {}
+                # Build a professional flat table the sidebar can render
+                # verbatim. Each row = one formula input + numeric value +
+                # role (positive/negative in the formula) + human origin.
+                _rb = _c.get('realised_basis') or 'realised_gains'
+                _realised_label = (
+                    'Realised Gains on Exits'
+                    if _rb == 'realised_gains'
+                    else 'Realised Value (Exit Proceeds — cost basis fallback)'
+                )
+                _realised_origin = (
+                    'sum(ExitEvent.realized_gain_loss) — profit portion of exits '
+                    '(proceeds − cost). Only the gain counts because the cost basis '
+                    'is already recognised via Called Capital (AIF audited-NAV convention).'
+                    if _rb == 'realised_gains'
+                    else 'sum(ExitEvent.proceeds) — gross cash returned from exits '
+                         '(used as a fallback; the workbook did not publish per-exit gain data).'
+                )
+                prov['fund_nav_inputs_breakdown'] = [
+                    {'label': _realised_label,
+                     'value_rs_cr': _c.get('realised'),
+                     'role': 'Positive (+)',
+                     'origin': _realised_origin},
+                    {'label': 'Unrealised Value (Residual NAV)',
+                     'value_rs_cr': _c.get('unrealised'),
+                     'role': 'Positive (+)',
+                     'origin': 'sum(latest Valuation.fair_value_of_holding per Investment) — unrealised portfolio at fair value'},
+                    {'label': 'Undistributed Cash',
+                     'value_rs_cr': _c.get('cash'),
+                     'role': 'Positive (+)',
+                     'origin': 'Extracted from workbook — Cash & Cash Equivalents cell (fund bank balance)'},
+                    {'label': 'Receivables (Interest/Dividend + Other)',
+                     'value_rs_cr': _c.get('receivables'),
+                     'role': 'Positive (+)',
+                     'origin': ('Extracted from workbook — Interest/Dividend Receivable ('
+                                f'{_rs.get("interest_dividend")}) + Other Receivables ('
+                                f'{_rs.get("other")})')},
+                    {'label': 'Management Fee Payable',
+                     'value_rs_cr': _c.get('mgmt_fee_payable'),
+                     'role': 'Negative (−)',
+                     'origin': 'Extracted from workbook — Management Fee Payable (accrued) cell'},
+                    {'label': 'Performance Fee / Carry Payable',
+                     'value_rs_cr': _c.get('carry_payable'),
+                     'role': 'Negative (−)',
+                     'origin': 'Extracted from workbook — Performance Fee / Carry Payable (accrued) cell'},
+                    {'label': 'Other Liabilities (Fund Exp + Tax + Borrowings)',
+                     'value_rs_cr': _c.get('other_liabilities'),
+                     'role': 'Negative (−)',
+                     'origin': ('Extracted from workbook — Fund Expenses Payable ('
+                                f'{_os.get("fund_expenses")}) + Tax/Other ('
+                                f'{_os.get("tax")}) + Borrowings ('
+                                f'{_os.get("borrowings")})')},
+                ]
+
         # For active_fair_value, supplement with the live DB breakdown so
         # the panel can show "= co1 + co2 + ..." with real numbers.
         if key == 'active_fair_value' and contributing_companies:
@@ -3019,6 +3213,262 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
                 + ' + '.join(f'{v}' for _, v in contributing_companies)
                 + f' = {active_fv}'
             )
+        # For carry_base + carry_amount_gross + carry_amount_net: attach the
+        # priority tier used (P1 extract / P2 formula / P3 blank), the ladder
+        # text, an INPUTS breakdown table (universal formula), and — when P3
+        # — an itemised list of the specific inputs that were missing so the
+        # sliding panel can explain why the tile is blank. Mirrors the net_irr
+        # provenance pattern exactly.
+        if key in _P3_BLANK_KEYS:
+            # Route each carry/tvpi metric to its own tier tracker + labels
+            # + ladder. Every one of these emits (method_code, method_label,
+            # priority_ladder, missing_inputs) into `prov` so the frontend
+            # sidebar can render a uniform P-tier badge + missing-inputs table.
+            if key == 'carry_amount_net':
+                _method_code = agg.get('carry_net_method')
+                _method_labels = _CARRY_NET_METHOD_LABELS
+                _method_ladder = _CARRY_NET_PRIORITY_LADDER
+                _method_key    = 'carry_net_method'
+                _label_key     = 'carry_net_method_label'
+                _ladder_key    = 'carry_net_priority_ladder'
+                _missing_key   = 'carry_net_missing_inputs'
+                _missing_reason_key = 'carry_net_inputs'
+                _blank_code    = 'p3_insufficient_data'
+            elif key == 'tvpi':
+                _method_code = agg.get('tvpi_method')
+                _method_labels = _TVPI_METHOD_LABELS
+                _method_ladder = _TVPI_PRIORITY_LADDER
+                _method_key    = 'tvpi_method'
+                _label_key     = 'tvpi_method_label'
+                _ladder_key    = 'tvpi_priority_ladder'
+                _missing_key   = 'tvpi_missing_inputs'
+                _missing_reason_key = 'tvpi_inputs'
+                _blank_code    = 'p4_insufficient_data'
+            else:  # carry_base, carry_amount_gross
+                _method_code = agg.get('carry_method')
+                _method_labels = _CARRY_METHOD_LABELS
+                _method_ladder = _CARRY_PRIORITY_LADDER
+                _method_key    = 'carry_method'
+                _label_key     = 'carry_method_label'
+                _ladder_key    = 'carry_priority_ladder'
+                _missing_key   = 'carry_missing_inputs'
+                _missing_reason_key = 'carry_inputs'
+                _blank_code    = 'p3_insufficient_data'
+            if _method_code:
+                prov[_method_key]  = _method_code
+                prov[_label_key]   = _method_labels.get(_method_code, _method_code)
+                prov[_ladder_key]  = _method_ladder
+                # Universal formula inputs (real numbers from this scheme).
+                # Residual NAV = unrealised portfolio FV = sum of latest
+                # per-investment Valuation.fair_value_of_holding. This is the
+                # LPA-standard definition of "Residual NAV" — do NOT confuse
+                # with fund_nav_latest (accounting NAV), which additionally
+                # includes cash + receivables − liabilities and is not the
+                # right input to the carry base formula.
+                _cp   = _d(_first_present(_wf_carry_pct, agg.get('carry_pct'))) or Decimal('0')
+                _real = _d(agg.get('total_realised_proceeds')) or Decimal('0')
+                _res  = _d(_first_present(
+                    agg.get('total_unrealised_fv_holding'),
+                    agg.get('active_fair_value'))) or Decimal('0')
+                _origin_res = "sum(latest Valuation.fair_value_of_holding per Investment) — unrealised portfolio FV. LPA-standard 'Residual NAV' = still-held portfolio at fair value; excludes fund-level cash + receivables + fee accruals (those live inside fund_nav_latest, which is a different metric)."
+                _cap  = _d(agg.get('total_capital_called')) or Decimal('0')
+                _tv   = _real + _res
+                _base = _tv - _cap
+                if _base < 0:
+                    _base = Decimal('0')
+                _origin_real = "sum(ExitEvent.proceeds) — cash returned from exited investments"
+                _origin_cap  = "sum(CapitalCall.total_call_amount) — contributed capital to date"
+                _origin_cpct = "funds_scheme.carry_pct — LPA-declared GP carry rate (typically 20%)"
+                if key == 'carry_base':
+                    prov['inputs_breakdown'] = [
+                        {'label': 'Realised Exit Proceeds',
+                         'value_rs_cr': str(_real),
+                         'role': 'Total Value component',
+                         'origin': _origin_real},
+                        {'label': 'Residual NAV (unrealised portfolio FV)',
+                         'value_rs_cr': str(_res),
+                         'role': 'Total Value component',
+                         'origin': _origin_res},
+                        {'label': 'Total Capital Called',
+                         'value_rs_cr': str(_cap),
+                         'role': 'Subtracted (LP capital returned first)',
+                         'origin': _origin_cap},
+                        {'label': 'Formula',
+                         'value_rs_cr': '',
+                         'role': 'Universal',
+                         'origin': 'Carry Base = max(0, (Residual NAV + Realised Exit Proceeds) − Total Capital Called)'},
+                    ]
+                elif key == 'carry_amount_gross':
+                    prov['inputs_breakdown'] = [
+                        {'label': 'GP Carry %',
+                         'value_rs_cr': (f'{_cp}%' if _cp else ''),
+                         'role': 'Multiplier',
+                         'origin': _origin_cpct},
+                        {'label': 'Carry Base',
+                         'value_rs_cr': str(_base),
+                         'role': 'Base (multiplicand)',
+                         'origin': 'max(0, (Realised + Residual NAV) − Called Capital)'},
+                        {'label': 'Formula',
+                         'value_rs_cr': '',
+                         'role': 'Universal',
+                         'origin': 'Carry = GP Carry % × Carry Base  (European Whole-Fund + 100% GP Catch-Up identity)'},
+                    ]
+                elif key == 'carry_amount_net':
+                    _gross_carry_val = _d(agg.get('carry_amount_gross'))
+                    _clawback_pct    = _d(getattr(scheme, 'gp_holdback_pct', None))
+                    _net_computed    = None
+                    if _gross_carry_val is not None and _clawback_pct is not None:
+                        _net_computed = (_gross_carry_val
+                                         * (Decimal('1') - _clawback_pct / Decimal('100'))).quantize(Decimal('0.01'))
+                    prov['inputs_breakdown'] = [
+                        {'label': 'Gross Carry',
+                         'value_rs_cr': (str(_gross_carry_val) if _gross_carry_val is not None else ''),
+                         'role': 'Base (multiplicand)',
+                         'origin': 'derived: carry_amount_gross — see the Gross Carry panel for its own provenance (P1 extract / P2 formula)'},
+                        {'label': 'Clawback Reserve %',
+                         'value_rs_cr': (f'{_clawback_pct}%' if _clawback_pct is not None else ''),
+                         'role': 'Discount (LP escrow-back portion)',
+                         'origin': "funds_scheme.gp_holdback_pct — LPA-declared holdback. Sourced from workbook cells labelled 'Clawback Reserve %' / 'Holdback %' / 'Escrow %' on the MASTER_INPUTS / Fund_Overview / Carry_Clawback sheets."},
+                        {'label': 'Net Carry (computed)',
+                         'value_rs_cr': (str(_net_computed) if _net_computed is not None else ''),
+                         'role': 'Result',
+                         'origin': 'Gross Carry × (1 − Clawback Reserve %/100)'},
+                        {'label': 'Formula',
+                         'value_rs_cr': '',
+                         'role': 'AIF-standard, universal',
+                         'origin': 'Net Carry = Gross Carry × (1 − Clawback Reserve %). Indicative: what net carry the GP would take home after the LPA-mandated clawback reserve is set aside.'},
+                    ]
+                else:  # tvpi (a.k.a. Net MOIC)
+                    _tvpi_dist_val    = _d(agg.get('total_distributions'))
+                    _tvpi_res_val     = _d(_first_present(
+                        agg.get('total_unrealised_fv_holding'),
+                        agg.get('active_fair_value'))) or Decimal('0')
+                    _tvpi_fund_nav    = _d(agg.get('fund_nav_latest'))
+                    _tvpi_called_val  = _d(agg.get('total_capital_called'))
+                    # Show P1 result if it fired, else P2 result if it fired
+                    _p1_result = None
+                    if (_tvpi_dist_val is not None and _tvpi_dist_val > 0
+                            and _tvpi_called_val is not None and _tvpi_called_val > 0):
+                        _p1_result = ((_tvpi_dist_val + _tvpi_res_val) / _tvpi_called_val).quantize(Decimal('0.0001'))
+                    _p2_result = None
+                    if (_tvpi_fund_nav is not None and _tvpi_fund_nav > 0
+                            and _tvpi_called_val is not None and _tvpi_called_val > 0):
+                        _p2_result = (_tvpi_fund_nav / _tvpi_called_val).quantize(Decimal('0.0001'))
+                    prov['inputs_breakdown'] = [
+                        {'label': 'Total Distributions',
+                         'value_rs_cr': (str(_tvpi_dist_val) if _tvpi_dist_val is not None else '—'),
+                         'role': 'P1 numerator component (Formula 1 only)',
+                         'origin': 'sum(Distribution.total_net_amount) — cash returned to LPs. If null/zero, P1 formula skips and we fall to P2.'},
+                        {'label': 'Residual NAV (unrealised portfolio FV)',
+                         'value_rs_cr': str(_tvpi_res_val),
+                         'role': 'P1 numerator component',
+                         'origin': "sum(latest Valuation.fair_value_of_holding per Investment) — LPA-standard 'Residual NAV' = still-held portfolio at fair value."},
+                        {'label': 'Fund NAV (accounting NAV)',
+                         'value_rs_cr': (str(_tvpi_fund_nav) if _tvpi_fund_nav is not None else '—'),
+                         'role': 'P2 numerator (Formula 2 only)',
+                         'origin': "Extracted 'TOTAL FUND NAV' cell from NAV_CALC / Fund_Overview. Used as a proxy for total value when the fund hasn't distributed yet."},
+                        {'label': 'Total Called Capital',
+                         'value_rs_cr': (str(_tvpi_called_val) if _tvpi_called_val is not None else '—'),
+                         'role': 'Denominator (both formulas)',
+                         'origin': 'sum(CapitalCall.total_call_amount) — LP paid-in capital. Same denominator in P1 and P2.'},
+                        {'label': 'Formula 1 (P1)',
+                         'value_rs_cr': (f'{_p1_result}x' if _p1_result is not None else '— not computable'),
+                         'role': 'Result if P1 fires',
+                         'origin': 'Net MOIC = (Total Distributions + Residual NAV) / Total Called Capital. Applies when the fund has distributed to LPs.'},
+                        {'label': 'Formula 2 (P2)',
+                         'value_rs_cr': (f'{_p2_result}x' if _p2_result is not None else '— not computable'),
+                         'role': 'Result if P2 fires',
+                         'origin': "Net MOIC = Fund NAV / Total Called Capital. Fallback for pre-distribution funds (uses accounting NAV as proxy for LP value)."},
+                    ]
+                # P-blank tier — explicit missing inputs table. Sidebar panel
+                # iterates this list and shows one row per input we do NOT
+                # have. Users see EXACTLY which cell to add to unblock.
+                if _method_code == _blank_code:
+                    prov[_missing_key] = (
+                        (agg.get('reasons') or {}).get(_missing_reason_key) or []
+                    )
+                    # Force a specific provenance_kind so the frontend routes
+                    # to the "insufficient data" panel layout.
+                    prov['provenance_kind'] = 'insufficient_data'
+                    _formula_txt_by_key = {
+                        'carry_base':          'Carry Base = max(0, (Residual NAV + Realised) − Called)',
+                        'carry_amount_gross':  'Gross Carry = carry_pct × Carry Base',
+                        'carry_amount_net':    'Net Carry = Gross Carry × (1 − Clawback Reserve %)',
+                        'tvpi':                'Net MOIC = (P1) (Distributions + Residual NAV) / Called  OR  (P2) Fund NAV / Called',
+                    }
+                    prov['formula_expression'] = (
+                        _formula_txt_by_key.get(key,
+                        'Carry = carry_pct × max(0, (Realised + Residual NAV) − Called)') + '  '
+                        '=  ?  (see missing inputs table)'
+                    )
+        # For moic: attach an INPUTS table so the panel can render each
+        # component of the formula with its origin. Universal — the values
+        # come from the same agg dict the formula string used.
+        if key == 'moic':
+            _mfv = _d(agg.get('total_unrealised_fv_holding')
+                      or agg.get('total_portfolio_fv')
+                      or active_fv) or Decimal('0')
+            _mreal = _d(agg.get('total_realised_proceeds')) or Decimal('0')
+            _mcost = _d(agg.get('total_invested_capital')) or Decimal('0')
+            prov['inputs_breakdown'] = [
+                {'label': 'Realised Proceeds',
+                 'value_rs_cr': str(_mreal),
+                 'role': 'Numerator addend',
+                 'origin': "sum(ExitEvent.proceeds where is_actual=True) — exit cashback to the fund"},
+                {'label': 'Active Fair Value',
+                 'value_rs_cr': str(_mfv),
+                 'role': 'Numerator addend',
+                 'origin': "sum(latest Valuation.fair_value_of_holding per Investment) — fund's stake in still-held positions"},
+                {'label': 'Total Cost',
+                 'value_rs_cr': str(_mcost),
+                 'role': 'Denominator',
+                 'origin': 'sum(Investment.total_invested) — cost basis of every deployment'},
+            ]
+        # For active_fair_value: attach an EXPLAINER block on top of the
+        # per-company breakdown so the panel can render "what this is, how
+        # we get it, where the numbers come from" as tabular rows. Universal.
+        if key == 'active_fair_value':
+            prov['inputs_breakdown'] = [
+                {'label': 'What it is',
+                 'value_rs_cr': '',
+                 'role': 'Definition',
+                 'origin': "The fund's stake in every portfolio company it still owns, marked to today's fair value. Excludes cash already returned from exits."},
+                {'label': 'How it is derived',
+                 'value_rs_cr': '',
+                 'role': 'Formula',
+                 'origin': 'Σ latest_per_investment(Valuation.fair_value_of_holding) with fair_value fallback for workbooks that only publish one FV column.'},
+                {'label': 'Where the numbers come from',
+                 'value_rs_cr': '',
+                 'role': 'Source',
+                 'origin': "Excel VALUATIONS sheet → Gemini row extractor → investments_valuation table → aggregator picks the latest valuation per investment and sums the column."},
+            ]
+        # For total_fair_value: universal formula
+        #   Total Fair Value = Active Fair Value + Realised Proceeds from Exits
+        # The renderer's `computed_from_canonical_formula` branch splits the
+        # formula_expression on the literal '  =  ' (three spaces either side)
+        # into (template, substituted, result) and renders three tidy rows
+        # under "How we got it". The tabular breakdown is carried by
+        # `contributing_companies` (repurposed as the component list).
+        if key == 'total_fair_value':
+            _active = _d(agg.get('total_unrealised_fv_holding')
+                         or agg.get('total_portfolio_fv')
+                         or active_fv) or Decimal('0')
+            _realised = _d(agg.get('total_realised_proceeds')) or Decimal('0')
+            _total = _active + _realised
+            prov['provenance_kind'] = 'computed_from_canonical_formula'
+            prov['formula_expression'] = (
+                f'Active Fair Value + Realised Proceeds from Exits'
+                f'  =  '
+                f'Rs.{_active:,.2f} Cr + Rs.{_realised:,.2f} Cr'
+                f'  =  '
+                f'Rs.{_total:,.2f} Cr'
+            )
+            prov['contributing_companies'] = [
+                {'company': 'Active Fair Value  (fund stake in still-held positions)',
+                 'fair_value_of_holding': str(_active)},
+                {'company': 'Realised Proceeds from Exits',
+                 'fair_value_of_holding': str(_realised)},
+            ]
         # For lp_distributions: when we derived it from DB capital-only rows,
         # override Gemini's row-level provenance so the panel shows the real
         # filter rather than a stale total_distributions cell reference.

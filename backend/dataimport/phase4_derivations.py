@@ -1114,6 +1114,28 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
     # Universal across any AIF format: Gemini discovers where each labelled
     # aggregate lives; cell positions / sheet names / layouts can all change.
     verified_overrides = _verify_workbook_aggregates(unified_json or {})
+
+    # Also pull in the reconciler's trusted extractions (label-whitelist +
+    # workbook-aggregates ACCEPTs). Same source the post-aggregator reconcile
+    # step reads from, but pulled UP-FRONT so downstream computations (TVPI,
+    # RVPI, DPI, carry, IRR, waterfall) see the extracted authoritative
+    # values for called capital / distributions / fund_nav / realised /
+    # committed BEFORE they run — not just as a post-hoc override in the
+    # persister. Prevents the class of bug where the aggregator computes
+    # a ratio from a stale DB atomic sum while the reconciler independently
+    # picks the higher-authority extracted value for its numerator.
+    # Universal — same code path for every fund; each metric flows through
+    # the reconciler's label-whitelist so mis-labelled cells never leak in.
+    try:
+        from .phase4_reconciler import collect_trusted_extractions as _collect_trusted
+        _trusted = _collect_trusted(unified_json or {})
+        for _metric, _entry in (_trusted or {}).items():
+            _val = _entry.get('value') if isinstance(_entry, dict) else None
+            if _val is not None and _metric not in verified_overrides:
+                verified_overrides[_metric] = _val
+    except Exception as _e:
+        logger.warning(f'[phase4] pre-aggregator trusted-extraction pull failed: {_e}')
+
     reasons: dict[str, str] = {}
 
     # ── Atomic ledger sums (extracted facts only) ───────────────────────
@@ -1307,15 +1329,48 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
     carry_base = preferred_return = gp_catchup = gp_carry_gross = None
     gp_holdback = gp_clawback = gp_carry_net = gp_carry_distributed = None
     waterfall_source = 'missing'
+    # Universal carry method tag — mirrors net_irr_method pattern.
+    # Values:
+    #   'p1_extracted_cell'    — carry_base or carry_amount_gross came from a
+    #                             workbook cell (verified_overrides)
+    #   'p2_computed_formula'  — computed via European Whole-Fund + 100% GP
+    #                             Catch-Up formula: 20% × max(0, TV − Called)
+    #   'p3_insufficient_data' — cannot compute AND no extract; carry is blank
+    # Populated below and returned in the aggregator payload so the persister
+    # + frontend can show which tier the displayed carry value came from.
+    carry_method = None
+    carry_missing_inputs: list[dict] = []
+    # Same 3-tier tracker for the Net Carry derivation (independent from the
+    # Gross Carry tier since P1 for gross and P1 for net can be different).
+    carry_net_method = None
+    carry_net_missing_inputs: list[dict] = []
 
-    # Python compute when all required inputs are extracted facts AND the
-    # carry structure is European whole-fund.
+    # Python compute when all required inputs for the UNIVERSAL European
+    # Whole-Fund + 100% GP Catch-Up formula are extracted facts.
+    # Formula: carry = carry_pct × max(0, (Realised + Residual NAV) − Called)
+    # Required inputs:
+    #   • carry_pct (LPA)   — the GP's carry rate (typically 20%)
+    #   • carry_type='european'  — this branch only implements European whole-fund
+    #   • total_called      — LP capital contributed to date
+    #   • at least one value signal — total_realised (from ExitEvent) OR
+    #     residual NAV (from Valuation). LP-distribution ledger is NOT
+    #     required, since the universal formula uses Realised + Residual
+    #     (not Distributed) as the "Total Value" term. Funds that publish
+    #     Realised in a dedicated sheet but omit the LP distribution ledger
+    #     (e.g. Trivesta) still compute a real Base.
+    # Not required for this specific formula:
+    #   • hurdle_pct        — the 100% GP catch-up algebra cancels the hurdle
+    #                          (GP always ends with c × total_profit)
+    #   • inception         — no time factor in the closed-form identity
+    #   • total_distributed — see note above; not part of the formula
     can_compute_wf = (
         carry_type == 'european'
-        and hurdle_pct is not None and carry_pct is not None
-        and inception is not None
+        and carry_pct is not None
         and total_called is not None and total_called > 0
-        and total_distributed is not None
+        and (
+            (total_realised is not None and total_realised > 0)
+            or (db_active_fv is not None and db_active_fv > 0)
+        )
     )
     if not can_compute_wf and carry_type != 'european':
         reasons['waterfall'] = (
@@ -1326,28 +1381,43 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
 
     if can_compute_wf:
         calls = list(CapitalCall.objects.filter(scheme=scheme).order_by('call_date'))
-        hurdle = hurdle_pct / Decimal('100')
         carry_d = carry_pct / Decimal('100')
         one_minus_carry = Decimal('1') - carry_d
+        # Hurdle-derived math is optional — the closed-form GP-carry identity
+        # (carry = c × TV_above_capital) does NOT need it. When hurdle_pct or
+        # inception is missing, we still compute carry_base + carry_gross but
+        # leave preferred_return / catch-up / step-4 as None so the dashboard
+        # shows "—" for those specific tiles without dragging carry down too.
+        hurdle = (hurdle_pct / Decimal('100')) if hurdle_pct is not None else None
 
         # Per-call preferred return accrual (industry standard, matches the
-        # Carry_Clawback worked example).
-        py_pref = Decimal('0')
-        for c in calls:
-            try:
-                years = Decimal(str((as_of - c.call_date).days)) / Decimal('365.25')
-                py_pref += _safe_decimal(c.total_call_amount, Decimal('0')) * (
-                    ((Decimal('1') + hurdle) ** years) - Decimal('1')
-                )
-            except (InvalidOperation, OverflowError, TypeError):
-                pass
-        py_pref = py_pref.quantize(Decimal('0.01'))
+        # Carry_Clawback worked example). Skipped when hurdle is unknown.
+        py_pref = Decimal('0') if hurdle is not None else None
+        if hurdle is not None:
+            for c in calls:
+                if c.call_date is None:
+                    continue
+                try:
+                    years = Decimal(str((as_of - c.call_date).days)) / Decimal('365.25')
+                    py_pref += _safe_decimal(c.total_call_amount, Decimal('0')) * (
+                        ((Decimal('1') + hurdle) ** years) - Decimal('1')
+                    )
+                except (InvalidOperation, OverflowError, TypeError):
+                    pass
+            py_pref = py_pref.quantize(Decimal('0.01'))
 
-        # Fix U5 — carry_base uses (realised + residual_NAV) − called so open
-        # funds with unrealised gains produce a non-zero indicative carry.
-        # Uses the same residual-NAV source as _compute_european_waterfall
-        # (Valuation.fair_value_of_holding, then fair_value). For closed
-        # funds residual = 0 → same value as the previous formula.
+        # ══ RESIDUAL NAV (universal, per LPA definition) ══════════════════
+        #
+        # Residual NAV = unrealised portfolio FV = sum of latest per-investment
+        # Valuation.fair_value_of_holding across every still-held Investment.
+        #
+        # Do NOT use fund_nav_latest (accounting NAV) here — that includes
+        # fund-held cash + receivables − liabilities, which double-counts the
+        # `Realised` term and is definitionally different from "Residual".
+        # Some workbooks (e.g. Trivesta's WATERFALL_EUR) have a linking bug
+        # where a cell labelled "Residual NAV" actually points at TOTAL FUND
+        # NAV; we intentionally ignore that mis-link and use the true
+        # portfolio residual instead. Matches every AIF LPA definition.
         _lh = Valuation.objects.filter(
             investment=OuterRef('pk'),
         ).exclude(
@@ -1361,13 +1431,32 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
         ):
             if _inv._latest_fv:
                 _residual_nav += _safe_decimal(_inv._latest_fv, Decimal('0'))
-        py_total_value = total_distributed + _residual_nav
+        # ── THE UNIVERSAL FORMULA (single source of truth) ──────────────────
+        #   Carry Base = max(0, (Realised Exit Proceeds + Residual NAV) − Called Capital)
+        #   Gross Carry = GP Carry % × Carry Base
+        # Waterfall variant fixed to European Whole-Fund with 100% GP Catch-Up.
+        # Distributions are NOT used anywhere in these two lines — deliberately.
+        # Funds like Trivesta that publish Realised (from Exits) but not the
+        # LP Distribution ledger produce a real, non-zero Base via this formula.
+        _real_local = total_realised if total_realised is not None else Decimal('0')
+        py_total_value = _real_local + _residual_nav
         py_carry_base = max(Decimal('0'), py_total_value - total_called).quantize(Decimal('0.01'))
-        py_catchup_uncapped = (py_pref * carry_d / one_minus_carry).quantize(Decimal('0.01'))
-        py_avail_after_roc_pref = max(Decimal('0'),
-                                      total_distributed - min(total_called, total_distributed) - py_pref)
-        py_catchup = min(py_catchup_uncapped, py_avail_after_roc_pref).quantize(Decimal('0.01'))
         py_carry_gross = (carry_d * py_carry_base).quantize(Decimal('0.01'))
+        # Step-4 side decomposition (preferred return / catch-up / residual
+        # split) IS a distinct model of how the distributed cash flows out to
+        # LPs vs GP. It's a diagnostic / audit view — NOT part of the primary
+        # carry compute. Only run it when BOTH hurdle_pct AND the LP
+        # distribution ledger are present. Otherwise all side outputs are
+        # None and the primary carry_base + carry_gross above stand alone.
+        if py_pref is not None and total_distributed is not None:
+            py_catchup_uncapped = (py_pref * carry_d / one_minus_carry).quantize(Decimal('0.01'))
+            py_avail_after_roc_pref = max(Decimal('0'),
+                                          total_distributed - min(total_called, total_distributed) - py_pref)
+            py_catchup = min(py_catchup_uncapped, py_avail_after_roc_pref).quantize(Decimal('0.01'))
+        else:
+            py_catchup_uncapped = None
+            py_avail_after_roc_pref = None
+            py_catchup = None
 
         # ── ACTUAL GP-distributed-to-date (universal across European AIFs) ──
         # Sum from TWO real per-row sources:
@@ -1409,61 +1498,128 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
         gp_catchup           = py_catchup
         gp_carry_gross       = py_carry_gross
         waterfall_source     = 'computed_from_db'
+        # P2 tier used — the universal formula ran. If a workbook cell
+        # override is applied below, this gets promoted to P1.
+        carry_method         = 'p2_computed_formula'
 
         # Compute formula-derived defaults FIRST. These are mathematically
         # consistent with the European whole-fund waterfall (catch-up + step-4
         # GP share) and give the dashboard defensible numbers even when no
         # per-event GP carry data has been captured. Universal — works for
         # any European-waterfall fund with hurdle/carry/ledgers in DB.
-        py_step4_pool = max(Decimal('0'), py_avail_after_roc_pref - py_catchup)
-        py_step4_gp = (py_step4_pool * carry_d).quantize(Decimal('0.01'))
-        formula_gp_distributed = (py_catchup + py_step4_gp).quantize(Decimal('0.01'))
+        # Step-4 decomposition needs pref/catch-up. When pref is unknown
+        # (missing hurdle_pct), skip this decomposition and leave the
+        # step-4 outputs as None; the primary carry_gross above still lands
+        # via the closed-form identity and drives the dashboard tile.
+        if py_avail_after_roc_pref is not None and py_catchup is not None:
+            py_step4_pool = max(Decimal('0'), py_avail_after_roc_pref - py_catchup)
+            py_step4_gp = (py_step4_pool * carry_d).quantize(Decimal('0.01'))
+            formula_gp_distributed = (py_catchup + py_step4_gp).quantize(Decimal('0.01'))
+        else:
+            py_step4_pool = None
+            py_step4_gp = None
+            formula_gp_distributed = None
         # Fix U6b — when holdback_rate is None (LPA silent), formula_gp_holdback
         # is None as well. Downstream, `gp_holdback` is either the extracted
         # cell value (Bharatcrest publishes 59.22 explicitly) OR None. Callers
         # persist None as NULL, so the escrow tile shows "—".
-        formula_gp_holdback = ((holdback_rate * formula_gp_distributed).quantize(Decimal('0.01'))
-                               if holdback_rate is not None else None)
-        formula_gp_clawback = max(Decimal('0'),
-                                  formula_gp_distributed - py_carry_gross).quantize(Decimal('0.01'))
-        # net = distributed − holdback − clawback; when holdback is None fall
-        # back to  distributed − clawback  (the "identity" net-carry that does
-        # not depend on holdback).
-        formula_gp_net = ((formula_gp_distributed - formula_gp_holdback - formula_gp_clawback).quantize(Decimal('0.01'))
-                          if formula_gp_holdback is not None
-                          else (formula_gp_distributed - formula_gp_clawback).quantize(Decimal('0.01')))
+        # Holdback / clawback / net can only be formula-derived when
+        # formula_gp_distributed is known (needs pref+catch-up above).
+        if formula_gp_distributed is not None:
+            formula_gp_holdback = ((holdback_rate * formula_gp_distributed).quantize(Decimal('0.01'))
+                                   if holdback_rate is not None else None)
+            formula_gp_clawback = max(Decimal('0'),
+                                      formula_gp_distributed - py_carry_gross).quantize(Decimal('0.01'))
+            # net = distributed − holdback − clawback; when holdback is None fall
+            # back to  distributed − clawback  (the "identity" net-carry that does
+            # not depend on holdback).
+            formula_gp_net = ((formula_gp_distributed - formula_gp_holdback - formula_gp_clawback).quantize(Decimal('0.01'))
+                              if formula_gp_holdback is not None
+                              else (formula_gp_distributed - formula_gp_clawback).quantize(Decimal('0.01')))
+        else:
+            formula_gp_holdback = None
+            formula_gp_clawback = None
+            formula_gp_net = None
 
         if gp_data_captured:
-            # We have REAL per-event GP carry data → trustworthy clawback math.
+            # We have REAL per-event GP carry data → trustworthy accounting
+            # figures for how much carry has actually been paid out to the GP
+            # so far. These fields (gp_distributed / gp_holdback / gp_clawback)
+            # are ACCOUNTING amounts, distinct from the indicative Net Carry
+            # (computed via the AIF-standard formula further down).
             gp_carry_distributed = actual_gp_distributed
             gp_holdback = ((holdback_rate * actual_gp_distributed).quantize(Decimal('0.01'))
                            if holdback_rate is not None else None)
             gp_clawback = max(Decimal('0'),
                               actual_gp_distributed - py_carry_gross).quantize(Decimal('0.01'))
-            # Net = gross distributed − holdback − clawback (matches CA's
-            # worked-example output exactly: 296.12 − 59.22 − 10 = 226.90).
-            # When holdback is None, drop the − holdback term so the identity
-            # `net = distributed − clawback` still runs.
-            gp_carry_net = ((actual_gp_distributed - gp_holdback - gp_clawback).quantize(Decimal('0.01'))
-                            if gp_holdback is not None
-                            else (actual_gp_distributed - gp_clawback).quantize(Decimal('0.01')))
         else:
-            # No per-event carry-split data. Use formula-derived defaults for
-            # gross / distributed / net, BUT leave clawback as None so the
-            # downstream persister's waterfall-block fallback can pick up
-            # Gemini's CA-extracted value (e.g. Bharatcrest's Carry_Clawback
-            # sheet publishes clawback=10 explicitly). Per user rule:
-            # extracted-from-Excel wins over formula-computed.
+            # No per-event carry-split data — leave the accounting-flow
+            # fields to be filled by the extracted-cell fallback path.
             gp_carry_distributed = formula_gp_distributed
             gp_holdback          = formula_gp_holdback
             gp_clawback          = None  # ← let wf fallback fill if present
-            gp_carry_net         = formula_gp_net
             reasons['clawback_basis'] = (
                 'No per-event GP carry component in atomic ledger — leaving '
                 'clawback as None so persister can fall back to Gemini-extracted '
-                'value from the waterfall block. If both are missing the '
-                'dashboard will show ₹0 or "—" rather than a formula-derived 0.'
+                'value from the waterfall block.'
             )
+
+        # ══ UNIVERSAL NET CARRY (AIF-standard, 2026-07-12) ═════════════════
+        #
+        # Formula:  Net Carry = Gross Carry × (1 − Clawback Reserve %)
+        #
+        # The Clawback Reserve % is a mandatory LPA disclosure — the portion
+        # of gross carry the GP legally must escrow to cover potential
+        # clawback if the fund underperforms later. Universally published in
+        # every AIF workbook (typically labelled "Clawback Reserve",
+        # "Holdback", or "Escrow %") and persisted on Scheme.gp_holdback_pct.
+        #
+        # 3-tier priority ladder (mirrors carry_method for Gross Carry):
+        #   P1  p1_extracted_cell     Extracted "Net Carry" / "Carry Payable"
+        #                             cell from workbook (verified_overrides)
+        #   P2  p2_computed_formula   Net = Gross × (1 − clawback%/100)
+        #                             Universal formula using Scheme LPA terms
+        #   P3  p3_insufficient_data  Blank with itemised missing inputs
+        #
+        # Replaces the pre-2026-07-12 accounting-flow formula
+        # (distributed − holdback − clawback) which collapsed to 0 for any
+        # open fund with no LP distributions yet — misleading users into
+        # thinking the fund had earned no net carry. The new formula is
+        # INDICATIVE: it answers "if the fund liquidated today, what would
+        # net carry to the GP be after the mandatory clawback reserve?"
+        _clawback_reserve_pct = _safe_decimal(getattr(scheme, 'gp_holdback_pct', None))
+
+        # P2 attempt — compute from the universal formula
+        if py_carry_gross is not None and _clawback_reserve_pct is not None:
+            _cb_frac = _clawback_reserve_pct / Decimal('100')
+            if Decimal('0') <= _cb_frac <= Decimal('1'):
+                gp_carry_net = (py_carry_gross * (Decimal('1') - _cb_frac)).quantize(Decimal('0.01'))
+                carry_net_method = 'p2_computed_formula'
+            else:
+                # Sanity guard — Clawback % outside [0, 100] is an extraction
+                # error, treat as if the input weren't present. Fall through
+                # to the P3 branch below.
+                carry_net_missing_inputs.append({
+                    'input': f'Clawback Reserve % out of range (value {_clawback_reserve_pct}% not in 0–100%)',
+                    'expected_source': "LPA clawback rate — MASTER_INPUTS 'Clawback Reserve %' cell / Fund_Overview 'Holdback %' cell",
+                    'db_field': 'funds_scheme.gp_holdback_pct',
+                })
+                carry_net_method = 'p3_insufficient_data'
+        else:
+            # P3 — itemise WHY we couldn't compute
+            carry_net_method = 'p3_insufficient_data'
+            if py_carry_gross is None:
+                carry_net_missing_inputs.append({
+                    'input': 'Gross Carry (upstream carry_amount_gross could not be computed or extracted)',
+                    'expected_source': 'See the Gross Carry provenance panel — same missing-inputs chain applies',
+                    'db_field': 'derived: carry_amount_gross',
+                })
+            if _clawback_reserve_pct is None:
+                carry_net_missing_inputs.append({
+                    'input': 'Clawback Reserve % (LPA-declared holdback rate)',
+                    'expected_source': "MASTER_INPUTS 'Clawback Reserve %' cell / Fund_Overview 'Holdback %' cell / Carry_Clawback sheet header — extract into Scheme.gp_holdback_pct",
+                    'db_field': 'funds_scheme.gp_holdback_pct',
+                })
 
         # ── Option C: apply cell-verified overrides on TOP of formula/atomic.
         # When Gemini's workbook_aggregates entry survived cell-content
@@ -1493,19 +1649,81 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
             elif local == 'gp_carry_net':          gp_carry_net = ov_value
             elif local == 'preferred_return':      preferred_return = ov_value
             elif local == 'gp_catchup':            gp_catchup = ov_value
+        # P1 promotion — if the workbook published either carry_base or
+        # carry_amount_gross, the DISPLAYED carry value is the extracted cell,
+        # not the P2 compute. Method tag flips to P1 so the panel makes it
+        # explicit and the dashboard user knows this is the CA's own number.
+        if ('carry_base' in verified_overrides
+                or 'carry_amount_gross' in verified_overrides):
+            carry_method = 'p1_extracted_cell'
+        # Same P1 promotion for Net Carry — a published "Net Carry" or
+        # "Carry Payable" cell wins over the P2 formula compute.
+        if 'carry_amount_net' in verified_overrides:
+            _ov_net = _safe_decimal(verified_overrides.get('carry_amount_net'))
+            if _ov_net is not None:
+                gp_carry_net = _ov_net
+                carry_net_method = 'p1_extracted_cell'
+                # Drop any P3 missing-input notes since P1 succeeded
+                carry_net_missing_inputs = []
+
+        # Surface the Net Carry missing inputs on the reasons dict so the
+        # persister can attach them to the sidebar panel when P3 fires.
+        reasons['carry_net_inputs'] = carry_net_missing_inputs
     elif carry_type == 'european':
-        # Diagnose WHY European compute couldn't run — surface the missing
-        # input so the user can fix the source workbook / re-extract.
-        if hurdle_pct is None:
-            reasons['waterfall'] = 'Scheme.hurdle_rate_pct missing — cannot compute waterfall'
-        elif carry_pct is None:
-            reasons['waterfall'] = 'Scheme.carry_pct missing — cannot compute waterfall'
-        elif inception is None:
-            reasons['waterfall'] = 'Scheme.first_close_date / Fund.inception_date missing'
-        elif total_called is None or total_called == 0:
-            reasons['waterfall'] = 'No CapitalCall rows — cannot compute waterfall'
-        elif total_distributed is None:
-            reasons['waterfall'] = 'No Distribution rows — cannot compute waterfall'
+        # P3 — cannot compute AND no extract. Emit an itemised list of the
+        # specific inputs that were missing, so the frontend can render:
+        # "This fund's carry is blank because we don't have: X, Y, Z."
+        # Each item names the INPUT + WHERE we normally source it. Universal
+        # across every European whole-fund AIF workbook.
+        carry_method = 'p3_insufficient_data'
+        if carry_pct is None:
+            carry_missing_inputs.append({
+                'input': 'GP Carry % (carry_pct)',
+                'expected_source': 'LPA carry rate — Fund_Overview / Fund_Master / Cover cell labelled "GP Carry %" / "Performance Fee"',
+                'db_field': 'funds_scheme.carry_pct',
+            })
+        if total_called is None or total_called == 0:
+            carry_missing_inputs.append({
+                'input': 'Called Capital (contributed capital to date)',
+                'expected_source': 'CapitalCall rows or Fund_Master "Total Called Capital" cell',
+                'db_field': 'lp_capitalcall.total_call_amount (sum)',
+            })
+        if (total_realised is None or total_realised == 0) \
+                and (db_active_fv is None or db_active_fv == 0):
+            carry_missing_inputs.append({
+                'input': 'Realised Proceeds AND Residual NAV (both zero / missing)',
+                'expected_source': 'At least one of: ExitEvent.proceeds (from an Exits sheet) or per-investment Valuation.fair_value_of_holding (from a Valuations sheet)',
+                'db_field': 'investments_exitevent.proceeds OR investments_valuation.fair_value_of_holding',
+            })
+        reasons['carry_inputs'] = carry_missing_inputs
+        # Net Carry inherits P3 too — Gross Carry unavailable => can't compute
+        # `Gross × (1 − Clawback %)`. Cascade the reason so the sidebar for
+        # carry_amount_net explains "Gross Carry could not be computed".
+        carry_net_method = 'p3_insufficient_data'
+        carry_net_missing_inputs.append({
+            'input': 'Gross Carry (upstream — Gross Carry itself was P3-blank)',
+            'expected_source': 'See the Gross Carry panel for the specific missing inputs (carry_pct / Called / Realised + Residual NAV)',
+            'db_field': 'derived: carry_amount_gross',
+        })
+        reasons['carry_net_inputs'] = carry_net_missing_inputs
+        # Human-readable summary (kept for backward compatibility with any UI
+        # that reads reasons['waterfall']). Prefer the new carry_inputs list.
+        _items = '; '.join(m['input'] for m in carry_missing_inputs) or 'unknown inputs'
+        reasons['waterfall'] = (
+            f'Cannot compute carry — missing inputs: {_items}. Fix the source '
+            f'workbook (add cells for each missing input) or re-extract and '
+            f'the universal formula (20% × max(0, (Realised + Residual NAV) − '
+            f'Called)) will populate automatically.'
+        )
+    if carry_method is None:
+        # Extreme fallback — non-european carry type with no overrides ended
+        # up here silently. Mark P3 so the frontend never shows a carry
+        # value without a method tag next to it.
+        carry_method = 'p3_insufficient_data'
+        reasons.setdefault('carry_inputs', carry_missing_inputs)
+    if carry_net_method is None:
+        carry_net_method = 'p3_insufficient_data'
+        reasons.setdefault('carry_net_inputs', carry_net_missing_inputs)
 
     # ── Performance ratios — deterministic Python from atomic facts ─────
     # All ratios derived from atomic DB totals + extracted Net NAV.
@@ -1543,12 +1761,26 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
             return fund_nav
         return None
 
-    # MOIC = (Distributions + Portfolio-equity residual) / Invested Cost
-    # Portfolio-basis multiple — matches Cover's "Portfolio MOIC" display
-    # (uses Equity Val column). ILPA-aligned: cost denominator, not called.
+    # MOIC = (Realised Proceeds + Residual NAV on holding basis) / Invested Cost
+    # Industry-standard "Gross MOIC" / "Portfolio MOIC" — matches Excel Cover
+    # row 15 formula `(B8 + B9) / B7` where B8 = Total FV Unrealised, B9 =
+    # Total Realised Proceeds, B7 = Invested Cost.
+    #
+    # Numerator uses `total_realised` (ExitEvent.proceeds — full exit cashback
+    # to the fund) NOT `total_distributed` (Distribution rows — LP-only slice
+    # after GP carry / fees / withholding). Distributions is the correct input
+    # for TVPI / DPI (LP-perspective metrics) but the wrong input for Gross
+    # MOIC (portfolio-perspective).
+    #
+    # Denominator: LP-holding basis (fund's stake) — universal across
+    # single-column and multi-column workbooks (Coalesce fallback).
+    #
+    # Universal impact:
+    #   • Pre-exit funds (total_realised = 0): MOIC = holding_residual / cost
+    #   • Post-exit funds: MOIC = (proceeds + residual holding) / cost
     if total_invested and total_invested > 0:
-        nav_part = _portfolio_residual()
-        moic = ((total_distributed or Decimal('0')) + (nav_part or Decimal('0'))) / total_invested
+        nav_part = _residual_value()
+        moic = ((total_realised or Decimal('0')) + (nav_part or Decimal('0'))) / total_invested
         moic = moic.quantize(Decimal('0.0001'))
 
     # Performance denominator for TVPI/RVPI.
@@ -1579,16 +1811,84 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
         if nav_part:
             rvpi = (nav_part / _perf_denom).quantize(Decimal('0.0001'))
 
-    # TVPI = (Distributions + Residual Value) / performance denominator.
-    # Universal: computes whenever we have any capital base AND any value
-    # (residual or distributions). Zero-distribution funds (still in
-    # investment period) degrade cleanly to TVPI == RVPI. Never left blank
-    # when the underlying data is present.
-    if _perf_denom and _perf_denom > 0:
-        _dist_part = total_distributed or Decimal('0')
-        _nav_part_tvpi = _residual_value() or Decimal('0')
-        if (_dist_part + _nav_part_tvpi) > 0:
-            tvpi = ((_dist_part + _nav_part_tvpi) / _perf_denom).quantize(Decimal('0.0001'))
+    # ══ UNIVERSAL TVPI / NET MOIC (2026-07-12) ═════════════════════════════
+    #
+    # TVPI and Net MOIC are the same metric — both represent LP take-home
+    # value per rupee paid in. The AIF-standard picks between two formulas
+    # depending on whether the fund has published its LP distribution ledger:
+    #
+    #   Formula 1  (fund has distributions)
+    #       Net MOIC = (Total Distributions + Residual NAV) / Total Called Capital
+    #
+    #   Formula 2  (fund has NOT distributed — pre-distribution phase)
+    #       Net MOIC = Fund NAV / Total Called Capital
+    #
+    # Both formulas answer the same LP question — "for every rupee I paid in,
+    # what value do I hold + have received back?" — but Formula 2 uses the
+    # accounting Fund NAV as a proxy when no cash has flowed out yet.
+    #
+    # 4-tier priority ladder (per user spec):
+    #   P1  p1_computed_with_distributions       Formula 1  (Dist + Residual) / Called
+    #   P2  p2_computed_fund_nav_over_called     Formula 2  Fund NAV / Called
+    #   P3  p3_extracted_cell                    Extracted "TVPI" / "Net MOIC" cell
+    #   P4  p4_insufficient_data                 Blank with itemised missing inputs
+    tvpi_method = None
+    tvpi_missing_inputs: list[dict] = []
+
+    _tvpi_dist    = total_distributed
+    _tvpi_res_nav = _residual_value()  # per-investment holdings sum (LPA "Residual NAV")
+    _tvpi_fund_nav = fund_nav          # accounting NAV (from NAV_CALC / Fund_Overview)
+    _tvpi_called  = total_called
+
+    # P1 — Formula 1: (Distributions + Residual NAV) / Called Capital
+    if (_tvpi_dist is not None and _tvpi_dist > 0
+            and _tvpi_called is not None and _tvpi_called > 0):
+        _res = _tvpi_res_nav or Decimal('0')
+        tvpi = ((_tvpi_dist + _res) / _tvpi_called).quantize(Decimal('0.0001'))
+        tvpi_method = 'p1_computed_with_distributions'
+
+    # P2 — Formula 2: Fund NAV / Called Capital  (pre-distribution funds)
+    if tvpi is None:
+        if (_tvpi_fund_nav is not None and _tvpi_fund_nav > 0
+                and _tvpi_called is not None and _tvpi_called > 0):
+            tvpi = (_tvpi_fund_nav / _tvpi_called).quantize(Decimal('0.0001'))
+            tvpi_method = 'p2_computed_fund_nav_over_called'
+
+    # P3 — Extracted "TVPI" / "Net MOIC" cell from workbook
+    if tvpi is None:
+        _ov_tvpi = _safe_decimal(verified_overrides.get('tvpi'))
+        if _ov_tvpi is not None and _ov_tvpi > 0:
+            tvpi = _ov_tvpi.quantize(Decimal('0.0001'))
+            tvpi_method = 'p3_extracted_cell'
+
+    # P4 — Blank; itemise WHY. Sidebar panel shows one row per missing input.
+    if tvpi is None:
+        tvpi_method = 'p4_insufficient_data'
+        if _tvpi_called is None or _tvpi_called <= 0:
+            tvpi_missing_inputs.append({
+                'input': 'Total Called Capital (denominator of both formulas)',
+                'expected_source': 'CapitalCall rows OR extracted "Total Called Capital" / "Paid-In Capital" cell',
+                'db_field': 'lp_capitalcall.total_call_amount (sum)',
+            })
+        if _tvpi_dist is None or _tvpi_dist <= 0:
+            tvpi_missing_inputs.append({
+                'input': 'Total Distributions (required for Formula 1 — P1 tier)',
+                'expected_source': 'Distribution ledger OR extracted "Total Distributions" / "Cash Returned to LPs" cell',
+                'db_field': 'lp_distribution.total_net_amount (sum)',
+            })
+        if _tvpi_fund_nav is None or _tvpi_fund_nav <= 0:
+            tvpi_missing_inputs.append({
+                'input': 'Fund NAV (required for Formula 2 — P2 tier)',
+                'expected_source': 'Extracted "TOTAL FUND NAV" cell (NAV_CALC / Fund_Overview / Cover)',
+                'db_field': 'accounting_navrecord.total_nav (latest) OR extracted fund_nav_latest',
+            })
+        if not tvpi_missing_inputs:
+            tvpi_missing_inputs.append({
+                'input': 'TVPI / Net MOIC — no computable formula and no extracted cell',
+                'expected_source': 'Any of: LP distributions, Fund NAV, or a directly-published TVPI cell',
+                'db_field': 'multiple',
+            })
+    reasons['tvpi_inputs'] = tvpi_missing_inputs
 
     # ── Net IRR — REAL cashflows + atomic terminal value ────────────────
     # Capital calls (negative), distributions (positive), then add terminal
@@ -1902,6 +2202,168 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
     if total_committed and total_called is not None:
         total_uncalled = max(Decimal('0'), total_committed - total_called)
 
+    # ══ UNIVERSAL FUND NAV (AIF-standard, 2026-07-14) ═══════════════════
+    #
+    # Formula:  NAV = Realised + Unrealised + Cash + Receivables
+    #                 − Mgmt Fee Payable − Carry Payable
+    #                 − Other Liabilities (Fund Expenses + Tax + Borrowings)
+    #
+    # 2-tier priority ladder:
+    #   P1  p1_computed_universal   All balance-sheet components extracted
+    #                               via label rules on the MI Section-D style
+    #                               "Fund Balance Sheet Inputs" block
+    #                               → compute per the AIF-standard formula.
+    #   P2  p2_extracted_from_cell  Fall back to the extracted "TOTAL FUND
+    #                               NAV" cell (verified_overrides['fund_nav_
+    #                               latest']) when any component is missing.
+    #
+    # Provenance in FundMetric.inputs_used carries BOTH values + the source
+    # cell so the sidebar can show computed and extracted side-by-side.
+    #
+    # Realised term = REALISED GAINS (profit portion only), not gross proceeds.
+    # The AIF Section-A convention treats the cost basis of exited investments
+    # as already recognised through Called Capital, so only the GAIN portion
+    # (proceeds − cost) contributes to NAV. Universal — matches ILPA/SEBI
+    # audited NAV convention for every AIF workbook.
+    #
+    # realised_gain = Σ ExitEvent.realized_gain_loss for this scheme
+    # Falls back to total_realised (proceeds) only if no exit-level gain
+    # data is available — with a diagnostic tag so the sidebar can show
+    # which value was used.
+    _rg_agg = ExitEvent.objects.filter(
+        investment__scheme=scheme
+    ).aggregate(_gain=Sum('realized_gain_loss'))
+    _realised_gain_sum = _safe_decimal(_rg_agg.get('_gain'))
+    if _realised_gain_sum is not None and _realised_gain_sum > 0:
+        _nav_realised = _realised_gain_sum
+        _nav_realised_basis = 'realised_gains'  # sum(ExitEvent.realized_gain_loss)
+    else:
+        _nav_realised = total_realised if total_realised is not None else Decimal('0')
+        _nav_realised_basis = 'realised_proceeds'  # fallback — includes cost basis
+
+    # residual (unrealised portfolio FV) — fresh compute matching carry base
+    _nav_lh = Valuation.objects.filter(investment=OuterRef('pk')).exclude(
+        methodology='derived_from_cost_x_scheme_markup',
+    ).order_by('-valuation_date').annotate(
+        _holding=Coalesce('fair_value_of_holding', 'fair_value'),
+    ).values('_holding')[:1]
+    _nav_residual = Decimal('0')
+    for _inv in Investment.objects.filter(scheme=scheme).annotate(
+        _latest_fv=Subquery(_nav_lh),
+    ):
+        if _inv._latest_fv:
+            _nav_residual += _safe_decimal(_inv._latest_fv, Decimal('0'))
+
+    # Balance-sheet snapshot components. AIF workbooks store liabilities as
+    # negative amounts (MASTER_INPUTS!B64 = -30.4). abs() normalises the sign
+    # so the subtraction terms in the formula are all positive magnitudes.
+    def _bs(key: str):
+        v = verified_overrides.get(key)
+        if v is None:
+            return None
+        d = _safe_decimal(v)
+        return abs(d) if d is not None else None
+
+    _bs_cash        = _bs('bs_cash')
+    _bs_recv_int    = _bs('bs_interest_dividend_receivable')
+    _bs_recv_other  = _bs('bs_other_receivables')
+    _bs_mgmt        = _bs('bs_mgmt_fee_payable_accrued')
+    _bs_carry       = _bs('bs_carry_payable_accrued')
+    _bs_fund_exp    = _bs('bs_fund_expenses_payable')
+    _bs_borrowings  = _bs('bs_borrowings')
+    _bs_other_liab  = _bs('bs_other_liabilities_tax')
+
+    # Group into formula terms — Receivables = interest_div + other, Other
+    # Liabilities = fund_exp + tax + borrowings. Any component set (even
+    # partial) is honoured so a fund that publishes only one receivable line
+    # still produces a valid total.
+    _recv_parts = [x for x in (_bs_recv_int, _bs_recv_other) if x is not None]
+    _receivables_total = sum(_recv_parts, Decimal('0')) if _recv_parts else None
+    _ol_parts = [x for x in (_bs_fund_exp, _bs_other_liab, _bs_borrowings) if x is not None]
+    _other_liab_total = sum(_ol_parts, Decimal('0')) if _ol_parts else None
+
+    _nav_computed = None
+    _nav_method   = 'p2_extracted_from_cell'
+    _nav_missing  = []
+    if _bs_cash is None:            _nav_missing.append('Cash & Cash Equivalents')
+    if _receivables_total is None:  _nav_missing.append('Receivables (Interest/Dividend + Other)')
+    if _bs_mgmt is None:            _nav_missing.append('Management Fee Payable (accrued)')
+    if _bs_carry is None:           _nav_missing.append('Performance Fee / Carry Payable')
+    if _other_liab_total is None:   _nav_missing.append('Other Liabilities (Fund Expenses + Tax + Borrowings)')
+
+    if not _nav_missing:
+        _nav_computed = (
+            _nav_realised + _nav_residual + _bs_cash + _receivables_total
+            - _bs_mgmt - _bs_carry - _other_liab_total
+        ).quantize(Decimal('0.01'))
+        _nav_method = 'p1_computed_universal'
+
+    # Extracted-cell provenance (sheet + cell + label) — read the reconciler's
+    # trusted-extraction record for fund_nav_latest so the sidebar can show
+    # "Also extracted from Excel: ₹X Cr at Sheet!Cell" alongside the computed value.
+    _nav_extracted_value = verified_overrides.get('fund_nav_latest')
+    _nav_extracted_sheet = None
+    _nav_extracted_cell  = None
+    _nav_extracted_label = None
+    try:
+        from .phase4_reconciler import collect_trusted_extractions as _ce_nav
+        _trusted_full = _ce_nav(unified_json or {})
+        _fnl = _trusted_full.get('fund_nav_latest') or {}
+        if _fnl:
+            _nav_extracted_sheet = _fnl.get('sheet')
+            _nav_extracted_cell  = _fnl.get('cell')
+            _nav_extracted_label = _fnl.get('label_text')
+    except Exception as _e:
+        logger.warning(f'[phase4] fund_nav extracted-source lookup failed: {_e}')
+
+    # Final fund_nav value — P1 wins over P2 per user spec.
+    if _nav_computed is not None:
+        fund_nav = _nav_computed
+        fund_nav_src = 'computed_universal'
+    elif _nav_extracted_value is not None:
+        fund_nav = _safe_decimal(_nav_extracted_value)
+        fund_nav_src = 'extracted_verified'
+
+    _nav_provenance = {
+        'method': _nav_method,
+        'method_label': (
+            'P1 — Computed via AIF-standard formula'
+            if _nav_method == 'p1_computed_universal'
+            else 'P2 — Extracted from workbook cell (one or more formula components missing)'
+        ),
+        'formula': ('NAV = Realised + Unrealised + Cash + Receivables '
+                    '− Mgmt Fee Payable − Carry Payable '
+                    '− Other Liabilities (Fund Expenses + Tax + Borrowings)'),
+        'computed_value':  (float(_nav_computed) if _nav_computed is not None else None),
+        'extracted_value': (float(_nav_extracted_value) if _nav_extracted_value is not None else None),
+        'extracted_source': {
+            'sheet': _nav_extracted_sheet,
+            'cell':  _nav_extracted_cell,
+            'label': _nav_extracted_label,
+        },
+        'realised_basis':      _nav_realised_basis,
+        'components': {
+            'realised':           (float(_nav_realised) if _nav_realised is not None else None),
+            'realised_basis':     _nav_realised_basis,
+            'unrealised':         (float(_nav_residual) if _nav_residual is not None else None),
+            'cash':               (float(_bs_cash) if _bs_cash is not None else None),
+            'receivables':        (float(_receivables_total) if _receivables_total is not None else None),
+            'receivables_split': {
+                'interest_dividend': (float(_bs_recv_int) if _bs_recv_int is not None else None),
+                'other':             (float(_bs_recv_other) if _bs_recv_other is not None else None),
+            },
+            'mgmt_fee_payable':   (float(_bs_mgmt) if _bs_mgmt is not None else None),
+            'carry_payable':      (float(_bs_carry) if _bs_carry is not None else None),
+            'other_liabilities':  (float(_other_liab_total) if _other_liab_total is not None else None),
+            'other_liab_split': {
+                'fund_expenses': (float(_bs_fund_exp) if _bs_fund_exp is not None else None),
+                'tax':           (float(_bs_other_liab) if _bs_other_liab is not None else None),
+                'borrowings':    (float(_bs_borrowings) if _bs_borrowings is not None else None),
+            },
+        },
+        'missing_inputs': _nav_missing,
+    }
+
     return {
         # Totals (atomic facts)
         'total_capital_called':   total_called,
@@ -1917,6 +2379,11 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
         # columns. Falls back to db_active_fv on single-column workbooks.
         'total_portfolio_fv':         db_portfolio_fv if db_portfolio_fv > 0 else db_active_fv,
         'fund_nav_latest':        fund_nav,
+        # Rich provenance for the sidebar: which tier fired (P1 computed / P2
+        # extracted), full component table, both values (computed + extracted),
+        # source sheet+cell for the extracted cell. Persisted verbatim into
+        # FundMetric.inputs_used by _persist_fund_metrics.
+        'fund_nav_provenance':    _nav_provenance,
         # Waterfall (extracted-first, else Python-computed)
         'carry_base':             carry_base,
         'preferred_return_amount': preferred_return,
@@ -1939,6 +2406,36 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
         #   'insufficient_data'   — no computable value; see reasons['net_irr']
         # The dashboard uses this to label the Net IRR tile transparently.
         'net_irr_method':         net_irr_method,
+        # Universal carry method tag — how carry_base + carry_amount_gross
+        # were arrived at. Mirrors net_irr_method exactly. Values:
+        #   'p1_extracted_cell'    — extracted from a workbook cell
+        #                             (a Carry_Clawback / Fund_Overview /
+        #                              WATERFALL_EUR cell survived verification)
+        #   'p2_computed_formula'  — computed via the ONE universal formula:
+        #                             carry = carry_pct × max(0, (Realised
+        #                             + Residual NAV) − Called)
+        #                             (European Whole-Fund + 100% GP Catch-Up)
+        #   'p3_insufficient_data' — cannot compute AND no extract;
+        #                             carry is blank; see reasons['carry_inputs']
+        #                             for the itemised list of missing inputs.
+        'carry_method':           carry_method,
+        # Universal Net Carry method tag — how carry_amount_net was arrived at.
+        # Mirrors carry_method + net_irr_method exactly. Values:
+        #   'p1_extracted_cell'    — extracted from a "Net Carry" / "Carry
+        #                             Payable" workbook cell (verified_overrides)
+        #   'p2_computed_formula'  — computed via AIF-standard:
+        #                             Net = Gross × (1 − Clawback Reserve %)
+        #   'p3_insufficient_data' — cannot compute AND no extract;
+        #                             see reasons['carry_net_inputs'] for
+        #                             the itemised list of missing inputs.
+        'carry_net_method':       carry_net_method,
+        # Universal TVPI / Net MOIC method tag — mirrors carry_method /
+        # net_irr_method pattern. Compute-first ladder (per user spec):
+        #   'p1_computed_with_distributions'   — Formula 1: (Dist + Res) / Called
+        #   'p2_computed_fund_nav_over_called' — Formula 2: FundNAV / Called
+        #   'p3_extracted_cell'                — Extracted "TVPI" / "Net MOIC" cell
+        #   'p4_insufficient_data'             — Blank; see reasons['tvpi_inputs']
+        'tvpi_method':            tvpi_method,
         # Metadata
         'as_of_date':             as_of,
         'waterfall_source':       waterfall_source,

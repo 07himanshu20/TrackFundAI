@@ -725,9 +725,23 @@ const _METRIC_COPY = {
     formula: 'Total Fair Value of holdings ÷ Total amount invested',
   },
   tvpi: {
-    label: 'TVPI — Total Value to Paid-In',
-    meaning: 'Total value created (cash returned to LPs + current fair value) per rupee called from LPs.',
-    formula: '(Distributions to LPs + Current NAV) ÷ Capital called from LPs',
+    label: 'TVPI / Net MOIC — Total Value to Paid-In',
+    meaning: 'Total value created per rupee called from LPs. TVPI and Net MOIC are the same metric — both represent LP take-home value per paid-in rupee. Computed via a 4-tier ladder: Formula 1 (distributions available) → Formula 2 (fund NAV fallback) → extracted cell → blank.',
+    formula: 'P1 (with distributions): (Distributions + Residual NAV) / Called Capital  |  P2 (pre-distribution): Fund NAV / Called Capital',
+    priority_ladder: [
+      { code: 'p1_computed_with_distributions',
+        label: 'P1 — Computed via Formula 1 (fund has distributions)',
+        detail: 'Net MOIC = (Total Distributions + Residual NAV) / Total Called Capital. LP-perspective TVPI, ILPA-standard. Applies whenever the LP distribution ledger is populated (fund has returned cash).' },
+      { code: 'p2_computed_fund_nav_over_called',
+        label: 'P2 — Computed via Formula 2 (pre-distribution phase)',
+        detail: 'Net MOIC = Fund NAV / Total Called Capital. Fallback for funds still in investment period. Uses the extracted accounting Fund NAV (TOTAL FUND NAV cell) as a proxy for total LP value when no cash has flowed out yet.' },
+      { code: 'p3_extracted_cell',
+        label: 'P3 — Extracted directly from a workbook cell',
+        detail: 'Used when neither formula can be computed but the workbook publishes a labelled "TVPI" / "Net MOIC" cell. That value wins as the CA-provided headline.' },
+      { code: 'p4_insufficient_data',
+        label: 'P4 — Insufficient data. TVPI shown as blank',
+        detail: 'None of Formula 1, Formula 2, or a published cell could produce a value. The Missing-inputs table names exactly which input(s) are absent (distributions / fund NAV / called capital).' },
+    ],
   },
   dpi: {
     label: 'DPI — Distributions to Paid-In',
@@ -766,24 +780,62 @@ const _METRIC_COPY = {
     ],
   },
   active_fair_value: {
-    label: 'Total Fair Value of Holdings',
-    meaning: "Today's mark-to-market value of every portfolio company the fund still owns, summed up.",
-    formula: 'Sum of fair_value_of_holding across every active investment',
+    label: 'Active Fair Value',
+    meaning: "The fund's stake in every portfolio company it still owns, marked to today's fair value. Represents 'what's still on the books' — excludes cash already returned from exits. Equivalent identity: Cost of Active Investments + Unrealised Gains.",
+    formula: 'Sum of fair_value_of_holding across every active investment  (a.k.a. Cost of Active + Unrealised Gains)',
+  },
+  total_fair_value: {
+    label: 'Total Fair Value',
+    meaning: "The full value the fund has produced across its lifetime — the still-held portfolio (Active Fair Value) plus cash already realised from exits. This is the universal AIF industry-standard 'Total Fair Value' and matches the Cover / Summary sheet's 'Total FV Unrealised + Total Realised Proceeds' line in any published fund report.",
+    formula: 'Active Fair Value + Realised Proceeds from Exits',
   },
   carry_amount_gross: {
-    label: 'Gross Carry',
-    meaning: 'GP performance fee earned before any clawback adjustment.',
-    formula: 'GP catch-up amount + GP share of the residual (after LP gets back capital + preferred return)',
+    label: 'Gross Carry — GP Performance Fee',
+    meaning: 'The performance fee the GP earns for beating the hurdle. Waterfall variant on this dashboard is fixed to European Whole-Fund with 100% GP Catch-Up (ILPA standard). Under this variant the 4-step waterfall collapses to a single identity: GP Carry = carry% × total profit.',
+    formula: 'GP Carry = carry_pct × max(0, (Realised + Residual NAV) − Called Capital)',
+    priority_ladder: [
+      { code: 'p1_extracted_cell',
+        label: 'P1 — Extracted directly from a workbook cell',
+        detail: 'When the CA has written a "GP Total Carry" / "Carry Provision" cell (e.g. Carry_Clawback, Fund_Overview, WATERFALL_EUR sheets), the extracted value wins. This is the CA\'s own audited number.' },
+      { code: 'p2_computed_formula',
+        label: 'P2 — Computed via the universal formula',
+        detail: 'European Whole-Fund + 100% GP Catch-Up (ILPA-standard). Carry = carry_pct × max(0, (Realised + Residual NAV) − Called). Every input comes from the atomic DB ledger. Used whenever P1 is unavailable but the required inputs are present.' },
+      { code: 'p3_insufficient_data',
+        label: 'P3 — Insufficient data. Carry shown as blank',
+        detail: 'Neither a published carry cell nor the required formula inputs are available. The "Missing inputs" panel enumerates the exact inputs that are absent so you know what to fix in the workbook.' },
+    ],
   },
   carry_amount_net: {
-    label: 'Net Carry',
-    meaning: "GP's actual take-home performance fee: what was distributed to the GP minus the amount held in escrow (holdback) minus any clawback owed back to LPs. For open funds where no carry has been paid yet, this is 0.",
-    formula: 'Distributed to GP − Holdback Escrow − Clawback Provision',
+    label: 'Net Carry — after Clawback Reserve',
+    meaning: "GP's indicative take-home carry after the LPA-mandated clawback reserve is set aside. Universal AIF-standard formula: Net = Gross × (1 − Clawback Reserve %). The Clawback Reserve is escrowed to cover potential repayment to LPs if the fund underperforms later; the GP's net take is what remains.",
+    formula: 'Net Carry = Gross Carry × (1 − Clawback Reserve %)',
+    priority_ladder: [
+      { code: 'p1_extracted_cell',
+        label: 'P1 — Extracted directly from a workbook cell',
+        detail: 'When the workbook publishes a "Net Carry" / "Carry Payable" / "Performance Fee Payable" cell (e.g. MASTER_INPUTS "Carry Payable"), that value wins. This is the CA\'s own audited number.' },
+      { code: 'p2_computed_formula',
+        label: 'P2 — Computed via the AIF-standard formula',
+        detail: 'Net Carry = Gross Carry × (1 − Clawback Reserve %). Universal across every European whole-fund AIF. Requires the LPA-declared Clawback Reserve % (persisted on Scheme.gp_holdback_pct) and the derived Gross Carry.' },
+      { code: 'p3_insufficient_data',
+        label: 'P3 — Insufficient data. Net Carry shown as blank',
+        detail: 'Either Gross Carry could not be derived, or the Clawback Reserve % is not published on the LPA. The Missing-inputs table names exactly which input is absent.' },
+    ],
   },
   carry_base: {
-    label: 'Carry Base',
-    meaning: 'Total profit above capital — the pool that carry is calculated from. Distributions plus residual (unrealised) fair value, minus the capital called from LPs. Must be positive for GP to earn any carry.',
-    formula: '(Distributions + Residual NAV) − Called Capital',
+    label: 'Carry Base — Total Profit above Capital',
+    meaning: 'The pool of profit that carry is calculated from. Under European Whole-Fund + 100% GP Catch-Up (this dashboard\'s fixed variant), Carry Base = Total Fund Value minus Called Capital. Must be positive for GP to earn any carry.',
+    formula: 'Carry Base = max(0, (Realised Proceeds + Residual NAV) − Called Capital)',
+    priority_ladder: [
+      { code: 'p1_extracted_cell',
+        label: 'P1 — Extracted directly from a workbook cell',
+        detail: 'When the workbook publishes a Carry Base cell (e.g. Carry_Clawback "Total Profit above Capital", WATERFALL_EUR base row), the extracted value wins.' },
+      { code: 'p2_computed_formula',
+        label: 'P2 — Computed via the universal formula',
+        detail: 'Universal across every European whole-fund AIF: Carry Base = max(0, (Realised + Residual NAV) − Called Capital). Fully deterministic from the atomic DB ledger.' },
+      { code: 'p3_insufficient_data',
+        label: 'P3 — Insufficient data. Carry Base shown as blank',
+        detail: 'Neither a published Carry Base cell nor the required formula inputs (called capital + at least one of realised proceeds / residual NAV) are available.' },
+    ],
   },
   preferred_return_amount: {
     label: 'Preferred Return (Hurdle)',
@@ -794,6 +846,19 @@ const _METRIC_COPY = {
     label: 'GP Clawback Provision',
     meaning: 'Amount reserved from gross carry to cover potential repayment to LPs if the fund underperforms later.',
     formula: 'Typically 20% of gross carry',
+  },
+  fund_nav: {
+    label: 'Fund NAV — Net Asset Value',
+    meaning: 'The audited net worth of the fund at the reporting date. Represents everything the fund owns (portfolio + cash + receivables) minus everything it owes (mgmt fee, carry payable, expenses, taxes, borrowings). Computed via the universal AIF NAV formula whenever every balance-sheet component is present; falls back to the extracted "TOTAL FUND NAV" cell only when a component is missing.',
+    formula: 'NAV = Realised + Unrealised + Cash + Receivables − Mgmt Fee Payable − Carry Payable − Other Liabilities (Fund Expenses + Tax + Borrowings)',
+    priority_ladder: [
+      { code: 'p1_computed_universal',
+        label: 'P1 — Computed via the universal AIF NAV formula',
+        detail: 'All 7 balance-sheet components (Realised + Unrealised + Cash + Receivables − Mgmt Fee − Carry − Other Liabilities) are extracted from the workbook. Computed value is transparent, reproducible, and always wins over the extracted cell.' },
+      { code: 'p2_extracted_from_cell',
+        label: 'P2 — Extracted from the workbook TOTAL FUND NAV cell',
+        detail: 'Used only when at least one formula component is missing (see Missing inputs table). The extracted number is the CA-audited snapshot; the sidebar shows the source sheet and cell.' },
+    ],
   },
   committed_capital: {
     label: 'Committed Capital',
@@ -878,6 +943,7 @@ function openProvenancePanel(metricKey) {
   const sourceSheet = rawInputs.source_sheet || '';
   const sourceCells = rawInputs.source_cells || '';
   const contribs    = Array.isArray(rawInputs.contributing_companies) ? rawInputs.contributing_companies : null;
+  const inputsBreakdown = Array.isArray(rawInputs.inputs_breakdown) ? rawInputs.inputs_breakdown : null;
   const priorityRule       = rawInputs.priority_rule_applied || '';
   const priorityReason     = rawInputs.priority_rule_reason || '';
   const principlesMeaning  = (rawInputs.principles_meaning && typeof rawInputs.principles_meaning === 'object')
@@ -1027,12 +1093,379 @@ function openProvenancePanel(metricKey) {
       </div>`;
   }
 
+  // ── Section 1.8: Priority ladder + method chosen + missing inputs.
+  // Rendered for carry_base / carry_amount_gross / carry_amount_net / tvpi
+  // metrics when the persister passes the corresponding *_method +
+  // *_missing_inputs through FundMetric.inputs_used. Mirrors the Net IRR
+  // decision-matrix pattern.
+  if ((metricKey === 'carry_base' || metricKey === 'carry_amount_gross'
+       || metricKey === 'carry_amount_net' || metricKey === 'tvpi')
+      && copy.priority_ladder) {
+    // Each metric has its own tier tracker on rawInputs:
+    //   carry_base / carry_amount_gross → carry_method
+    //   carry_amount_net                → carry_net_method
+    //   tvpi                            → tvpi_method
+    const isNet  = metricKey === 'carry_amount_net';
+    const isTvpi = metricKey === 'tvpi';
+    let chosenCode, chosenLabel, missingInputs;
+    if (isTvpi) {
+      chosenCode    = rawInputs.tvpi_method || '';
+      chosenLabel   = rawInputs.tvpi_method_label || '';
+      missingInputs = Array.isArray(rawInputs.tvpi_missing_inputs) ? rawInputs.tvpi_missing_inputs : [];
+    } else if (isNet) {
+      chosenCode    = rawInputs.carry_net_method || '';
+      chosenLabel   = rawInputs.carry_net_method_label || '';
+      missingInputs = Array.isArray(rawInputs.carry_net_missing_inputs) ? rawInputs.carry_net_missing_inputs : [];
+    } else {
+      chosenCode    = rawInputs.carry_method || '';
+      chosenLabel   = rawInputs.carry_method_label || '';
+      missingInputs = Array.isArray(rawInputs.carry_missing_inputs) ? rawInputs.carry_missing_inputs : [];
+    }
+    const ladderRows = copy.priority_ladder.map(item => {
+      const isChosen = item.code === chosenCode;
+      const badge = isChosen
+        ? `<span style="display:inline-block;background:#dcfce7;color:#166534;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;margin-left:8px;">Used</span>`
+        : `<span style="display:inline-block;background:#f1f5f9;color:#64748b;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500;margin-left:8px;">Not used</span>`;
+      const rowStyle = isChosen
+        ? 'padding:10px;background:#f0fdf4;border-left:3px solid #16a34a;border-radius:4px;margin-bottom:6px;'
+        : 'padding:10px;background:#f8fafc;border-left:3px solid #cbd5e1;border-radius:4px;margin-bottom:6px;';
+      return `
+        <div style="${rowStyle}">
+          <div style="font-size:13px;color:#0f172a;font-weight:${isChosen ? 700 : 500};">
+            ${esc(item.label)}${badge}
+          </div>
+          <div style="font-size:11px;color:#64748b;margin-top:4px;line-height:1.5;">
+            ${esc(item.detail)}
+          </div>
+        </div>`;
+    }).join('');
+    // Method-used banner (mirrors Net IRR "Method used for this fund").
+    const methodBanner = chosenLabel
+      ? `<div style="margin-bottom:10px;padding:10px 12px;background:#eff6ff;border-left:3px solid #2563eb;border-radius:4px;">
+           <div style="font-size:11px;color:#1e40af;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600;">
+             Method used for this fund
+           </div>
+           <div style="font-size:12px;color:#1e3a8a;line-height:1.6;">
+             ${esc(chosenLabel)}
+           </div>
+         </div>`
+      : '';
+    // P3 — Missing inputs table. Rendered whenever the persister emitted the
+    // carry_missing_inputs array (only happens in P3). Each row shows exactly
+    // what input was absent, where we'd normally find it in the workbook,
+    // and which DB field carries it.
+    let missingBlock = '';
+    if (missingInputs.length) {
+      const _rowStyle = 'padding:8px 10px;border-bottom:1px solid #fde68a;vertical-align:top;font-size:12px;color:#78350f;line-height:1.5;';
+      const _hdrStyle = 'text-align:left;padding:8px 10px;background:#fde68a;color:#78350f;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.5px;';
+      const _formulaTxt = isTvpi
+        ? 'P1 (with distributions): (Distributions + Residual NAV) / Called Capital  |  P2 (pre-distribution): Fund NAV / Called Capital'
+        : isNet
+          ? 'Net Carry = Gross Carry × (1 − Clawback Reserve %)'
+          : 'Carry = carry_pct × max(0, (Realised + Residual NAV) − Called)';
+      const _formulaFamily = isTvpi ? 'AIF-standard' : (isNet ? 'AIF-standard' : 'universal');
+      missingBlock = `
+        <div style="margin-bottom:12px;padding:12px;background:#fef3c7;border-left:3px solid #f59e0b;border-radius:4px;">
+          <div style="font-size:12px;color:#78350f;font-weight:700;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px;">
+            Missing inputs — this is why the value is blank
+          </div>
+          <div style="font-size:12px;color:#78350f;line-height:1.6;margin-bottom:10px;">
+            We use the ${_formulaFamily} formula
+            <b>${esc(_formulaTxt)}</b>.
+            The inputs listed below are the ones we could NOT find in the
+            workbook for this fund. Populate the missing cells and re-import,
+            and the value will populate automatically.
+          </div>
+          <table style="width:100%;border-collapse:collapse;background:#fffbeb;border-radius:4px;overflow:hidden;">
+            <thead>
+              <tr>
+                <th style="${_hdrStyle}">Input we could not find</th>
+                <th style="${_hdrStyle}">Where we normally look</th>
+                <th style="${_hdrStyle}">DB field</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${missingInputs.map(m => `
+                <tr>
+                  <td style="${_rowStyle}font-weight:600;">${esc(m.input || '—')}</td>
+                  <td style="${_rowStyle}">${esc(m.expected_source || '—')}</td>
+                  <td style="${_rowStyle}font-family:ui-monospace,Menlo,monospace;">${esc(m.db_field || '—')}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>`;
+    }
+    const _header = isTvpi
+      ? 'TVPI / Net MOIC — Priority Ladder (Formula 1 → Formula 2 → Extracted → Blank)'
+      : isNet
+        ? 'Net Carry — Priority Ladder (AIF-standard: Net = Gross × (1 − Clawback %))'
+        : 'Carry — Priority Ladder (Waterfall: European Whole-Fund + 100% GP Catch-Up)';
+    const _intro = isTvpi
+      ? 'TVPI and Net MOIC are the same metric — both measure LP take-home value per rupee paid in. This dashboard resolves it via a 4-tier priority ladder: Formula 1 (fund has distributions) → Formula 2 (fund NAV / called capital, for pre-distribution funds) → extracted workbook cell → blank with itemised reason.'
+      : isNet
+        ? 'The dashboard uses the AIF-standard formula for Net Carry: Gross Carry × (1 − Clawback Reserve %). The Clawback Reserve is a mandatory LPA disclosure that the GP escrows to cover potential clawback if the fund underperforms later. Net Carry is resolved via a 3-tier priority ladder: first extract a published cell, then compute via the formula, and only when both fail do we show a blank with an itemised reason.'
+        : 'The dashboard enforces a single waterfall variant — European Whole-Fund with 100% GP Catch-Up (ILPA standard). Carry is resolved via a 3-tier priority ladder: first we try to extract a published cell, then we compute via the universal formula, and only when both fail do we show a blank with an itemised reason.';
+    html += `
+      <div class="prov-section">
+        <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600;">
+          ${esc(_header)}
+        </div>
+        <div style="font-size:12px;color:#475569;line-height:1.5;margin-bottom:10px;">
+          ${esc(_intro)}
+        </div>
+        ${methodBanner}
+        ${missingBlock}
+        ${ladderRows}
+      </div>`;
+  }
+
+  // ── Section 1.9: Fund NAV — professional NAV panel ───────────────────
+  // Rendered only for the fund_nav metric. Shows:
+  //   • Priority ladder (P1 computed / P2 extracted) with a "Used" badge on
+  //     the tier that fired for THIS fund.
+  //   • "Method used" banner naming the tier.
+  //   • Missing-inputs table when the formula could not run (P2 fell back).
+  //   • A "Computed vs Extracted" comparison card whenever both values are
+  //     available AND they disagree beyond 0.5 Cr rounding — the computed
+  //     value (from the audited components) wins as the displayed number.
+  //   • A professional 7-row table listing every formula input with its
+  //     value, role (positive/negative), and origin.
+  if (metricKey === 'fund_nav' && copy.priority_ladder) {
+    const _navChosen  = rawInputs.fund_nav_method || '';
+    const _navLabel   = rawInputs.fund_nav_method_label || '';
+    const _navMissing = Array.isArray(rawInputs.fund_nav_missing_inputs) ? rawInputs.fund_nav_missing_inputs : [];
+    const _navComputed  = rawInputs.fund_nav_computed_value;
+    const _navExtracted = rawInputs.fund_nav_extracted_value;
+    const _navSrc       = (rawInputs.fund_nav_extracted_source && typeof rawInputs.fund_nav_extracted_source === 'object')
+                            ? rawInputs.fund_nav_extracted_source : {};
+    const _navRows      = Array.isArray(rawInputs.fund_nav_inputs_breakdown) ? rawInputs.fund_nav_inputs_breakdown : [];
+    const _navFormula   = rawInputs.fund_nav_formula || copy.formula;
+    // Priority ladder cards
+    const _navLadder = copy.priority_ladder.map(item => {
+      const isChosen = item.code === _navChosen;
+      const badge = isChosen
+        ? `<span style="display:inline-block;background:#dcfce7;color:#166534;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;margin-left:8px;">Used</span>`
+        : `<span style="display:inline-block;background:#f1f5f9;color:#64748b;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500;margin-left:8px;">Not used</span>`;
+      const rowStyle = isChosen
+        ? 'padding:10px;background:#f0fdf4;border-left:3px solid #16a34a;border-radius:4px;margin-bottom:6px;'
+        : 'padding:10px;background:#f8fafc;border-left:3px solid #cbd5e1;border-radius:4px;margin-bottom:6px;';
+      return `
+        <div style="${rowStyle}">
+          <div style="font-size:13px;color:#0f172a;font-weight:${isChosen ? 700 : 500};">
+            ${esc(item.label)}${badge}
+          </div>
+          <div style="font-size:11px;color:#64748b;margin-top:4px;line-height:1.5;">
+            ${esc(item.detail)}
+          </div>
+        </div>`;
+    }).join('');
+    // Method-used banner
+    const _navMethodBanner = _navLabel
+      ? `<div style="margin-bottom:10px;padding:10px 12px;background:#eff6ff;border-left:3px solid #2563eb;border-radius:4px;">
+           <div style="font-size:11px;color:#1e40af;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600;">
+             Method used for this fund
+           </div>
+           <div style="font-size:12px;color:#1e3a8a;line-height:1.6;">
+             ${esc(_navLabel)}
+           </div>
+         </div>`
+      : '';
+    // Missing-inputs table (only when P2 fell back because a component was absent)
+    let _navMissBlock = '';
+    if (_navMissing.length) {
+      const _rowStyle = 'padding:8px 10px;border-bottom:1px solid #fde68a;vertical-align:top;font-size:12px;color:#78350f;line-height:1.5;';
+      const _hdrStyle = 'text-align:left;padding:8px 10px;background:#fde68a;color:#78350f;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.5px;';
+      _navMissBlock = `
+        <div style="margin-bottom:12px;padding:12px;background:#fef3c7;border-left:3px solid #f59e0b;border-radius:4px;">
+          <div style="font-size:12px;color:#78350f;font-weight:700;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px;">
+            Missing inputs — this is why we fell back to the extracted cell
+          </div>
+          <div style="font-size:12px;color:#78350f;line-height:1.6;margin-bottom:10px;">
+            The universal formula could not run because one or more balance-sheet
+            components were not present in the workbook. We used the extracted
+            "TOTAL FUND NAV" cell instead. Populate the missing components in
+            the fund's MASTER_INPUTS balance-sheet block and re-import to switch
+            back to the computed formula.
+          </div>
+          <table style="width:100%;border-collapse:collapse;background:#fffbeb;border-radius:4px;overflow:hidden;">
+            <thead><tr><th style="${_hdrStyle}">Component we could not find</th></tr></thead>
+            <tbody>
+              ${_navMissing.map(m => `<tr><td style="${_rowStyle}font-weight:600;">${esc(m)}</td></tr>`).join('')}
+            </tbody>
+          </table>
+        </div>`;
+    }
+    // Computed vs Extracted comparison card — only when BOTH values exist
+    // AND they disagree by more than 0.5 Cr (rounding tolerance).
+    let _navCompareBlock = '';
+    if (_navComputed != null && _navExtracted != null) {
+      const _diff = Math.abs(parseFloat(_navComputed) - parseFloat(_navExtracted));
+      const _agree = _diff <= 0.5;
+      const _boxColor = _agree ? '#f0fdf4' : '#fef9c3';
+      const _borderColor = _agree ? '#16a34a' : '#ca8a04';
+      const _titleColor = _agree ? '#166534' : '#713f12';
+      const _sourceTxt = (_navSrc.sheet || _navSrc.cell)
+          ? `${_navSrc.sheet || '—'}${_navSrc.cell && _navSrc.cell !== 'phase6_label_rule' ? '!' + _navSrc.cell : ''}`
+          : '—';
+      _navCompareBlock = `
+        <div style="margin-bottom:12px;padding:12px;background:${_boxColor};border-left:3px solid ${_borderColor};border-radius:4px;">
+          <div style="font-size:11px;color:${_titleColor};font-weight:700;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px;">
+            Computed vs Extracted ${_agree ? '— values agree' : '— values disagree'}
+          </div>
+          <table style="width:100%;border-collapse:collapse;font-size:12px;color:#0f172a;background:#ffffff;border-radius:4px;overflow:hidden;">
+            <thead>
+              <tr>
+                <th style="text-align:left;padding:8px 10px;background:#f8fafc;color:#334155;font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px;">Source</th>
+                <th style="text-align:right;padding:8px 10px;background:#f8fafc;color:#334155;font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px;">Value</th>
+                <th style="text-align:left;padding:8px 10px;background:#f8fafc;color:#334155;font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px;">Location</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;font-weight:600;">
+                  Computed (universal formula) ${_navChosen === 'p1_computed_universal' ? '<span style="display:inline-block;background:#dcfce7;color:#166534;padding:2px 6px;border-radius:8px;font-size:10px;font-weight:600;margin-left:6px;">Shown</span>' : ''}
+                </td>
+                <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;font-family:ui-monospace,Menlo,monospace;font-weight:700;">
+                  ₹${parseFloat(_navComputed).toLocaleString('en-IN', {maximumFractionDigits: 2})} Cr
+                </td>
+                <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#64748b;font-size:11px;">
+                  Derived from 7 balance-sheet components (see table below)
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:8px 10px;font-weight:600;">
+                  Extracted from workbook ${_navChosen === 'p2_extracted_from_cell' ? '<span style="display:inline-block;background:#dcfce7;color:#166534;padding:2px 6px;border-radius:8px;font-size:10px;font-weight:600;margin-left:6px;">Shown</span>' : ''}
+                </td>
+                <td style="padding:8px 10px;text-align:right;font-family:ui-monospace,Menlo,monospace;font-weight:700;">
+                  ₹${parseFloat(_navExtracted).toLocaleString('en-IN', {maximumFractionDigits: 2})} Cr
+                </td>
+                <td style="padding:8px 10px;color:#64748b;font-size:11px;font-family:ui-monospace,Menlo,monospace;">
+                  ${esc(_sourceTxt)}
+                  ${_navSrc.label ? `<div style="color:#94a3b8;font-family:inherit;font-size:10px;margin-top:2px;">${esc(_navSrc.label)}</div>` : ''}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          ${_agree
+            ? `<div style="font-size:11px;color:${_titleColor};margin-top:8px;line-height:1.5;">Both values agree within rounding tolerance (±₹0.5 Cr). The computed value is shown because it is transparent and independently reproducible from the atomic ledger + extracted balance-sheet components.</div>`
+            : `<div style="font-size:11px;color:${_titleColor};margin-top:8px;line-height:1.5;">Values disagree by <b>₹${_diff.toFixed(2)} Cr</b>. Per the priority rule, the computed value is shown on the dashboard — it is fully transparent and reproducible from the balance-sheet components. The extracted cell is preserved above for audit.</div>`}
+        </div>`;
+    } else if (_navExtracted != null && _navComputed == null) {
+      // Only extracted available — show it in a single-row card so the user
+      // sees exactly where the number came from.
+      const _sourceTxt = (_navSrc.sheet || _navSrc.cell)
+          ? `${_navSrc.sheet || '—'}${_navSrc.cell && _navSrc.cell !== 'phase6_label_rule' ? '!' + _navSrc.cell : ''}`
+          : '—';
+      _navCompareBlock = `
+        <div style="margin-bottom:12px;padding:12px;background:#eff6ff;border-left:3px solid #2563eb;border-radius:4px;">
+          <div style="font-size:11px;color:#1e40af;font-weight:700;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px;">
+            Extracted from workbook (P2)
+          </div>
+          <div style="font-size:12px;color:#1e3a8a;line-height:1.5;">
+            <b>₹${parseFloat(_navExtracted).toLocaleString('en-IN', {maximumFractionDigits: 2})} Cr</b>
+            &nbsp;·&nbsp; source: <span style="font-family:ui-monospace,Menlo,monospace;">${esc(_sourceTxt)}</span>
+            ${_navSrc.label ? `<div style="color:#3b82f6;font-size:11px;margin-top:2px;">Label: <i>${esc(_navSrc.label)}</i></div>` : ''}
+          </div>
+        </div>`;
+    }
+    // Formula components table — 7 rows, one per formula input
+    let _navCompTable = '';
+    if (_navRows.length) {
+      const _thStyle   = 'text-align:left;padding:8px 10px;background:#f8fafc;color:#334155;font-weight:600;border-bottom:1px solid #e2e8f0;text-transform:uppercase;font-size:10px;letter-spacing:.5px;';
+      const _tdStyle   = 'padding:8px 10px;border-bottom:1px solid #f1f5f9;vertical-align:top;font-size:12px;color:#0f172a;';
+      const _tdVal     = _tdStyle + 'text-align:right;font-family:ui-monospace,Menlo,monospace;font-weight:600;white-space:nowrap;';
+      const _fmtR = (v) => {
+        if (v == null || v === '') return '—';
+        const n = parseFloat(v);
+        return Number.isFinite(n) ? `₹${n.toLocaleString('en-IN', {maximumFractionDigits: 2})} Cr` : String(v);
+      };
+      _navCompTable = `
+        <div style="margin-top:12px;">
+          <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;font-weight:600;">
+            Formula components — every input the NAV formula uses
+          </div>
+          <div style="font-size:12px;color:#334155;background:#f0f9ff;border-left:3px solid #0284c7;padding:8px 12px;border-radius:4px;margin-bottom:8px;font-family:ui-monospace,Menlo,monospace;">
+            ${esc(_navFormula)}
+          </div>
+          <table style="width:100%;border-collapse:collapse;background:#ffffff;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden;">
+            <thead>
+              <tr>
+                <th style="${_thStyle}">Component</th>
+                <th style="${_thStyle}text-align:right;">Value (₹ Cr)</th>
+                <th style="${_thStyle}">Role in Formula</th>
+                <th style="${_thStyle}">Origin</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${_navRows.map(r => {
+                const isNeg = String(r.role || '').includes('Negative');
+                const _pill = isNeg
+                  ? '<span style="display:inline-block;background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700;">Negative (−)</span>'
+                  : '<span style="display:inline-block;background:#dcfce7;color:#166534;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700;">Positive (+)</span>';
+                return `
+                  <tr>
+                    <td style="${_tdStyle}font-weight:600;">${esc(r.label || '—')}</td>
+                    <td style="${_tdVal}">${_fmtR(r.value_rs_cr)}</td>
+                    <td style="${_tdStyle}">${_pill}</td>
+                    <td style="${_tdStyle}color:#64748b;font-size:11px;line-height:1.4;">${esc(r.origin || '—')}</td>
+                  </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>`;
+    }
+    html += `
+      <div class="prov-section">
+        <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600;">
+          Fund NAV — Priority Ladder (Compute First, Extract as Fallback)
+        </div>
+        <div style="font-size:12px;color:#475569;line-height:1.5;margin-bottom:10px;">
+          The dashboard uses the universal AIF NAV formula whenever every balance-sheet
+          component is available in the workbook. That computed value ALWAYS wins over
+          the extracted "TOTAL FUND NAV" cell — it is transparent, reproducible, and
+          reconciles to the audited components. The extracted cell is preserved for
+          comparison in the panel below.
+        </div>
+        ${_navMethodBanner}
+        ${_navCompareBlock}
+        ${_navMissBlock}
+        ${_navLadder}
+        ${_navCompTable}
+      </div>`;
+  }
+
   // ── Section 2: How we got it — equation form (Formula = Values = Result) ─
+  //
+  // For multi-tier metrics (currently TVPI), show ONLY the formula for the
+  // P-tier that actually fired. The priority ladder section elsewhere on
+  // the panel already lists every tier with a "Used" badge on the chosen
+  // one, so the alternatives aren't lost — this section is strictly the
+  // arithmetic that produced the displayed value.
+  let _displayFormula = copy.formula;
+  if (metricKey === 'tvpi') {
+    const _tvpiChosen = rawInputs.tvpi_method || '';
+    if (_tvpiChosen === 'p1_computed_with_distributions') {
+      _displayFormula = 'P1 — (Total Distributions + Residual NAV) / Total Called Capital';
+    } else if (_tvpiChosen === 'p2_computed_fund_nav_over_called') {
+      _displayFormula = 'P2 — Fund NAV / Total Called Capital';
+    } else if (_tvpiChosen === 'p3_extracted_cell') {
+      _displayFormula = 'P3 — Extracted directly from a workbook cell labelled "TVPI" / "Net MOIC"';
+    } else if (_tvpiChosen === 'p4_insufficient_data') {
+      _displayFormula = 'P4 — Insufficient data; no formula produced a value. See Missing inputs above.';
+    }
+  } else if (metricKey === 'fund_nav') {
+    const _navChosen = rawInputs.fund_nav_method || '';
+    if (_navChosen === 'p1_computed_universal') {
+      _displayFormula = 'P1 — NAV = Realised + Unrealised + Cash + Receivables − Mgmt Fee − Carry − Other Liabilities (Fund Exp + Tax + Borrowings)';
+    } else if (_navChosen === 'p2_extracted_from_cell') {
+      _displayFormula = 'P2 — Extracted from workbook TOTAL FUND NAV cell (one or more formula components missing; see Missing inputs above)';
+    }
+  }
   html += `
     <div class="prov-section">
       <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600;">How we got it</div>
       <div style="font-size:13px;color:#334155;line-height:1.6;margin-bottom:10px;">
-        ${copy.formula ? esc(copy.formula) + '.' : 'Computed directly from extracted source data.'}
+        ${_displayFormula ? esc(_displayFormula) + '.' : 'Computed directly from extracted source data.'}
       </div>`;
 
   // Render the math box. The content depends strictly on provenance_kind so
@@ -1059,6 +1492,20 @@ function openProvenancePanel(metricKey) {
         <div style="color:#64748b;">sum of fund's share across all companies:</div>
         <div style="margin-top:4px;color:#0f172a;">${esc(sumStr)}</div>
         <div style="margin-top:6px;color:#64748b;">= <b style="color:#0f172a;">${_fmtMetricValue(value, unit)}</b></div>
+      </div>`;
+  } else if (provKind === 'insufficient_data') {
+    // P3 for carry (or any future metric that goes blank with an itemised
+    // reason). The Missing-inputs table above already explains what we don't
+    // have; this box only shows the formula template with '?' where inputs
+    // would go, so the user sees the shape of what we're trying to compute.
+    // NOTE: this branch MUST precede the generic `formulaExpr` branch —
+    // insufficient_data rows carry a formula expression too, but they need
+    // the amber "blank because of missing inputs" treatment, not the neutral
+    // computed-formula box that would misrepresent the state.
+    html += `
+      <div style="${monoBoxStyle}color:#78350f;background:#fef3c7;border-color:#fde68a;">
+        <div><span style="color:#92400e;">Formula:</span> ${esc(formulaExpr || (copy.formula || 'not available'))}</div>
+        <div style="color:#92400e;margin-top:4px;">Value is blank — see the <b>Missing inputs</b> table above for the specific inputs we could not source from this fund's workbook.</div>
       </div>`;
   } else if (formulaExpr) {
     // For canonical_formula entries the formulaExpr already contains
@@ -1093,6 +1540,46 @@ function openProvenancePanel(metricKey) {
   html += `
     </div>`;
 
+  // ── Section 2.5: Inputs — tabular breakdown of the formula's components ─
+  // Rendered when the persister attached an `inputs_breakdown` array to
+  // FundMetric.inputs_used (currently: moic, active_fair_value). Each row
+  // has {label, value_rs_cr, role, origin}. Empty value_rs_cr renders "—".
+  if (inputsBreakdown && inputsBreakdown.length) {
+    const _tblStyle  = 'width:100%;border-collapse:collapse;font-size:12px;color:#0f172a;background:#ffffff;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden;';
+    const _thStyle   = 'text-align:left;padding:8px 10px;background:#f8fafc;color:#334155;font-weight:600;border-bottom:1px solid #e2e8f0;text-transform:uppercase;font-size:10px;letter-spacing:.5px;';
+    const _tdStyle   = 'padding:8px 10px;border-bottom:1px solid #f1f5f9;vertical-align:top;';
+    const _tdValStyle= _tdStyle + 'text-align:right;font-family:ui-monospace,Menlo,monospace;font-weight:600;color:#0f172a;white-space:nowrap;';
+    const _tdMuted   = _tdStyle + 'color:#64748b;';
+    const _fmtInpVal = (v) => {
+      if (v == null || v === '') return '—';
+      const n = parseFloat(v);
+      return Number.isFinite(n) ? `₹${n.toLocaleString('en-IN', {maximumFractionDigits: 2})} Cr` : String(v);
+    };
+    html += `
+      <div class="prov-section">
+        <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;font-weight:600;">Inputs</div>
+        <table style="${_tblStyle}">
+          <thead>
+            <tr>
+              <th style="${_thStyle}">Component</th>
+              <th style="${_thStyle}text-align:right;">Value</th>
+              <th style="${_thStyle}">Role</th>
+              <th style="${_thStyle}">Where the number comes from</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${inputsBreakdown.map(r => `
+              <tr>
+                <td style="${_tdStyle}font-weight:600;">${esc(r.label || '')}</td>
+                <td style="${_tdValStyle}">${esc(_fmtInpVal(r.value_rs_cr))}</td>
+                <td style="${_tdMuted}">${esc(r.role || '')}</td>
+                <td style="${_tdMuted}line-height:1.5;">${esc(r.origin || '')}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`;
+  }
+
   // ── Section 3: Source — one row, sheet + cells in plain English ──────
   let sourcePhrase;
   if (provKind === 'extracted') {
@@ -1106,6 +1593,8 @@ function openProvenancePanel(metricKey) {
     sourcePhrase = 'Calculated by our backend by summing the per-company valuations imported from the workbook (shown above).';
   } else if (provKind === 'gemini_provided') {
     sourcePhrase = 'Provided by Gemini (AI) from the workbook.';
+  } else if (provKind === 'insufficient_data') {
+    sourcePhrase = "This fund's workbook did not publish this value AND did not publish the inputs the universal formula needs. See the <b>Missing inputs</b> panel above for the specific gaps.";
   } else {
     sourcePhrase = 'Imported from the workbook (exact source not recorded).';
   }
@@ -1182,8 +1671,20 @@ async function loadOverview() {
     //  Pro's prompt — NOT here. Frontend math was removed deliberately
     //  to eliminate the DB-vs-dashboard drift problem.
     // ───────────────────────────────────────────────────────────────────
-    const totalFV   = fmValue('active_fair_value');   // ₹ Cr or null
-    const totalCost = fmValue('invested_cost');       // ₹ Cr or null
+    // Total Fair Value tile — universal AIF formula:
+    //   Total FV = Active FV (fund's stake in still-held positions)
+    //            + Realised Proceeds from Exits
+    // Persister writes both `total_fair_value` and `active_fair_value` as
+    // FundMetric rows. Fall back to old behaviour (Active FV only) if the
+    // new field isn't yet populated (e.g. fund persisted before the 2026-07-11
+    // universal fix landed) so existing dashboards degrade gracefully.
+    const activeFV  = fmValue('active_fair_value');   // Rs. Cr or null — LP-holding basis
+    const realFV    = fmValue('realized_proceeds');   // Rs. Cr or null — exit proceeds
+    const totalFV   = fmValue('total_fair_value')
+                     ?? (activeFV != null || realFV != null
+                          ? (activeFV || 0) + (realFV || 0)
+                          : null);
+    const totalCost = fmValue('invested_cost');       // Rs. Cr or null
     const moic      = fmValue('moic');                // multiple or null
     const tvpi      = fmValue('tvpi');                // multiple or null
     const dpi       = fmValue('dpi');                 // multiple or null
@@ -1210,20 +1711,35 @@ async function loadOverview() {
     if ($('kt-cos'))  $('kt-cos').textContent  = totalCos > 0
         ? `${active} active · ${totalInvestments} investments`
         : '—';
-    if ($('kv-fv'))   $('kv-fv').textContent   = fmtCr(fvCr);
-    // Phase 3 — disambiguate: when fund_nav is available and differs
-    // materially from portfolio-aggregate FV (active_fair_value), show
-    // both in the subtitle so the CFO sees the LP-basis number alongside
-    // the gross portfolio figure. Universal: "—" when no NAV is known.
+    // Main tile value = Total FV (Active + Realised). Clicking the number
+    // opens the total_fair_value provenance panel.
+    if ($('kv-fv'))   $('kv-fv').textContent   = fmtCr(totalFV);
+    // Subtitle shows the breakdown as clickable inline chips:
+    //   Active FV Rs.X Cr  ·  Realised Rs.Y Cr
+    // The Active FV chip has id="kv-active-fv" so wireProvenance can attach
+    // a separate click handler that opens the active_fair_value panel.
+    // CSS untouched — chips inherit .v5-kpi-sub styling with a dotted
+    // underline for the clickable Active FV span.
     if ($('ks-fv')) {
+      const _afvTxt = activeFV != null ? fmtCr(activeFV) : '—';
+      const _rlvTxt = realFV   != null ? fmtCr(realFV)   : '—';
+      $('ks-fv').innerHTML =
+        `Active FV <span id="kv-active-fv" style="cursor:pointer;font-weight:600;color:var(--text1);text-decoration:underline dotted;text-underline-offset:2px;">${esc(_afvTxt)}</span>`
+        + ` · Realised <span style="font-weight:600;color:var(--text1);">${esc(_rlvTxt)}</span>`;
+    }
+    // Trend line carries the classic "vs Cost · Fund NAV" context that used
+    // to live in the subtitle. The Fund NAV chip is a clickable span (id
+    // kv-fund-nav) so the provenance panel opens with the full universal
+    // NAV formula, component table, and Computed-vs-Extracted comparison.
+    if ($('kt-fv')) {
       const navCr = fmValue('fund_nav');
-      const costLine = `vs Cost ${fmtCr(costCr)}`;
-      if (navCr != null && fvCr != null &&
-          Math.abs(navCr - fvCr) / Math.max(Math.abs(fvCr), 1) > 0.05) {
-        $('ks-fv').textContent = `${costLine} · Fund NAV ${fmtCr(navCr)}`;
-      } else {
-        $('ks-fv').textContent = costLine;
+      const parts = [];
+      if (costCr != null) parts.push(`vs Cost ${fmtCr(costCr)}`);
+      if (navCr != null && totalFV != null &&
+          Math.abs(navCr - totalFV) / Math.max(Math.abs(totalFV), 1) > 0.05) {
+        parts.push(`Fund NAV <span id="kv-fund-nav" style="cursor:pointer;font-weight:600;color:var(--text1);text-decoration:underline dotted;text-underline-offset:2px;">${esc(fmtCr(navCr))}</span>`);
       }
+      $('kt-fv').innerHTML = parts.length ? parts.join(' · ') : '—';
     }
     if ($('kv-moic')) $('kv-moic').textContent = fmtX(moic);
     if ($('kv-tvpi')) $('kv-tvpi').textContent = fmtX(tvpi);
@@ -1247,6 +1763,34 @@ async function loadOverview() {
       }
       return { value, formula, inputs, source };
     };
+    // Total Fair Value provenance — clicking the big number shows the
+    // universal AIF formula and a substituted-values equation.
+    wireProvenance('kv-fv', 'total_fair_value', _tileDisplayFor(
+      'total_fair_value', totalFV,
+      'Active Fair Value + Realised Proceeds from Exits',
+      { active_fair_value: activeFV, realised_proceeds: realFV }
+    ));
+    // Active Fair Value provenance — the inline chip in the subtitle. Only
+    // wire if the chip node exists (it's rendered by the ks-fv innerHTML
+    // block a few lines up; guard for safety in case that block was skipped).
+    if ($('kv-active-fv')) {
+      wireProvenance('kv-active-fv', 'active_fair_value', _tileDisplayFor(
+        'active_fair_value', activeFV,
+        'Cost of Active Investments + Unrealised Gains (equivalent to sum of fair_value_of_holding per active investment)',
+        { cost_of_active: costCr, active_fv_sum: activeFV }
+      ));
+    }
+    // Fund NAV provenance — the inline chip in the trend line. Same pattern
+    // as kv-active-fv; guards for cases where the chip wasn't rendered
+    // (e.g. FundMetric.fund_nav ≈ totalFV so the branch skipped it).
+    if ($('kv-fund-nav')) {
+      const _navCr = fmValue('fund_nav');
+      wireProvenance('kv-fund-nav', 'fund_nav', _tileDisplayFor(
+        'fund_nav', _navCr,
+        'NAV = Realised + Unrealised + Cash + Receivables − Mgmt Fee − Carry − Other Liabilities (Fund Exp + Tax + Borrowings)',
+        { fund_nav_source: 'FundMetric.fund_nav (universal AIF NAV formula, P1 computed / P2 extracted fallback)' }
+      ));
+    }
     wireProvenance('kv-moic', 'moic', _tileDisplayFor(
       'moic', moic,
       'totalFV / totalCost',
@@ -1769,7 +2313,7 @@ function renderScorecard(d) {
     { label: 'Active',value: String(d.active),color: '#10b981' },
     { label: 'Total', value: String(d.totalCos), color: '#2563eb' },
     { label: 'DPI',   value: fmtX(d.dpi),   color: '#06b6d4' },
-    { label: 'TVPI',  value: fmtX(d.tvpi),  color: '#f97316' },
+    { label: 'TVPI / Net MOIC',  value: fmtX(d.tvpi),  color: '#f97316' },
   ];
   el.innerHTML = items.map(it => `
     <div class="v5-gauge-item">
@@ -2505,7 +3049,31 @@ async function loadAccountingNAV() {
     // Mgmt fee: sum management_fee_payable across all NAV records (cumulative YTD proxy)
     const totalMgmtFee    = arr.reduce((s, n) => s + parseFloat(n.management_fee_payable || 0), 0);
 
-    if ($('acc-nav-val'))    $('acc-nav-val').textContent    = fmtCr(totalNav);
+    // Fund Reporting → Total NAV KPI = FundMetric.fund_nav (single source
+    // of truth). FundMetric.fund_nav is computed via the universal AIF
+    // NAV formula (Realised + Unrealised + Cash + Receivables − Mgmt Fee
+    // − Carry − Other Liabilities) whenever every balance-sheet component
+    // is present, else falls back to the extracted TOTAL FUND NAV cell.
+    // Same value shown on Overview → identical NAV across the entire dashboard.
+    // Falls back to summed NAVRecord.total_nav only if FundMetric.fund_nav
+    // is unavailable (fresh import in progress, missing metric row, etc.).
+    const _fmNav = (typeof fmValue === 'function') ? fmValue('fund_nav') : null;
+    const _displayNav = (_fmNav != null && _fmNav > 0) ? _fmNav : totalNav;
+    if ($('acc-nav-val')) {
+      $('acc-nav-val').textContent = fmtCr(_displayNav);
+      // Wire the professional NAV provenance panel — clicking the KPI card
+      // opens the sidebar with the priority ladder, computed-vs-extracted
+      // comparison, and the 7-component formula table. Same wiring pattern
+      // used on Overview's Fund NAV inline chip.
+      if (typeof wireProvenance === 'function') {
+        wireProvenance('acc-nav-val', 'fund_nav', {
+          value: _displayNav,
+          formula: 'NAV = Realised + Unrealised + Cash + Receivables − Mgmt Fee − Carry − Other Liabilities (Fund Exp + Tax + Borrowings)',
+          inputs: { fund_nav_source: 'FundMetric.fund_nav (universal AIF NAV formula, P1 computed / P2 extracted fallback)' },
+          source: (_fmNav != null && _fmNav > 0) ? 'derived' : 'on_the_fly',
+        });
+      }
+    }
     if ($('acc-nav-unit'))   $('acc-nav-unit').textContent   = avgNavPerUnit > 0 ? fmtCr(avgNavPerUnit) : '—';
     if ($('acc-mgmt-fee'))   $('acc-mgmt-fee').textContent   = totalMgmtFee > 0 ? fmtCr(totalMgmtFee) : '—';
     if ($('acc-unrealized')) $('acc-unrealized').textContent = totalUnrealized > 0 ? fmtCr(totalUnrealized) : '—';

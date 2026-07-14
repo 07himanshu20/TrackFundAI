@@ -402,6 +402,47 @@ _FUND_MASTER_SLUG_ALIAS: dict[str, str] = {
     'nav_per_unit': 'nav_per_unit',
     'unrealised_gain_fv_cost': 'unrealized_gain',
     'unrealised_gain': 'unrealized_gain',
+    # ── Clawback Reserve / GP Holdback / Escrow % (rate) ───────────────────
+    #
+    # Universal set of slug spellings for the LPA-declared rate that the GP
+    # must escrow against future clawback. Every AIF workbook publishes this
+    # under one of the following labels (typically on a MASTER_INPUTS or
+    # Fund_Overview sheet — both classified as `fund_scheme_master`):
+    #
+    #   "Clawback Reserve %"              — Trivesta MASTER_INPUTS!A50
+    #   "Clawback %" / "Clawback Rate"    — common short forms
+    #   "GP Holdback %" / "Holdback Rate" — Fund_Overview / LPA summary
+    #   "Escrow %" / "Carry Escrow %"     — some workbook conventions
+    #   "GP Carry Holdback %"             — SEBI-templated funds
+    #
+    # `_PCT_FIELDS` (line ~691) already includes `gp_holdback_pct` so
+    # fraction-form values (0.30 → 30) are normalised automatically.
+    # Universal — same routing regardless of which label the CA uses.
+    'clawback_reserve_pct':   'gp_holdback_pct',
+    'clawback_reserve':       'gp_holdback_pct',
+    'clawback_pct':           'gp_holdback_pct',
+    'clawback_rate':          'gp_holdback_pct',
+    'clawback_percentage':    'gp_holdback_pct',
+    'holdback_pct':           'gp_holdback_pct',
+    'holdback_rate':          'gp_holdback_pct',
+    'holdback_percentage':    'gp_holdback_pct',
+    'holdback':               'gp_holdback_pct',
+    'gp_holdback_pct':        'gp_holdback_pct',
+    'gp_holdback_rate':       'gp_holdback_pct',
+    'gp_holdback_percentage': 'gp_holdback_pct',
+    'gp_holdback':            'gp_holdback_pct',
+    'escrow_pct':             'gp_holdback_pct',
+    'escrow_rate':            'gp_holdback_pct',
+    'escrow_percentage':      'gp_holdback_pct',
+    'carry_escrow_pct':       'gp_holdback_pct',
+    'carry_escrow_rate':      'gp_holdback_pct',
+    'carry_escrow_percentage': 'gp_holdback_pct',
+    'gp_carry_holdback_pct':  'gp_holdback_pct',
+    'gp_carry_holdback_rate': 'gp_holdback_pct',
+    'gp_carry_holdback_percentage': 'gp_holdback_pct',
+    'clawback_holdback':      'gp_holdback_pct',
+    'clawback_holdback_pct':  'gp_holdback_pct',
+    'clawback_holdback_rate': 'gp_holdback_pct',
 }
 
 
@@ -414,10 +455,42 @@ _WATERFALL_SLUG_ALIAS: dict[str, str] = {
     'clawback_applicable': 'clawback_applicable',
     'catch_up_provision': 'catchup_provision',
     'carry_recipient': 'carry_recipient',
-    'clawback_holdback': 'gp_holdback_pct',
     'clawback_escrow_bank': 'clawback_escrow_bank',
     'distribution_waterfall': 'waterfall_type',
     'waterfall_type': 'waterfall_type',
+    # ── Clawback Reserve / GP Holdback / Escrow % (rate) ──────────────────
+    # Same universal set as _FUND_MASTER_SLUG_ALIAS above. Defence-in-depth
+    # so the same label also routes when the CA published it on a
+    # WATERFALL / Carry_Clawback sheet (classified as `waterfall_carry`)
+    # rather than on Fund_Overview / MASTER_INPUTS. Bharatcrest publishes
+    # the rate on Carry_Clawback (waterfall_carry domain), Trivesta on
+    # MASTER_INPUTS (fund_scheme_master domain) — this pair of alias
+    # sets ensures both patterns work identically.
+    'clawback_reserve_pct':   'gp_holdback_pct',
+    'clawback_reserve':       'gp_holdback_pct',
+    'clawback_pct':           'gp_holdback_pct',
+    'clawback_rate':          'gp_holdback_pct',
+    'clawback_percentage':    'gp_holdback_pct',
+    'holdback_pct':           'gp_holdback_pct',
+    'holdback_rate':          'gp_holdback_pct',
+    'holdback_percentage':    'gp_holdback_pct',
+    'holdback':               'gp_holdback_pct',
+    'gp_holdback_pct':        'gp_holdback_pct',
+    'gp_holdback_rate':       'gp_holdback_pct',
+    'gp_holdback_percentage': 'gp_holdback_pct',
+    'gp_holdback':            'gp_holdback_pct',
+    'escrow_pct':             'gp_holdback_pct',
+    'escrow_rate':            'gp_holdback_pct',
+    'escrow_percentage':      'gp_holdback_pct',
+    'carry_escrow_pct':       'gp_holdback_pct',
+    'carry_escrow_rate':      'gp_holdback_pct',
+    'carry_escrow_percentage': 'gp_holdback_pct',
+    'gp_carry_holdback_pct':  'gp_holdback_pct',
+    'gp_carry_holdback_rate': 'gp_holdback_pct',
+    'gp_carry_holdback_percentage': 'gp_holdback_pct',
+    'clawback_holdback':      'gp_holdback_pct',
+    'clawback_holdback_pct':  'gp_holdback_pct',
+    'clawback_holdback_rate': 'gp_holdback_pct',
 }
 
 # Aliases from KV slugs (labels found in Fund_Overview VERIFIED CARRY FIGURES
@@ -637,6 +710,72 @@ _METRIC_LABEL_RULES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     'fund_nav_latest': (
         ('closing fund nav', 'net asset value', 'closing nav', 'fund nav'),
         ('per unit', 'per share', 'per lp', 'per investor', 'opening'),
+    ),
+    # ── Balance-sheet snapshot components (universal AIF NAV formula) ──
+    # NAV = Realised + Unrealised + Cash + Receivables
+    #       − Mgmt Fee Payable − Carry Payable − Other Liabilities (Fund Exp + Tax)
+    # These 7 canonical scalars let Phase 4 reconcile the current-period
+    # audited NAV cell (e.g. TOTAL FUND NAV) against a fully-transparent
+    # computed value. Substrings are chosen to match every common AIF
+    # balance-sheet wording — universal across funds, not Trivesta-specific.
+    'bs_cash': (
+        ('cash and cash equivalents', 'cash & cash equivalents',
+         'cash equivalents', 'fund cash', 'cash at bank',
+         'bank balance', 'cash balance', 'undistributed cash'),
+        ('call', 'called', 'commitment', 'per lp', 'per investor',
+         'flow', 'inflow', 'outflow'),
+    ),
+    'bs_interest_dividend_receivable': (
+        ('interest / dividend income receivable',
+         'interest/dividend income receivable',
+         'interest and dividend receivable',
+         'interest income receivable',
+         'dividend income receivable',
+         'interest receivable', 'dividend receivable',
+         'accrued interest', 'accrued dividend'),
+        ('paid', 'received', 'ytd', 'per lp'),
+    ),
+    'bs_other_receivables': (
+        ('other receivables', 'other receivable', 'receivables / prepayments',
+         'prepayments', 'receivable — other', 'other current assets'),
+        ('interest', 'dividend', 'per lp', 'per investor'),
+    ),
+    'bs_mgmt_fee_payable_accrued': (
+        ('management fee payable', 'mgmt fee payable',
+         'management fees payable', 'mgmt fees payable',
+         'management fee accrued', 'accrued management fee'),
+        ('paid', 'rate', '%', 'pct', 'ytd', 'cumulative',
+         'per lp', 'per investor', 'life-to-date', 'life to date'),
+    ),
+    'bs_carry_payable_accrued': (
+        ('performance fee / carry payable',
+         'performance fee/carry payable',
+         'performance fee payable', 'carry payable',
+         'carried interest payable', 'carry accrued', 'accrued carry'),
+        ('paid', 'distributed', 'rate', '%', 'pct',
+         'per lp', 'per investor'),
+    ),
+    'bs_fund_expenses_payable': (
+        ('fund expenses payable', 'fund expense payable',
+         'accrued fund expenses', 'accrued expenses',
+         'operating expenses payable', 'admin expenses payable'),
+        ('paid', 'ytd', 'cumulative', 'life-to-date',
+         'per lp', 'per investor'),
+    ),
+    'bs_borrowings': (
+        ('borrowings', 'borrowings / bridge loans',
+         'bridge loans', 'debt outstanding', 'loans payable',
+         'short-term borrowings'),
+        ('rate', '%', 'per lp'),
+    ),
+    'bs_other_liabilities_tax': (
+        ('other liabilities / tax payable',
+         'other liabilities/tax payable',
+         'other liabilities', 'tax payable', 'taxes payable',
+         'gst payable', 'tds payable', 'other current liabilities'),
+        ('paid', 'ytd', 'per lp', 'per investor',
+         'management fee', 'carry', 'borrowings', 'expenses payable',
+         'fund expense'),
     ),
 }
 
