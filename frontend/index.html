@@ -113,12 +113,96 @@
 
         <!-- KPI grid -->
         <div class="v5-kpi-grid" id="ov-kpi-grid">
-          <div class="v5-kpi-card blue" onclick="showPage('portfolio',null);showSub('portfolio','companies')" style="cursor:pointer" title="Click to view all portfolio companies in Fund Performance › Companies"><div class="v5-kpi-icon"><span class="kpi-ico ki-cos">&#127970;</span></div><div class="v5-kpi-label">Portfolio Companies</div><div class="v5-kpi-value" id="kv-cos">—</div><div class="v5-kpi-sub" id="ks-cos">—</div><div class="v5-kpi-trend up" id="kt-cos">Loading…</div></div>
-          <div class="v5-kpi-card green"><div class="v5-kpi-icon"><span class="kpi-ico ki-fv">&#128176;</span></div><div class="v5-kpi-label">Total Fair Value</div><div class="v5-kpi-value" id="kv-fv">—</div><div class="v5-kpi-sub" id="ks-fv">—</div><div class="v5-kpi-trend up" id="kt-fv">—</div></div>
-          <div class="v5-kpi-card gold"><div class="v5-kpi-icon"><span class="kpi-ico ki-moic">&#128200;</span></div><div class="v5-kpi-label">Portfolio MOIC</div><div class="v5-kpi-value" id="kv-moic">—</div><div class="v5-kpi-sub" id="ks-moic">Gross · Unrealized</div><div class="v5-kpi-trend up" id="kt-moic">—</div></div>
-          <div class="v5-kpi-card purple"><div class="v5-kpi-icon"><span class="kpi-ico ki-irr">&#127919;</span></div><div class="v5-kpi-label">Net IRR</div><div class="v5-kpi-value" id="kv-irr">—</div><div class="v5-kpi-sub" id="ks-irr">vs Hurdle —</div><div class="v5-kpi-trend up" id="kt-irr">—</div></div>
-          <div class="v5-kpi-card cyan"><div class="v5-kpi-icon"><span class="kpi-ico ki-tvpi">&#128202;</span></div><div class="v5-kpi-label">TVPI / Net MOIC</div><div class="v5-kpi-value" id="kv-tvpi">—</div><div class="v5-kpi-sub" id="ks-tvpi">DPI · RVPI</div><div class="v5-kpi-trend up" id="kt-tvpi">—</div></div>
-          <div class="v5-kpi-card red"><div class="v5-kpi-icon"><span class="kpi-ico ki-dep">&#128184;</span></div><div class="v5-kpi-label">Deployment</div><div class="v5-kpi-value" id="kv-dep">—</div><div class="v5-kpi-sub" id="ks-dep">% of drawdown</div><div class="v5-kpi-trend up" id="kt-dep">—</div></div>
+          <!-- Card 1 · 2-col split: Portfolio Companies · Total Investments -->
+          <div class="v5-kpi-card blue kpi-split-2col" title="Portfolio Companies · Total Investments">
+            <div class="kpi-split-cell" onclick="showPage('portfolio',null);showSub('portfolio','companies')" title="Fund Performance › Companies">
+              <div class="v5-kpi-icon"><span class="kpi-ico ki-cos">&#127970;</span></div>
+              <div class="v5-kpi-label">Portfolio Companies</div>
+              <div class="v5-kpi-value" id="kv-cos">—</div>
+              <div class="v5-kpi-sub" id="ks-cos">Active portfolio</div>
+            </div>
+            <div class="kpi-split-cell kpi-split-border-left" onclick="showPage('portfolio',null);showSub('portfolio','inv-detail')" title="Fund Performance › Investments">
+              <div class="v5-kpi-icon"><span class="kpi-ico ki-cos">&#128188;</span></div>
+              <div class="v5-kpi-label">Total Investments</div>
+              <div class="v5-kpi-value" id="kv-invs">—</div>
+              <div class="v5-kpi-sub" id="ks-invs">All schemes</div>
+            </div>
+          </div>
+          <!-- Card 2 · 2-col split: Total FV · Active FV -->
+          <div class="v5-kpi-card green kpi-split-2col" title="Total FV · Active FV">
+            <div class="kpi-split-cell" id="kv-fv-cell" title="Click for Total Fair Value provenance">
+              <div class="v5-kpi-icon"><span class="kpi-ico ki-fv">&#128176;</span></div>
+              <div class="v5-kpi-label">Total FV</div>
+              <div class="v5-kpi-value" id="kv-fv">—</div>
+              <div class="v5-kpi-sub" id="ks-fv">Active + Realised</div>
+            </div>
+            <div class="kpi-split-cell kpi-split-border-left" id="kv-active-fv-cell" title="Click for Active Fair Value provenance">
+              <div class="v5-kpi-icon"><span class="kpi-ico ki-fv">&#128200;</span></div>
+              <div class="v5-kpi-label">Active FV</div>
+              <div class="v5-kpi-value" id="kv-active-fv">—</div>
+              <div class="v5-kpi-sub" id="ks-active-fv">Still-held portfolio</div>
+            </div>
+          </div>
+          <!-- Net IRR · Portfolio MOIC (2-col split) -->
+          <div class="v5-kpi-card gold kpi-split-2col" title="Net IRR · Portfolio MOIC">
+            <div class="kpi-split-cell" id="kv-irr-cell" title="Click for Net IRR provenance">
+              <div class="v5-kpi-icon"><span class="kpi-ico ki-irr">&#127919;</span></div>
+              <div class="v5-kpi-label">Net IRR</div>
+              <div class="v5-kpi-value" id="kv-irr">—</div>
+              <div class="v5-kpi-sub" id="ks-irr">vs Hurdle —</div>
+            </div>
+            <div class="kpi-split-cell kpi-split-border-left" id="kv-moic-cell" title="Click for Portfolio MOIC provenance">
+              <div class="v5-kpi-icon"><span class="kpi-ico ki-moic">&#128200;</span></div>
+              <div class="v5-kpi-label">Portfolio MOIC</div>
+              <div class="v5-kpi-value" id="kv-moic">—</div>
+              <div class="v5-kpi-sub" id="ks-moic">Gross · Unrealized</div>
+            </div>
+          </div>
+          <!-- TVPI / Net MOIC · RVPI (2-col split — RVPI added) -->
+          <div class="v5-kpi-card purple kpi-split-2col" title="TVPI / Net MOIC · RVPI">
+            <div class="kpi-split-cell" id="kv-tvpi-cell" title="Click for TVPI / Net MOIC provenance">
+              <div class="v5-kpi-icon"><span class="kpi-ico ki-tvpi">&#128202;</span></div>
+              <div class="v5-kpi-label">TVPI / Net MOIC</div>
+              <div class="v5-kpi-value" id="kv-tvpi">—</div>
+              <div class="v5-kpi-sub" id="ks-tvpi">DPI · RVPI</div>
+            </div>
+            <div class="kpi-split-cell kpi-split-border-left" id="kv-rvpi-cell" title="Click for RVPI provenance">
+              <div class="v5-kpi-icon"><span class="kpi-ico ki-tvpi">&#128200;</span></div>
+              <div class="v5-kpi-label">RVPI</div>
+              <div class="v5-kpi-value" id="kv-rvpi">—</div>
+              <div class="v5-kpi-sub" id="ks-rvpi">Residual NAV / Called</div>
+            </div>
+          </div>
+          <!-- Fund NAV · Residual NAV (2-col split — Residual NAV added) -->
+          <div class="v5-kpi-card cyan kpi-split-2col" title="Fund NAV · Residual NAV">
+            <div class="kpi-split-cell" id="kv-fund-nav-cell" title="Click for Fund NAV provenance">
+              <div class="v5-kpi-icon"><span class="kpi-ico ki-fv">&#127974;</span></div>
+              <div class="v5-kpi-label">Fund NAV</div>
+              <div class="v5-kpi-value" id="kv-fund-nav">—</div>
+              <div class="v5-kpi-sub" id="ks-fund-nav">Assets − Liabilities</div>
+            </div>
+            <div class="kpi-split-cell kpi-split-border-left" id="kv-residual-nav-cell" title="Click for Residual NAV provenance">
+              <div class="v5-kpi-icon"><span class="kpi-ico ki-fv">&#128188;</span></div>
+              <div class="v5-kpi-label">Residual NAV</div>
+              <div class="v5-kpi-value" id="kv-residual-nav">—</div>
+              <div class="v5-kpi-sub" id="ks-residual-nav">Σ FV − Accrued Carry</div>
+            </div>
+          </div>
+          <!-- Deployment · Total Called (2-col split — Total Called merged in) -->
+          <div class="v5-kpi-card red kpi-split-2col" title="Deployment · Total Called">
+            <div class="kpi-split-cell">
+              <div class="v5-kpi-icon"><span class="kpi-ico ki-dep">&#128184;</span></div>
+              <div class="v5-kpi-label">Deployment</div>
+              <div class="v5-kpi-value" id="kv-dep">—</div>
+              <div class="v5-kpi-sub" id="ks-dep">% of drawdown</div>
+            </div>
+            <div class="kpi-split-cell kpi-split-border-left" id="kv-called-cell" title="Click for Total Called provenance">
+              <div class="v5-kpi-icon"><span class="kpi-ico ki-fv">&#128184;</span></div>
+              <div class="v5-kpi-label">Total Called</div>
+              <div class="v5-kpi-value" id="kv-called">—</div>
+              <div class="v5-kpi-sub" id="ks-called">Capital drawn from LPs</div>
+            </div>
+          </div>
         </div>
 
         <!-- Sector + Performance -->

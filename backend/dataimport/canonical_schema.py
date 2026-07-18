@@ -66,6 +66,17 @@ SHEET_DOMAINS = {
         'exits_distributions (which tracks individual company exit events) and from '
         'nav_accounting (which tracks periodic NAV values).'
     ),
+    'investment_tranches': (
+        'Investment tranche / round / drawdown register — one row PER TRANCHE or '
+        'PER ROUND per company (Series A, Series B follow-on, drawdown 1/2), each '
+        'with a tranche/round amount, tranche date, instrument, shares acquired, '
+        'price per share, and pre/post-money valuation. CRITICAL: This is '
+        'DIFFERENT from portfolio_investments (the company MASTER — ONE summary '
+        'row per company with total cost / fair value / ownership). When a sheet '
+        'lists multiple funding rounds / tranches for the same companies, it is '
+        'investment_tranches, NOT portfolio_investments — routing it as '
+        'portfolio_investments double-counts invested capital.'
+    ),
 }
 
 # ---------------------------------------------------------------------------
@@ -603,6 +614,18 @@ COMPLIANCE_FIELDS = {
     'trustee_approval_date': 'Date of trustee approval',
     'sebi_filing_date': 'Date filed with SEBI',
     'effective_date': 'Date the amendment takes effect',
+    # SEBI / compliance-calendar reinforcement anchors
+    'sebi_report_type': 'SEBI report — Quarterly Activity Report (QAR), Annual Activity Report (AAR), quarterly / annual report to SEBI',
+    'reporting_period': 'Reporting period label — Q1 FY26, Q2 FY26, H1 FY26, FY26, AY 2026-27',
+    'period': 'The period a compliance / SEBI calendar item covers',
+    'form_number': 'Statutory form / return — Form 64C, Form 64D, ITR-5, ITR-7, GSTR-9',
+    'statutory_area': 'Statutory / regulatory area — SEBI (AIF), Income-tax, GST, PMLA / KYC-AML',
+    'filing_frequency': 'Filing frequency — quarterly, half-yearly, annual, event-based',
+    'sebi_regulation_ref': 'SEBI AIF Regulation ref — Reg 3(4)(b), Reg 10(b), Reg 13(a), Reg 15(1)(c), Reg 17, Reg 22, Reg 23(1)',
+    'aif_circular_ref': 'SEBI AIF circular ref — Cir. 2020, Cir. 2020/2023, PPM benchmarking circular',
+    'valuation_requirement': 'Independent valuation by registered valuer requirement (Reg 23(1))',
+    'audit_requirement': 'Annual audited financial statements requirement (Reg 22)',
+    'kyc_aml_review': 'KYC / AML periodic review obligation (PMLA)',
 }
 
 FINANCIALS_PL_BVA_FIELDS = {
@@ -640,6 +663,14 @@ FINANCIALS_PL_BVA_FIELDS = {
     'variance_pct': 'Variance percentage = Variance / |Budget| × 100',
     'is_favorable': 'Whether the variance is favorable — Yes/No, Favorable/Unfavorable, Green/Red',
     'line_item': 'The P&L / Balance Sheet line item being reported (Revenue, EBITDA, PAT, etc.)',
+    # Budget-vs-Actual reinforcement anchors
+    'budget_amount': 'Budgeted / planned amount for the line item',
+    'actual_amount': 'Actual amount achieved for the line item',
+    'plan': 'Plan / AOP / Annual Operating Plan value',
+    'ytd_budget': 'Year-to-date budget',
+    'ytd_actual': 'Year-to-date actual',
+    'favourable_flag': 'Favourable / Unfavourable / Green / Red variance indicator',
+    'bva_line_item': 'Budget-vs-Actual line item — Capital called, Capital deployed, Realisations / exits, Distributions to LPs, Management fee, Fund operating expenses, Portfolio revenue, Portfolio EBITDA',
 }
 
 PORTFOLIO_HIERARCHY_FIELDS = {
@@ -691,6 +722,12 @@ BURN_RUNWAY_FIELDS = {
     'arr': 'Annual Recurring Revenue (SaaS)',
     'churn_rate': 'Monthly or annual churn rate',
     'nrr': 'Net Revenue Retention / Net Dollar Retention',
+    # Burn-UNIQUE anchors (not claimed by valuations_kpis) — help a
+    # "SaaS Metrics & Burn" sheet resolve to burn_runway, not valuations_kpis.
+    'cac': 'Customer Acquisition Cost (CAC)',
+    'ltv': 'Lifetime Value (LTV)',
+    'headcount': 'Employee headcount / team size',
+    'burn_multiple': 'Burn multiple = net burn / net new ARR',
 }
 
 FUND_PL_BS_FIELDS = {
@@ -698,6 +735,23 @@ FUND_PL_BS_FIELDS = {
     'amount': 'Amount for the line item',
     'period': 'Reporting period',
     'statement_type': 'Statement type: pl (profit & loss) or bs (balance sheet)',
+    # Fund-level income-statement / balance-sheet / cash-flow anchors
+    'interest_income': 'Interest income on treasury / FD / undeployed called capital (fund-level)',
+    'dividend_income': 'Dividend income from investee companies (fund-level)',
+    'realised_gain': 'Realised gain on investments / exits (fund income statement)',
+    'unrealised_gain_change': 'Net change in unrealised fair value of investments (fund P&L)',
+    'total_income': 'Total fund income',
+    'management_fee_expense': 'Management fee expense (fund-level)',
+    'trustee_custodian_fee': 'Trustee & custodian fees',
+    'audit_legal_fee': 'Audit & legal / professional fees',
+    'operating_expense': 'Fund operating / admin expenses',
+    'total_expenditure': 'Total fund expenditure',
+    'net_surplus': 'Net surplus / net income attributable to the fund / to LPs',
+    'accrued_carry': 'Accrued carried interest provision',
+    'total_assets_fund': 'Fund-level total assets (fund balance sheet)',
+    'total_liabilities_fund': 'Fund-level total liabilities (fund balance sheet)',
+    'cash_flow_operating': 'Cash flow from operations (fund cash flow statement)',
+    'cash_flow_investing': 'Cash flow from investing — deployments and exits (fund cash flow)',
 }
 
 LP_CAPITAL_ACCOUNTS_FIELDS = {
@@ -753,6 +807,19 @@ WATERFALL_CARRY_FIELDS = {
     'carry_status': 'Carry status: indicative, crystallised, paid',
 }
 
+INVESTMENT_TRANCHES_FIELDS = {
+    'company_name': 'Portfolio company this tranche belongs to',
+    'tranche_number': 'Tranche / drawdown / round number (Tranche 1, Round 2)',
+    'tranche_date': 'Date of this specific tranche / round / drawdown',
+    'tranche_amount': 'Amount invested in THIS tranche / round (not the company total)',
+    'round_name': 'Funding round — Series A, Series B, Seed, Bridge, Pre-Series A, Follow-on',
+    'instrument_type': 'Instrument for this tranche — Equity, CCPS, CCD, SAFE, Convertible Note',
+    'shares_acquired': 'Shares / units acquired in this tranche',
+    'price_per_share': 'Price per share / unit for this tranche',
+    'pre_money_valuation': 'Pre-money valuation at this round',
+    'post_money_valuation': 'Post-money valuation at this round',
+}
+
 DOMAIN_FIELDS = {
     'organization_users': ORGANIZATION_USERS_FIELDS,
     'fund_scheme_master': FUND_SCHEME_MASTER_FIELDS,
@@ -773,6 +840,7 @@ DOMAIN_FIELDS = {
     'lp_capital_accounts': LP_CAPITAL_ACCOUNTS_FIELDS,
     'nav_calculation': NAV_CALCULATION_FIELDS,
     'waterfall_carry': WATERFALL_CARRY_FIELDS,
+    'investment_tranches': INVESTMENT_TRANCHES_FIELDS,
 }
 
 # ---------------------------------------------------------------------------

@@ -870,13 +870,64 @@ const _METRIC_COPY = {
     meaning: 'How much of the committed capital has actually been drawn down so far.',
     formula: 'Sum of all capital calls issued',
   },
+  nav_per_unit: {
+    label: 'NAV / Unit',
+    meaning: 'Per-unit net asset value in ₹ Lakhs. Computed via the universal AIF formula whenever the Fund NAV and Total Units Issued are both available; falls back to the extracted per-unit cell (with a unit-sanity guard) only when a component is missing.',
+    formula: 'NAV / Unit (₹ Lakhs) = Fund NAV (₹ Cr) × 100 / Total Units Issued',
+    priority_ladder: [
+      { code: 'p1_computed_universal',
+        label: 'P1 — Computed via the universal formula',
+        detail: 'NAV / Unit (₹ Lakhs) = Fund NAV (₹ Cr) × 100 / Total Units Issued. Uses the already-derived Fund NAV (from its own P1/P2 ladder) and the Total Units Issued extracted from the fund-master sheet. Wins over any extracted per-unit cell — transparent and reproducible.' },
+      { code: 'p2_extracted_from_cell',
+        label: 'P2 — Extracted from workbook per-unit cell',
+        detail: 'Used when Fund NAV or Total Units Issued is missing. The extracted value is unit-sanity-checked: values > 10,000 are treated as raw ₹ (workbook formula bug) and divided by 100,000 to normalise to Lakhs.' },
+      { code: 'p3_insufficient_data',
+        label: 'P3 — Blank (—)',
+        detail: 'Neither the formula could compute nor a per-unit cell was extracted. See the Missing inputs table.' },
+    ],
+  },
+  unrealised_gain: {
+    label: 'Unrealised Value — Active Portfolio Fair Value',
+    meaning: 'Gross fair value of the still-held portfolio (AIF Section-A convention). Sum of the latest fair-value marking across every active investment. The audit table also shows Active Cost for reference so you can compute FV − Cost yourself.',
+    formula: 'Unrealised Value = Σ latest Valuation.fair_value_of_holding per still-held Investment',
+  },
+  realised_gain: {
+    label: 'Realised Value — Gross Exit Proceeds',
+    meaning: 'Gross cash returned to the fund from every exit (AIF Section-A convention). Not the profit — the audit table also shows realised gain (proceeds − cost) for reference.',
+    formula: 'Realised Value = Σ ExitEvent.proceeds across all exits',
+  },
+  residual_nav: {
+    label: 'Residual NAV — LPA-standard',
+    meaning: 'The value LPs would actually receive if the fund liquidated today — the still-held portfolio at fair value, minus the GP\'s currently-unpaid share of profit. Universal AIF LPA definition. Feeds the ILPA-standard TVPI formula.',
+    formula: 'Residual NAV = Σ latest fair_value_of_holding − Accrued Carried Interest, where Accrued Carry = GP Carry Gross − Realised Carry Paid Out',
+  },
+  rvpi: {
+    label: 'RVPI — Residual Value to Paid-In',
+    meaning: 'The still-held portfolio value (net of GP accrued carry) per rupee LPs called. Uses Residual NAV as numerator so the ILPA identity TVPI = DPI + RVPI holds — all three ratios share the same LP-perspective basis.',
+    formula: 'RVPI = Residual NAV / Total Called Capital',
+  },
 };
+
+// Format a per-unit value stored in ₹ Lakhs. Auto-picks the best display
+// unit: < 100 → "₹X.XX Lakh"; 100–99,999 → "₹X.XX Lakh" (compact); ≥ 1L
+// → "₹X.XX Cr". NEVER uses fmtCr on a Lakh-scaled value.
+function fmtLakh(v) {
+  if (v == null) return '—';
+  const n = parseFloat(v);
+  if (!Number.isFinite(n)) return '—';
+  if (Math.abs(n) < 100) {
+    return '₹' + n.toLocaleString('en-IN', {maximumFractionDigits: 4}) + ' Lakh';
+  }
+  // ≥ 100 Lakh = 1 Cr → prefer Cr for readability
+  return '₹' + (n / 100).toLocaleString('en-IN', {maximumFractionDigits: 4}) + ' Cr';
+}
 
 function _fmtMetricValue(v, unit) {
   if (v == null) return '—';
   if (unit === 'percent')  return parseFloat(v).toFixed(2) + '%';
   if (unit === 'multiple') return parseFloat(v).toFixed(2) + 'x';
   if (unit === 'currency') return '₹' + parseFloat(v).toLocaleString('en-IN', { maximumFractionDigits: 2 }) + ' Cr';
+  if (unit === 'lakh')     return fmtLakh(v);
   return parseFloat(v).toLocaleString('en-IN', { maximumFractionDigits: 2 });
 }
 
@@ -914,6 +965,7 @@ function openProvenancePanel(metricKey) {
   const unit = (rec && rec.metric_unit) || (
     metricKey.endsWith('_pct') || metricKey === 'net_irr' ? 'percent'
     : ['moic','tvpi','dpi','rvpi'].includes(metricKey) ? 'multiple'
+    : metricKey === 'nav_per_unit' ? 'lakh'
     : 'currency'
   );
   const value = tile ? tile.value : (rec ? rec.value : null);
@@ -1434,6 +1486,655 @@ function openProvenancePanel(metricKey) {
       </div>`;
   }
 
+  // ── Section 1.95: NAV/Unit — professional per-unit panel ────────────
+  // Renders: priority ladder (P1/P2/P3), method used, computed-vs-extracted
+  // card (with unit-sanity note if the extracted value was normalised from
+  // raw ₹), 2-row components table (Fund NAV, Total Units Issued).
+  if (metricKey === 'nav_per_unit' && copy.priority_ladder) {
+    const _npuChosen  = rawInputs.nav_per_unit_method || '';
+    const _npuLabel   = rawInputs.nav_per_unit_method_label || '';
+    const _npuMissing = Array.isArray(rawInputs.nav_per_unit_missing_inputs) ? rawInputs.nav_per_unit_missing_inputs : [];
+    const _npuComputed  = rawInputs.nav_per_unit_computed_value;
+    const _npuExtracted = rawInputs.nav_per_unit_extracted_value;
+    const _npuExtractedRaw = rawInputs.nav_per_unit_extracted_value_raw;
+    const _npuNormalised = rawInputs.nav_per_unit_extracted_needed_normalise === true;
+    const _npuSrc  = (rawInputs.nav_per_unit_extracted_source && typeof rawInputs.nav_per_unit_extracted_source === 'object')
+                       ? rawInputs.nav_per_unit_extracted_source : {};
+    const _npuRows = Array.isArray(rawInputs.nav_per_unit_inputs_breakdown) ? rawInputs.nav_per_unit_inputs_breakdown : [];
+    const _npuUnit = rawInputs.nav_per_unit_unit || 'INR Lakhs';
+    const _npuFormula = rawInputs.nav_per_unit_formula || copy.formula;
+    const _npuLadder = copy.priority_ladder.map(item => {
+      const isChosen = item.code === _npuChosen;
+      const badge = isChosen
+        ? `<span style="display:inline-block;background:#dcfce7;color:#166534;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;margin-left:8px;">Used</span>`
+        : `<span style="display:inline-block;background:#f1f5f9;color:#64748b;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500;margin-left:8px;">Not used</span>`;
+      const rowStyle = isChosen
+        ? 'padding:10px;background:#f0fdf4;border-left:3px solid #16a34a;border-radius:4px;margin-bottom:6px;'
+        : 'padding:10px;background:#f8fafc;border-left:3px solid #cbd5e1;border-radius:4px;margin-bottom:6px;';
+      return `
+        <div style="${rowStyle}">
+          <div style="font-size:13px;color:#0f172a;font-weight:${isChosen ? 700 : 500};">
+            ${esc(item.label)}${badge}
+          </div>
+          <div style="font-size:11px;color:#64748b;margin-top:4px;line-height:1.5;">
+            ${esc(item.detail)}
+          </div>
+        </div>`;
+    }).join('');
+    const _npuMethodBanner = _npuLabel
+      ? `<div style="margin-bottom:10px;padding:10px 12px;background:#eff6ff;border-left:3px solid #2563eb;border-radius:4px;">
+           <div style="font-size:11px;color:#1e40af;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600;">
+             Method used for this fund
+           </div>
+           <div style="font-size:12px;color:#1e3a8a;line-height:1.6;">
+             ${esc(_npuLabel)}
+           </div>
+         </div>`
+      : '';
+    let _npuMissBlock = '';
+    if (_npuMissing.length) {
+      const _rowStyle = 'padding:8px 10px;border-bottom:1px solid #fde68a;vertical-align:top;font-size:12px;color:#78350f;line-height:1.5;';
+      const _hdrStyle = 'text-align:left;padding:8px 10px;background:#fde68a;color:#78350f;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.5px;';
+      _npuMissBlock = `
+        <div style="margin-bottom:12px;padding:12px;background:#fef3c7;border-left:3px solid #f59e0b;border-radius:4px;">
+          <div style="font-size:12px;color:#78350f;font-weight:700;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px;">
+            Missing inputs — why P1 could not compute
+          </div>
+          <table style="width:100%;border-collapse:collapse;background:#fffbeb;border-radius:4px;overflow:hidden;">
+            <thead><tr><th style="${_hdrStyle}">Component we could not find</th></tr></thead>
+            <tbody>${_npuMissing.map(m => `<tr><td style="${_rowStyle}font-weight:600;">${esc(m)}</td></tr>`).join('')}</tbody>
+          </table>
+        </div>`;
+    }
+    // Compare card — only when both computed AND extracted exist
+    let _npuCompareBlock = '';
+    if (_npuComputed != null && _npuExtracted != null) {
+      const _diff = Math.abs(parseFloat(_npuComputed) - parseFloat(_npuExtracted));
+      const _agree = _diff <= 0.01;  // 0.01 Lakh = ₹1000 tolerance
+      const _boxColor = _agree ? '#f0fdf4' : '#fef9c3';
+      const _borderColor = _agree ? '#16a34a' : '#ca8a04';
+      const _titleColor = _agree ? '#166534' : '#713f12';
+      const _sourceTxt = (_npuSrc.sheet || _npuSrc.cell)
+          ? `${_npuSrc.sheet || '—'}${_npuSrc.cell ? ' — ' + _npuSrc.cell : ''}`
+          : '—';
+      const _normNote = _npuNormalised
+          ? `<div style="font-size:11px;color:#713f12;margin-top:6px;background:#fef3c7;padding:6px 8px;border-radius:4px;">
+               <b>Unit-sanity normalisation applied:</b> workbook value <b>${parseFloat(_npuExtractedRaw).toLocaleString('en-IN')}</b>
+               was &gt; 10,000 → treated as raw ₹ and divided by 100,000 to normalise to Lakhs.
+               (Common workbook-formula bug — the raw column labelled "Lakhs" actually stored raw ₹.)
+             </div>`
+          : '';
+      _npuCompareBlock = `
+        <div style="margin-bottom:12px;padding:12px;background:${_boxColor};border-left:3px solid ${_borderColor};border-radius:4px;">
+          <div style="font-size:11px;color:${_titleColor};font-weight:700;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px;">
+            Computed vs Extracted ${_agree ? '— values agree' : '— values disagree'}
+          </div>
+          <table style="width:100%;border-collapse:collapse;font-size:12px;color:#0f172a;background:#ffffff;border-radius:4px;overflow:hidden;">
+            <thead><tr>
+              <th style="text-align:left;padding:8px 10px;background:#f8fafc;color:#334155;font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px;">Source</th>
+              <th style="text-align:right;padding:8px 10px;background:#f8fafc;color:#334155;font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px;">Value (₹ Lakhs)</th>
+              <th style="text-align:left;padding:8px 10px;background:#f8fafc;color:#334155;font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px;">Location</th>
+            </tr></thead>
+            <tbody>
+              <tr>
+                <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;font-weight:600;">
+                  Computed (universal formula) ${_npuChosen === 'p1_computed_universal' ? '<span style="display:inline-block;background:#dcfce7;color:#166534;padding:2px 6px;border-radius:8px;font-size:10px;font-weight:600;margin-left:6px;">Shown</span>' : ''}
+                </td>
+                <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;font-family:ui-monospace,Menlo,monospace;font-weight:700;">
+                  ${fmtLakh(_npuComputed)}
+                </td>
+                <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#64748b;font-size:11px;">
+                  Fund NAV × 100 / Total Units Issued (see components below)
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:8px 10px;font-weight:600;">
+                  Extracted from workbook ${_npuChosen === 'p2_extracted_from_cell' ? '<span style="display:inline-block;background:#dcfce7;color:#166534;padding:2px 6px;border-radius:8px;font-size:10px;font-weight:600;margin-left:6px;">Shown</span>' : ''}
+                </td>
+                <td style="padding:8px 10px;text-align:right;font-family:ui-monospace,Menlo,monospace;font-weight:700;">
+                  ${fmtLakh(_npuExtracted)}
+                </td>
+                <td style="padding:8px 10px;color:#64748b;font-size:11px;font-family:ui-monospace,Menlo,monospace;">
+                  ${esc(_sourceTxt)}
+                  ${_npuSrc.label ? `<div style="color:#94a3b8;font-family:inherit;font-size:10px;margin-top:2px;">${esc(_npuSrc.label)}</div>` : ''}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          ${_normNote}
+          ${_agree
+            ? `<div style="font-size:11px;color:${_titleColor};margin-top:8px;line-height:1.5;">Both values agree within ₹0.01 Lakh tolerance. Computed value shown because it is transparent and reproducible from Fund NAV + units.</div>`
+            : `<div style="font-size:11px;color:${_titleColor};margin-top:8px;line-height:1.5;">Values disagree by <b>${fmtLakh(_diff)}</b>. Per the priority rule, computed is shown on the dashboard; extracted preserved above for audit.</div>`}
+        </div>`;
+    }
+    // Components table
+    let _npuCompTable = '';
+    if (_npuRows.length) {
+      const _thStyle   = 'text-align:left;padding:8px 10px;background:#f8fafc;color:#334155;font-weight:600;border-bottom:1px solid #e2e8f0;text-transform:uppercase;font-size:10px;letter-spacing:.5px;';
+      const _tdStyle   = 'padding:8px 10px;border-bottom:1px solid #f1f5f9;vertical-align:top;font-size:12px;color:#0f172a;';
+      const _tdVal     = _tdStyle + 'text-align:right;font-family:ui-monospace,Menlo,monospace;font-weight:600;white-space:nowrap;';
+      const _fmtR = (v, u) => {
+        if (v == null || v === '') return '—';
+        const n = parseFloat(v);
+        if (!Number.isFinite(n)) return String(v);
+        if (u === 'INR Cr') return '₹' + n.toLocaleString('en-IN', {maximumFractionDigits: 4}) + ' Cr';
+        return n.toLocaleString('en-IN', {maximumFractionDigits: 0});
+      };
+      _npuCompTable = `
+        <div style="margin-top:12px;">
+          <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;font-weight:600;">
+            Formula components
+          </div>
+          <div style="font-size:12px;color:#334155;background:#f0f9ff;border-left:3px solid #0284c7;padding:8px 12px;border-radius:4px;margin-bottom:8px;font-family:ui-monospace,Menlo,monospace;">
+            ${esc(_npuFormula)}
+          </div>
+          <table style="width:100%;border-collapse:collapse;background:#ffffff;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden;">
+            <thead><tr>
+              <th style="${_thStyle}">Component</th>
+              <th style="${_thStyle}text-align:right;">Value</th>
+              <th style="${_thStyle}">Role</th>
+              <th style="${_thStyle}">Origin</th>
+            </tr></thead>
+            <tbody>
+              ${_npuRows.map(r => `
+                <tr>
+                  <td style="${_tdStyle}font-weight:600;">${esc(r.label || '—')}</td>
+                  <td style="${_tdVal}">${_fmtR(r.value, r.unit)}</td>
+                  <td style="${_tdStyle}color:#475569;">${esc(r.role || '—')}</td>
+                  <td style="${_tdStyle}color:#64748b;font-size:11px;line-height:1.4;">${esc(r.origin || '—')}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>`;
+    }
+    html += `
+      <div class="prov-section">
+        <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600;">
+          NAV / Unit — Priority Ladder (Compute First, Extract as Fallback)
+        </div>
+        <div style="font-size:12px;color:#475569;line-height:1.5;margin-bottom:10px;">
+          NAV / Unit is computed from Fund NAV (₹ Cr) × 100 ÷ Total Units Issued, giving a per-unit value in ₹ Lakhs.
+          Whenever both inputs are available the computed value wins over any extracted per-unit cell — it is
+          transparent, reproducible, and reconciles to the audited Fund NAV.
+        </div>
+        ${_npuMethodBanner}
+        ${_npuCompareBlock}
+        ${_npuMissBlock}
+        ${_npuLadder}
+        ${_npuCompTable}
+      </div>`;
+  }
+
+  // Reusable per-item breakdown table renderer. Used by the unrealised /
+  // realised gain panels AND by the new total_fair_value / active_fair_value
+  // / called_capital cell panels (2×2 grid on Overview). Renders a sticky-
+  // header scrollable table with a summed footer that reconciles to the KPI.
+  //   kind='unrealised'   → columns: Company · Fair Value · Cost (ref)
+  //   kind='realised'     → columns: Company · Exit Date · Proceeds · Gain (ref)
+  //   kind='capital_call' → columns: Date · Call # · LP / Investor · Amount
+  const _renderPerItemTable = (perItem, kind, title) => {
+    if (!perItem || !perItem.length) return '';
+    const _thStyle = 'text-align:left;padding:8px 10px;background:#f8fafc;color:#334155;font-weight:600;border-bottom:1px solid #e2e8f0;text-transform:uppercase;font-size:10px;letter-spacing:.5px;';
+    const _tdStyle = 'padding:6px 10px;border-bottom:1px solid #f1f5f9;vertical-align:top;font-size:12px;color:#0f172a;';
+    const _tdVal   = _tdStyle + 'text-align:right;font-family:ui-monospace,Menlo,monospace;font-weight:600;white-space:nowrap;';
+    const _tdMuted = _tdStyle + 'color:#64748b;';
+    const _fmtCr = (v) => {
+      if (v == null || v === '') return '—';
+      const n = parseFloat(v);
+      return Number.isFinite(n) ? '₹' + n.toLocaleString('en-IN', {maximumFractionDigits: 2}) + ' Cr' : String(v);
+    };
+    const _isUnrealised = kind === 'unrealised';
+    const _isRealised   = kind === 'realised';
+    const _isCall       = kind === 'capital_call';
+    let _sum = 0;
+    const _bodyRows = perItem.map(r => {
+      if (_isUnrealised) {
+        const _fv = parseFloat(r.fair_value);
+        if (Number.isFinite(_fv)) _sum += _fv;
+        const _exitPill = r.exited
+          ? ' <span style="display:inline-block;background:#fed7aa;color:#9a3412;padding:1px 6px;border-radius:8px;font-size:9px;font-weight:700;margin-left:6px;">EXITED — stale mark</span>'
+          : '';
+        const _rowBg = r.exited ? 'background:#fef3c7;' : '';
+        return `
+          <tr style="${_rowBg}">
+            <td style="${_tdStyle}font-weight:600;">${esc(r.company || '—')}${_exitPill}</td>
+            <td style="${_tdVal}">${_fmtCr(r.fair_value)}</td>
+            <td style="${_tdMuted}text-align:right;font-family:ui-monospace,Menlo,monospace;">${_fmtCr(r.cost)}</td>
+          </tr>`;
+      }
+      if (_isRealised) {
+        const _p = parseFloat(r.proceeds);
+        if (Number.isFinite(_p)) _sum += _p;
+        return `
+          <tr>
+            <td style="${_tdStyle}font-weight:600;">${esc(r.company || '—')}</td>
+            <td style="${_tdMuted}font-size:11px;">${esc(r.exit_date || '—')}</td>
+            <td style="${_tdVal}">${_fmtCr(r.proceeds)}</td>
+            <td style="${_tdMuted}text-align:right;font-family:ui-monospace,Menlo,monospace;">${_fmtCr(r.gain)}</td>
+          </tr>`;
+      }
+      // capital_call
+      const _a = parseFloat(r.amount);
+      if (Number.isFinite(_a)) _sum += _a;
+      return `
+        <tr>
+          <td style="${_tdMuted}font-size:11px;">${esc(r.call_date || r.date || '—')}</td>
+          <td style="${_tdStyle}font-weight:600;">${esc(r.call_number || r.number || '—')}</td>
+          <td style="${_tdMuted}">${esc(r.investor || r.lp || '—')}</td>
+          <td style="${_tdVal}">${_fmtCr(r.amount)}</td>
+        </tr>`;
+    }).join('');
+    let _headers, _footerCols, _footerValIdx, _footerLabel;
+    if (_isUnrealised) {
+      _headers = `<tr>
+        <th style="${_thStyle}">Company (still-held)</th>
+        <th style="${_thStyle}text-align:right;">Fair Value (₹ Cr)</th>
+        <th style="${_thStyle}text-align:right;">Cost (₹ Cr — ref)</th>
+      </tr>`;
+      _footerCols = 3; _footerValIdx = 1; _footerLabel = 'Σ Fair Value';
+    } else if (_isRealised) {
+      _headers = `<tr>
+        <th style="${_thStyle}">Company (exit)</th>
+        <th style="${_thStyle}">Exit Date</th>
+        <th style="${_thStyle}text-align:right;">Proceeds (₹ Cr)</th>
+        <th style="${_thStyle}text-align:right;">Gain (₹ Cr — ref)</th>
+      </tr>`;
+      _footerCols = 4; _footerValIdx = 2; _footerLabel = 'Σ Proceeds';
+    } else {
+      _headers = `<tr>
+        <th style="${_thStyle}">Date</th>
+        <th style="${_thStyle}">Call #</th>
+        <th style="${_thStyle}">LP / Investor</th>
+        <th style="${_thStyle}text-align:right;">Amount (₹ Cr)</th>
+      </tr>`;
+      _footerCols = 4; _footerValIdx = 3; _footerLabel = 'Σ Called';
+    }
+    const _footerCells = Array.from({length: _footerCols}, (_, i) => {
+      if (i === 0) return `<td style="padding:8px 10px;background:#eff6ff;color:#1e40af;font-weight:700;font-size:12px;">${_footerLabel} · ${perItem.length} row${perItem.length===1?'':'s'}</td>`;
+      if (i === _footerValIdx) return `<td style="padding:8px 10px;background:#eff6ff;text-align:right;color:#1e3a8a;font-family:ui-monospace,Menlo,monospace;font-weight:800;font-size:13px;">${_fmtCr(_sum)}</td>`;
+      return `<td style="padding:8px 10px;background:#eff6ff;"></td>`;
+    }).join('');
+    return `
+      <div style="margin-top:12px;">
+        <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;font-weight:600;">
+          ${esc(title || 'Line items — every row that summed into the total')}
+        </div>
+        <div style="max-height:320px;overflow-y:auto;border:1px solid #e2e8f0;border-radius:6px;">
+          <table style="width:100%;border-collapse:collapse;background:#ffffff;">
+            <thead style="position:sticky;top:0;">${_headers}</thead>
+            <tbody>${_bodyRows}</tbody>
+            <tfoot><tr>${_footerCells}</tr></tfoot>
+          </table>
+        </div>
+      </div>`;
+  };
+
+  // ── Section 1.955: Total FV / Active FV / Called Capital — 2×2 cells ──
+  // Each cell shows its formula and a per-item line-items table pulled from
+  // OTHER FundMetric records that already carry the breakdown lists.
+  if (metricKey === 'total_fair_value' || metricKey === 'active_fair_value'
+      || metricKey === 'called_capital') {
+    const _u = _derivedMetrics['unrealised_gain'] || {};
+    const _r = _derivedMetrics['realised_gain']   || {};
+    const _c = _derivedMetrics['called_capital']  || {};
+    const _uIu = (_u.inputs_used && typeof _u.inputs_used === 'object') ? _u.inputs_used : {};
+    const _rIu = (_r.inputs_used && typeof _r.inputs_used === 'object') ? _r.inputs_used : {};
+    const _cIu = (_c.inputs_used && typeof _c.inputs_used === 'object') ? _c.inputs_used : {};
+    const _uPer = Array.isArray(_uIu.unrealised_gain_per_item_breakdown) ? _uIu.unrealised_gain_per_item_breakdown : [];
+    const _rPer = Array.isArray(_rIu.realised_gain_per_item_breakdown)   ? _rIu.realised_gain_per_item_breakdown   : [];
+    const _cPer = Array.isArray(_cIu.called_capital_per_item_breakdown)  ? _cIu.called_capital_per_item_breakdown  : [];
+    const _uVal = _u.value != null ? parseFloat(_u.value) : null;
+    const _rVal = _r.value != null ? parseFloat(_r.value) : null;
+    const _fmtCr2 = (v) => {
+      if (v == null || v === '') return '—';
+      const n = parseFloat(v);
+      return Number.isFinite(n) ? '₹' + n.toLocaleString('en-IN', {maximumFractionDigits: 2}) + ' Cr' : String(v);
+    };
+
+    if (metricKey === 'total_fair_value') {
+      const _totalTxt = (_uVal != null && _rVal != null)
+        ? `${_fmtCr2(_uVal)} + ${_fmtCr2(_rVal)} = <b>${_fmtCr2((_uVal || 0) + (_rVal || 0))}</b>`
+        : '';
+      html += `
+        <div class="prov-section">
+          <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600;">
+            Total Fair Value — Formula &amp; Substitution
+          </div>
+          <div style="font-size:12px;color:#334155;background:#f0f9ff;border-left:3px solid #0284c7;padding:8px 12px;border-radius:4px;margin-bottom:8px;font-family:ui-monospace,Menlo,monospace;">
+            Total FV = Active Fair Value + Realised Proceeds from Exits
+          </div>
+          ${_totalTxt
+            ? `<div style="font-size:13px;color:#0f172a;background:#ffffff;border:1px solid #e2e8f0;border-radius:6px;padding:10px 12px;font-family:ui-monospace,Menlo,monospace;">
+                 With values: ${_totalTxt}
+               </div>`
+            : ''}
+        </div>
+        <div class="prov-section">
+          <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600;">
+            Active Fair Value — Unrealised Portion
+          </div>
+          <div style="font-size:12px;color:#334155;background:#f0f9ff;border-left:3px solid #0284c7;padding:8px 12px;border-radius:4px;margin-bottom:0;font-family:ui-monospace,Menlo,monospace;">
+            Active FV = Σ latest Valuation.fair_value_of_holding per still-held Investment
+          </div>
+          ${_renderPerItemTable(_uPer, 'unrealised', 'Line items — every still-held investment that summed into Active FV')}
+        </div>
+        <div class="prov-section">
+          <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600;">
+            Realised Value — Gross Exit Proceeds Portion
+          </div>
+          <div style="font-size:12px;color:#334155;background:#f0f9ff;border-left:3px solid #0284c7;padding:8px 12px;border-radius:4px;margin-bottom:0;font-family:ui-monospace,Menlo,monospace;">
+            Realised Value = Σ ExitEvent.proceeds across all exits
+          </div>
+          ${_renderPerItemTable(_rPer, 'realised', 'Line items — every exit that summed into Realised')}
+        </div>`;
+    }
+
+    if (metricKey === 'active_fair_value') {
+      // Active FV shares its per-item rows with unrealised_gain (same rows,
+      // AIF Section-A convention).
+      html += `
+        <div class="prov-section">
+          <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600;">
+            Active Fair Value — Formula
+          </div>
+          <div style="font-size:12px;color:#334155;background:#f0f9ff;border-left:3px solid #0284c7;padding:8px 12px;border-radius:4px;margin-bottom:0;font-family:ui-monospace,Menlo,monospace;">
+            Active FV = Σ latest Valuation.fair_value_of_holding per still-held Investment
+          </div>
+          ${_renderPerItemTable(_uPer, 'unrealised', 'Line items — every still-held investment that summed into the total')}
+        </div>`;
+    }
+
+    if (metricKey === 'called_capital') {
+      html += `
+        <div class="prov-section">
+          <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600;">
+            Total Called — Formula
+          </div>
+          <div style="font-size:12px;color:#334155;background:#f0f9ff;border-left:3px solid #0284c7;padding:8px 12px;border-radius:4px;margin-bottom:0;font-family:ui-monospace,Menlo,monospace;">
+            Total Called = Σ CapitalCall.total_call_amount across all LP capital calls
+          </div>
+          ${_cPer.length
+            ? _renderPerItemTable(_cPer, 'capital_call', 'Line items — every capital call that summed into the total')
+            : `<div style="margin-top:10px;padding:10px 12px;background:#f8fafc;border-radius:4px;font-size:11px;color:#64748b;line-height:1.5;">Per-call breakdown not recorded for this fund yet. Re-import the workbook to populate the atomic ledger.</div>`}
+        </div>`;
+    }
+  }
+
+  // ── Section 1.957: Residual NAV — LPA-standard formula panel ──────
+  // Renders the universal Residual NAV formula (Σ FV − Accrued Carry),
+  // a substituted-values equation, an "Accrued Carry" sub-breakdown
+  // (Gross Carry − Realised Paid Out), a components table with role pills,
+  // and a per-item line-items table listing every still-held investment.
+  if (metricKey === 'residual_nav') {
+    const _rows    = Array.isArray(rawInputs.residual_nav_inputs_breakdown)  ? rawInputs.residual_nav_inputs_breakdown  : [];
+    const _accRows = Array.isArray(rawInputs.residual_nav_accrued_breakdown) ? rawInputs.residual_nav_accrued_breakdown : [];
+    const _perItem = Array.isArray(rawInputs.residual_nav_per_item_breakdown) ? rawInputs.residual_nav_per_item_breakdown : [];
+    const _label   = rawInputs.residual_nav_formula || copy.formula || '';
+    const _renderComponentTable = (rows, title) => {
+      if (!rows.length) return '';
+      const _thStyle = 'text-align:left;padding:8px 10px;background:#f8fafc;color:#334155;font-weight:600;border-bottom:1px solid #e2e8f0;text-transform:uppercase;font-size:10px;letter-spacing:.5px;';
+      const _tdStyle = 'padding:8px 10px;border-bottom:1px solid #f1f5f9;vertical-align:top;font-size:12px;color:#0f172a;';
+      const _tdVal   = _tdStyle + 'text-align:right;font-family:ui-monospace,Menlo,monospace;font-weight:600;white-space:nowrap;';
+      const _fmtR = (v) => {
+        if (v == null || v === '') return '—';
+        const n = parseFloat(v);
+        return Number.isFinite(n) ? '₹' + n.toLocaleString('en-IN', {maximumFractionDigits: 2}) + ' Cr' : String(v);
+      };
+      return `
+        <div style="margin-top:10px;">
+          <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;font-weight:600;">${esc(title)}</div>
+          <table style="width:100%;border-collapse:collapse;background:#ffffff;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden;">
+            <thead><tr>
+              <th style="${_thStyle}">Component</th>
+              <th style="${_thStyle}text-align:right;">Value (₹ Cr)</th>
+              <th style="${_thStyle}">Role</th>
+              <th style="${_thStyle}">Origin</th>
+            </tr></thead>
+            <tbody>
+              ${rows.map(r => {
+                const roleStr = String(r.role || '');
+                const _pill = roleStr.includes('Negative')
+                  ? '<span style="display:inline-block;background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700;">Negative (−)</span>'
+                  : roleStr.includes('Positive')
+                    ? '<span style="display:inline-block;background:#dcfce7;color:#166534;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700;">Positive (+)</span>'
+                    : `<span style="display:inline-block;background:#e0e7ff;color:#3730a3;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700;">${esc(roleStr)}</span>`;
+                return `
+                  <tr>
+                    <td style="${_tdStyle}font-weight:600;">${esc(r.label || '—')}</td>
+                    <td style="${_tdVal}">${_fmtR(r.value_rs_cr)}</td>
+                    <td style="${_tdStyle}">${_pill}</td>
+                    <td style="${_tdStyle}color:#64748b;font-size:11px;line-height:1.4;">${esc(r.origin || '—')}</td>
+                  </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>`;
+    };
+    // Per-item table — shares the same rows-shape helper used for
+    // unrealised_gain, but has its own `residual` kind that shows a single
+    // Fair Value column (no cost, no exit date).
+    let _perItemHtml = '';
+    if (_perItem.length) {
+      const _thStyle = 'text-align:left;padding:8px 10px;background:#f8fafc;color:#334155;font-weight:600;border-bottom:1px solid #e2e8f0;text-transform:uppercase;font-size:10px;letter-spacing:.5px;';
+      const _tdStyle = 'padding:6px 10px;border-bottom:1px solid #f1f5f9;vertical-align:top;font-size:12px;color:#0f172a;';
+      const _tdVal   = _tdStyle + 'text-align:right;font-family:ui-monospace,Menlo,monospace;font-weight:600;white-space:nowrap;';
+      const _fmtCr2 = (v) => {
+        if (v == null || v === '') return '—';
+        const n = parseFloat(v);
+        return Number.isFinite(n) ? '₹' + n.toLocaleString('en-IN', {maximumFractionDigits: 2}) + ' Cr' : String(v);
+      };
+      let _sum = 0;
+      const _bodyRows = _perItem.map(r => {
+        const _fv = parseFloat(r.fair_value);
+        if (Number.isFinite(_fv)) _sum += _fv;
+        return `<tr>
+          <td style="${_tdStyle}font-weight:600;">${esc(r.company || '—')}</td>
+          <td style="${_tdVal}">${_fmtCr2(r.fair_value)}</td>
+        </tr>`;
+      }).join('');
+      _perItemHtml = `
+        <div style="margin-top:12px;">
+          <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;font-weight:600;">
+            Line items — Σ latest fair_value_of_holding per still-held Investment
+          </div>
+          <div style="max-height:320px;overflow-y:auto;border:1px solid #e2e8f0;border-radius:6px;">
+            <table style="width:100%;border-collapse:collapse;background:#ffffff;">
+              <thead style="position:sticky;top:0;"><tr>
+                <th style="${_thStyle}">Company (still-held)</th>
+                <th style="${_thStyle}text-align:right;">Fair Value of Holding (₹ Cr)</th>
+              </tr></thead>
+              <tbody>${_bodyRows}</tbody>
+              <tfoot><tr>
+                <td style="padding:8px 10px;background:#eff6ff;color:#1e40af;font-weight:700;font-size:12px;">Σ Fair Value · ${_perItem.length} row${_perItem.length===1?'':'s'}</td>
+                <td style="padding:8px 10px;background:#eff6ff;text-align:right;color:#1e3a8a;font-family:ui-monospace,Menlo,monospace;font-weight:800;font-size:13px;">${_fmtCr2(_sum)}</td>
+              </tr></tfoot>
+            </table>
+          </div>
+        </div>`;
+    }
+    html += `
+      <div class="prov-section">
+        <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600;">
+          Residual NAV — Universal LPA Formula
+        </div>
+        <div style="font-size:12px;color:#334155;background:#f0f9ff;border-left:3px solid #0284c7;padding:8px 12px;border-radius:4px;margin-bottom:10px;font-family:ui-monospace,Menlo,monospace;">
+          ${esc(_label)}
+        </div>
+        ${_renderComponentTable(_rows, 'Residual NAV — components')}
+        ${_renderComponentTable(_accRows, 'Accrued Carried Interest — sub-breakdown')}
+        ${_perItemHtml}
+      </div>`;
+  }
+
+  // ── Section 1.958: RVPI — universal formula panel ──────────────────
+  // RVPI = Residual NAV / Total Called Capital (universal LPA identity rule).
+  // Numerator is Residual NAV (= Σ FV − Accrued Carry), NOT Fund NAV.
+  // This preserves the ILPA identity TVPI = DPI + RVPI because all three
+  // ratios now share the same LP-perspective numerator basis:
+  //   • DPI  = Distributions               / Called
+  //   • RVPI = Residual NAV                / Called
+  //   • TVPI = (Distributions + Residual)  / Called
+  if (metricKey === 'rvpi') {
+    const _residualCr = fmValue('residual_nav');
+    const _sigmaFv    = fmValue('active_fair_value');
+    const _accrued    = (_sigmaFv != null && _residualCr != null)
+                          ? (parseFloat(_sigmaFv) - parseFloat(_residualCr))
+                          : null;
+    const _calledCr   = fmValue('called_capital');
+    const _distCr     = fmValue('lp_distributions');
+    const _dpiVal     = fmValue('dpi');
+    const _tvpiVal    = fmValue('tvpi');
+    const _thStyle    = 'text-align:left;padding:8px 10px;background:#f8fafc;color:#334155;font-weight:600;border-bottom:1px solid #e2e8f0;text-transform:uppercase;font-size:10px;letter-spacing:.5px;';
+    const _tdStyle    = 'padding:8px 10px;border-bottom:1px solid #f1f5f9;vertical-align:top;font-size:12px;color:#0f172a;';
+    const _tdVal      = _tdStyle + 'text-align:right;font-family:ui-monospace,Menlo,monospace;font-weight:600;white-space:nowrap;';
+    const _fmtCr3 = (v) => {
+      if (v == null) return '—';
+      const n = parseFloat(v);
+      return Number.isFinite(n) ? '₹' + n.toLocaleString('en-IN', {maximumFractionDigits: 2}) + ' Cr' : String(v);
+    };
+    const _subst = (_residualCr != null && _calledCr != null && _calledCr > 0)
+      ? `${_fmtCr3(_residualCr)} / ${_fmtCr3(_calledCr)} = <b>${(parseFloat(_residualCr) / parseFloat(_calledCr)).toFixed(4)}×</b>`
+      : '—';
+    // Identity-verification banner — computes DPI + RVPI live and compares
+    // against TVPI so the user can confirm the ILPA identity holds.
+    let _identityBanner = '';
+    if (_dpiVal != null && _tvpiVal != null && _residualCr != null && _calledCr != null && _calledCr > 0) {
+      const _rvpiLive = parseFloat(_residualCr) / parseFloat(_calledCr);
+      const _sum = parseFloat(_dpiVal) + _rvpiLive;
+      const _diff = Math.abs(_sum - parseFloat(_tvpiVal));
+      const _holds = _diff < 0.01;
+      const _color = _holds ? '#166534' : '#92400e';
+      const _bg    = _holds ? '#f0fdf4' : '#fef3c7';
+      const _border = _holds ? '#16a34a' : '#f59e0b';
+      _identityBanner = `
+        <div style="margin-bottom:10px;padding:10px 12px;background:${_bg};border-left:3px solid ${_border};border-radius:4px;">
+          <div style="font-size:11px;color:${_color};text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:700;">
+            ILPA Identity Check — TVPI = DPI + RVPI
+          </div>
+          <div style="font-size:12px;color:${_color};line-height:1.6;font-family:ui-monospace,Menlo,monospace;">
+            DPI (${parseFloat(_dpiVal).toFixed(4)}×) + RVPI (${_rvpiLive.toFixed(4)}×) = <b>${_sum.toFixed(4)}×</b> vs TVPI = <b>${parseFloat(_tvpiVal).toFixed(4)}×</b>
+            &nbsp;·&nbsp; ${_holds ? '<b>Holds ✓</b>' : `Off by ${_diff.toFixed(4)}× — check inputs`}
+          </div>
+        </div>`;
+    }
+    html += `
+      <div class="prov-section">
+        <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600;">
+          RVPI — Universal LPA Formula
+        </div>
+        <div style="font-size:12px;color:#334155;background:#f0f9ff;border-left:3px solid #0284c7;padding:8px 12px;border-radius:4px;margin-bottom:8px;font-family:ui-monospace,Menlo,monospace;">
+          RVPI = Residual NAV / Total Called Capital
+        </div>
+        <div style="font-size:13px;color:#0f172a;background:#ffffff;border:1px solid #e2e8f0;border-radius:6px;padding:10px 12px;margin-bottom:10px;font-family:ui-monospace,Menlo,monospace;">
+          With values: ${_subst}
+        </div>
+        ${_identityBanner}
+        <table style="width:100%;border-collapse:collapse;background:#ffffff;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden;">
+          <thead><tr>
+            <th style="${_thStyle}">Component</th>
+            <th style="${_thStyle}text-align:right;">Value (₹ Cr)</th>
+            <th style="${_thStyle}">Role</th>
+            <th style="${_thStyle}">Origin</th>
+          </tr></thead>
+          <tbody>
+            <tr>
+              <td style="${_tdStyle}font-weight:600;">Residual NAV</td>
+              <td style="${_tdVal}">${_fmtCr3(_residualCr)}</td>
+              <td style="${_tdStyle}"><span style="display:inline-block;background:#dcfce7;color:#166534;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700;">Numerator</span></td>
+              <td style="${_tdStyle}color:#64748b;font-size:11px;line-height:1.4;">FundMetric.residual_nav = Σ latest fair_value_of_holding (${_fmtCr3(_sigmaFv)}) − Accrued Carry (${_accrued != null ? _fmtCr3(_accrued) : '—'})</td>
+            </tr>
+            <tr>
+              <td style="${_tdStyle}font-weight:600;">Total Called Capital</td>
+              <td style="${_tdVal}">${_fmtCr3(_calledCr)}</td>
+              <td style="${_tdStyle}"><span style="display:inline-block;background:#e0e7ff;color:#3730a3;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700;">Denominator</span></td>
+              <td style="${_tdStyle}color:#64748b;font-size:11px;line-height:1.4;">FundMetric.called_capital — Σ CapitalCall.total_call_amount (fund-level ledger, per universal rule)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>`;
+  }
+
+  // ── Section 1.96: Unrealised / Realised Gain — source card ─────────
+  // Compact provenance for the two "Gains" KPI cards. Shows the formula,
+  // component table (with role pills), and a source note explaining where
+  // each atomic sum comes from.
+  if (metricKey === 'unrealised_gain' || metricKey === 'realised_gain') {
+    const _label      = rawInputs[metricKey + '_formula'] || copy.formula || '';
+    const _srcNote    = rawInputs[metricKey + '_source_note'] || '';
+    const _rows       = Array.isArray(rawInputs[metricKey + '_inputs_breakdown']) ? rawInputs[metricKey + '_inputs_breakdown'] : [];
+    const _perItem    = Array.isArray(rawInputs[metricKey + '_per_item_breakdown']) ? rawInputs[metricKey + '_per_item_breakdown'] : [];
+    const _unit       = rawInputs[metricKey + '_unit'] || 'INR Cr';
+    const _isUnrealised = metricKey === 'unrealised_gain';
+    const _computed   = rawInputs[metricKey + '_computed_value'];
+    const _neg = (_computed != null && parseFloat(_computed) < 0);
+    let _rowsHtml = '';
+    if (_rows.length) {
+      const _thStyle   = 'text-align:left;padding:8px 10px;background:#f8fafc;color:#334155;font-weight:600;border-bottom:1px solid #e2e8f0;text-transform:uppercase;font-size:10px;letter-spacing:.5px;';
+      const _tdStyle   = 'padding:8px 10px;border-bottom:1px solid #f1f5f9;vertical-align:top;font-size:12px;color:#0f172a;';
+      const _tdVal     = _tdStyle + 'text-align:right;font-family:ui-monospace,Menlo,monospace;font-weight:600;white-space:nowrap;';
+      const _fmtR = (v) => {
+        if (v == null || v === '') return '—';
+        const n = parseFloat(v);
+        if (!Number.isFinite(n)) return String(v);
+        return '₹' + n.toLocaleString('en-IN', {maximumFractionDigits: 2}) + ' Cr';
+      };
+      _rowsHtml = `
+        <table style="width:100%;border-collapse:collapse;background:#ffffff;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden;">
+          <thead><tr>
+            <th style="${_thStyle}">Component</th>
+            <th style="${_thStyle}text-align:right;">Value (₹ Cr)</th>
+            <th style="${_thStyle}">Role</th>
+            <th style="${_thStyle}">Origin</th>
+          </tr></thead>
+          <tbody>
+            ${_rows.map(r => {
+              const roleStr = String(r.role || '');
+              const _pill = roleStr.includes('Negative')
+                ? '<span style="display:inline-block;background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700;">Negative (−)</span>'
+                : roleStr.includes('Positive')
+                  ? '<span style="display:inline-block;background:#dcfce7;color:#166534;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700;">Positive (+)</span>'
+                  : `<span style="display:inline-block;background:#e0e7ff;color:#3730a3;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700;">${esc(roleStr)}</span>`;
+              return `
+                <tr>
+                  <td style="${_tdStyle}font-weight:600;">${esc(r.label || '—')}</td>
+                  <td style="${_tdVal}">${_fmtR(r.value_rs_cr)}</td>
+                  <td style="${_tdStyle}">${_pill}</td>
+                  <td style="${_tdStyle}color:#64748b;font-size:11px;line-height:1.4;">${esc(r.origin || '—')}</td>
+                </tr>`;
+            }).join('')}
+          </tbody>
+        </table>`;
+    }
+    const _negBanner = _neg
+      ? `<div style="margin-bottom:12px;padding:10px 12px;background:#fef2f2;border-left:3px solid #dc2626;border-radius:4px;">
+           <div style="font-size:11px;color:#991b1b;font-weight:700;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px;">
+             Negative value
+           </div>
+           <div style="font-size:12px;color:#7f1d1d;line-height:1.5;">
+             This is unusual for a gross value — verify the source data.
+           </div>
+         </div>`
+      : '';
+    // Per-item breakdown uses the shared _renderPerItemTable helper defined
+    // above (same markup as the 2×2 Total FV / Active FV cells).
+    const _perItemHtml = _renderPerItemTable(_perItem,
+      _isUnrealised ? 'unrealised' : 'realised',
+      'Line items — every row that summed into the total');
+    html += `
+      <div class="prov-section">
+        <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600;">
+          ${_isUnrealised ? 'Unrealised Value — Active Portfolio Fair Value' : 'Realised Value — Gross Exit Proceeds'}
+        </div>
+        <div style="font-size:12px;color:#334155;background:#f0f9ff;border-left:3px solid #0284c7;padding:8px 12px;border-radius:4px;margin-bottom:10px;font-family:ui-monospace,Menlo,monospace;">
+          ${esc(_label)}
+        </div>
+        ${_negBanner}
+        ${_rowsHtml}
+        ${_perItemHtml}
+        ${_srcNote ? `<div style="margin-top:8px;padding:8px 10px;background:#f8fafc;border-radius:4px;font-size:11px;color:#475569;line-height:1.5;"><b style="color:#334155;">Source:</b> ${esc(_srcNote)}</div>` : ''}
+      </div>`;
+  }
+
   // ── Section 2: How we got it — equation form (Formula = Values = Result) ─
   //
   // For multi-tier metrics (currently TVPI), show ONLY the formula for the
@@ -1623,8 +2324,9 @@ window.closeProvenancePanel = closeProvenancePanel;
 
 /* ── Overview ──────────────────────────────────────────────── */
 async function loadOverview() {
-  // Show a fast company count immediately while the heavy calls run
-  if ($('kt-cos')) $('kt-cos').textContent = '…';
+  // Show fast placeholders in the split-card cells while the heavy calls run
+  if ($('kv-cos'))  $('kv-cos').textContent  = '…';
+  if ($('kv-invs')) $('kv-invs').textContent = '…';
   try {
     const schemeIds = _ctx.schemeIds;
 
@@ -1701,46 +2403,34 @@ async function loadOverview() {
     const totalInvestments = invs.reduce(
         (s, inv) => s + parseInt(inv.tranche_count || 1, 10), 0);
 
+    // ── Portfolio Companies card (2-col split) ────────────────────
+    //   Col 1 → Fund Performance › Companies
+    //   Col 2 → Fund Performance › Investments
     if ($('kv-cos'))  $('kv-cos').textContent  = active || '—';
     if ($('ks-cos')) {
-      const extras = [];
-      if (inactive > 0) extras.push(`+ ${inactive} Exited`);
-      if (totalInvestments > active) extras.push(`${totalInvestments} investments`);
-      $('ks-cos').textContent = extras.length ? extras.join(' · ') : 'Active portfolio';
+      $('ks-cos').textContent = inactive > 0
+        ? `Active · +${inactive} exited`
+        : 'Active portfolio';
     }
-    if ($('kt-cos'))  $('kt-cos').textContent  = totalCos > 0
-        ? `${active} active · ${totalInvestments} investments`
-        : '—';
-    // Main tile value = Total FV (Active + Realised). Clicking the number
-    // opens the total_fair_value provenance panel.
-    if ($('kv-fv'))   $('kv-fv').textContent   = fmtCr(totalFV);
-    // Subtitle shows the breakdown as clickable inline chips:
-    //   Active FV Rs.X Cr  ·  Realised Rs.Y Cr
-    // The Active FV chip has id="kv-active-fv" so wireProvenance can attach
-    // a separate click handler that opens the active_fair_value panel.
-    // CSS untouched — chips inherit .v5-kpi-sub styling with a dotted
-    // underline for the clickable Active FV span.
-    if ($('ks-fv')) {
-      const _afvTxt = activeFV != null ? fmtCr(activeFV) : '—';
-      const _rlvTxt = realFV   != null ? fmtCr(realFV)   : '—';
-      $('ks-fv').innerHTML =
-        `Active FV <span id="kv-active-fv" style="cursor:pointer;font-weight:600;color:var(--text1);text-decoration:underline dotted;text-underline-offset:2px;">${esc(_afvTxt)}</span>`
-        + ` · Realised <span style="font-weight:600;color:var(--text1);">${esc(_rlvTxt)}</span>`;
+    if ($('kv-invs')) $('kv-invs').textContent = totalInvestments || '—';
+    if ($('ks-invs')) {
+      $('ks-invs').textContent = totalCos > 0
+        ? `Across ${totalCos} compan${totalCos === 1 ? 'y' : 'ies'}`
+        : 'All schemes';
     }
-    // Trend line carries the classic "vs Cost · Fund NAV" context that used
-    // to live in the subtitle. The Fund NAV chip is a clickable span (id
-    // kv-fund-nav) so the provenance panel opens with the full universal
-    // NAV formula, component table, and Computed-vs-Extracted comparison.
-    if ($('kt-fv')) {
-      const navCr = fmValue('fund_nav');
-      const parts = [];
-      if (costCr != null) parts.push(`vs Cost ${fmtCr(costCr)}`);
-      if (navCr != null && totalFV != null &&
-          Math.abs(navCr - totalFV) / Math.max(Math.abs(totalFV), 1) > 0.05) {
-        parts.push(`Fund NAV <span id="kv-fund-nav" style="cursor:pointer;font-weight:600;color:var(--text1);text-decoration:underline dotted;text-underline-offset:2px;">${esc(fmtCr(navCr))}</span>`);
-      }
-      $('kt-fv').innerHTML = parts.length ? parts.join(' · ') : '—';
-    }
+    // ── Total Fair Value card (2×2 grid) ──────────────────────────
+    //   Row 1: Total FV       · Active FV
+    //   Row 2: Total Called   · Fund NAV
+    const _navCr    = fmValue('fund_nav');
+    const _calledCr = fmValue('called_capital');
+    if ($('kv-fv'))        $('kv-fv').textContent        = fmtCr(totalFV);
+    if ($('kv-active-fv')) $('kv-active-fv').textContent = fmtCr(activeFV);
+    if ($('kv-called'))    $('kv-called').textContent    = fmtCr(_calledCr);
+    if ($('kv-fund-nav'))  $('kv-fund-nav').textContent  = fmtCr(_navCr);
+    if ($('ks-fv'))        $('ks-fv').textContent        = 'Active + Realised';
+    if ($('ks-active-fv')) $('ks-active-fv').textContent = 'Still-held portfolio';
+    if ($('ks-called'))    $('ks-called').textContent    = 'Capital drawn from LPs';
+    if ($('ks-fund-nav'))  $('ks-fund-nav').textContent  = 'Realised + Unrealised − Liabilities';
     if ($('kv-moic')) $('kv-moic').textContent = fmtX(moic);
     if ($('kv-tvpi')) $('kv-tvpi').textContent = fmtX(tvpi);
     if ($('kv-irr'))  $('kv-irr').textContent  = netIrr != null ? netIrr.toFixed(1) + '%' : '—';
@@ -1763,49 +2453,66 @@ async function loadOverview() {
       }
       return { value, formula, inputs, source };
     };
-    // Total Fair Value provenance — clicking the big number shows the
-    // universal AIF formula and a substituted-values equation.
-    wireProvenance('kv-fv', 'total_fair_value', _tileDisplayFor(
+    // 2×2 cell provenance — click anywhere in a cell opens its panel.
+    // Attached to the cell CONTAINER (not the value span) so the entire
+    // tile is clickable, matching the spec.
+    wireProvenance('kv-fv-cell', 'total_fair_value', _tileDisplayFor(
       'total_fair_value', totalFV,
       'Active Fair Value + Realised Proceeds from Exits',
       { active_fair_value: activeFV, realised_proceeds: realFV }
     ));
-    // Active Fair Value provenance — the inline chip in the subtitle. Only
-    // wire if the chip node exists (it's rendered by the ks-fv innerHTML
-    // block a few lines up; guard for safety in case that block was skipped).
-    if ($('kv-active-fv')) {
-      wireProvenance('kv-active-fv', 'active_fair_value', _tileDisplayFor(
-        'active_fair_value', activeFV,
-        'Cost of Active Investments + Unrealised Gains (equivalent to sum of fair_value_of_holding per active investment)',
-        { cost_of_active: costCr, active_fv_sum: activeFV }
-      ));
-    }
-    // Fund NAV provenance — the inline chip in the trend line. Same pattern
-    // as kv-active-fv; guards for cases where the chip wasn't rendered
-    // (e.g. FundMetric.fund_nav ≈ totalFV so the branch skipped it).
-    if ($('kv-fund-nav')) {
-      const _navCr = fmValue('fund_nav');
-      wireProvenance('kv-fund-nav', 'fund_nav', _tileDisplayFor(
-        'fund_nav', _navCr,
-        'NAV = Realised + Unrealised + Cash + Receivables − Mgmt Fee − Carry − Other Liabilities (Fund Exp + Tax + Borrowings)',
-        { fund_nav_source: 'FundMetric.fund_nav (universal AIF NAV formula, P1 computed / P2 extracted fallback)' }
-      ));
-    }
-    wireProvenance('kv-moic', 'moic', _tileDisplayFor(
+    wireProvenance('kv-active-fv-cell', 'active_fair_value', _tileDisplayFor(
+      'active_fair_value', activeFV,
+      'Sum of fair_value_of_holding across every active investment',
+      { cost_of_active: costCr, active_fv_sum: activeFV }
+    ));
+    wireProvenance('kv-called-cell', 'called_capital', _tileDisplayFor(
+      'called_capital', _calledCr,
+      'Sum of all capital calls issued to LPs',
+      { called_capital_source: 'FundMetric.called_capital' }
+    ));
+    wireProvenance('kv-fund-nav-cell', 'fund_nav', _tileDisplayFor(
+      'fund_nav', _navCr,
+      'NAV = Realised + Unrealised + Cash + Receivables − Mgmt Fee − Carry − Other Liabilities (Fund Exp + Tax + Borrowings)',
+      { fund_nav_source: 'FundMetric.fund_nav (universal AIF NAV formula, P1 computed / P2 extracted fallback)' }
+    ));
+    // Portfolio MOIC — wired to the whole cell container (2-col split card).
+    wireProvenance('kv-moic-cell', 'moic', _tileDisplayFor(
       'moic', moic,
       'totalFV / totalCost',
       { totalFV: fvCr, totalCost: costCr }
     ));
     const lpDist = fmValue('lp_distributions');
-    wireProvenance('kv-tvpi', 'tvpi', _tileDisplayFor(
+    // TVPI / Net MOIC — universal formula (Distributions + Residual NAV) / Called.
+    wireProvenance('kv-tvpi-cell', 'tvpi', _tileDisplayFor(
       'tvpi', tvpi,
-      '(distributions + NAV) / called  [from FundMetric.tvpi]',
-      { lp_distributions: lpDist, fund_nav: fmValue('fund_nav'), called_capital: fmValue('called_capital') }
+      '(Distributions + Residual NAV) / Total Called Capital',
+      { lp_distributions: lpDist, residual_nav: fmValue('residual_nav'), called_capital: fmValue('called_capital') }
     ));
-    wireProvenance('kv-irr', 'net_irr', _tileDisplayFor(
+    // Net IRR — wired to whole cell container (2-col split card).
+    wireProvenance('kv-irr-cell', 'net_irr', _tileDisplayFor(
       'net_irr', netIrr,
       'XIRR over LP cashflows  [from FundMetric.net_irr]',
       { net_irr_source: 'FundMetric (single source of truth)' }
+    ));
+    // Residual NAV — universal LPA formula (Σ FV − Accrued Carry).
+    const _residualNav = fmValue('residual_nav');
+    if ($('kv-residual-nav')) $('kv-residual-nav').textContent = fmtCr(_residualNav);
+    wireProvenance('kv-residual-nav-cell', 'residual_nav', _tileDisplayFor(
+      'residual_nav', _residualNav,
+      'Residual NAV = Σ latest fair_value_of_holding − Accrued Carried Interest',
+      { sigma_fv: activeFV, accrued_carry_source: 'GP Carry Gross − Realised Carry Paid Out' }
+    ));
+    // RVPI — universal LPA identity rule: Residual NAV / Total Called Capital.
+    // Numerator is Residual NAV (Σ FV − Accrued Carry), NOT Fund NAV. This
+    // preserves TVPI = DPI + RVPI (all three share LP-perspective basis).
+    const _rvpi = fmValue('rvpi');
+    if ($('kv-rvpi'))         $('kv-rvpi').textContent         = fmtX(_rvpi);
+    if ($('ks-rvpi'))         $('ks-rvpi').textContent         = 'Residual NAV / Called';
+    wireProvenance('kv-rvpi-cell', 'rvpi', _tileDisplayFor(
+      'rvpi', _rvpi,
+      'RVPI = Residual NAV / Total Called Capital',
+      { residual_nav: fmValue('residual_nav'), called_capital: _calledCr }
     ));
     // Net IRR card subtitle — real hurdle % from funds_scheme, not hardcoded "8%"
     // Plus method-tag: shows which priority tier produced the IRR value so the
@@ -3074,10 +3781,69 @@ async function loadAccountingNAV() {
         });
       }
     }
-    if ($('acc-nav-unit'))   $('acc-nav-unit').textContent   = avgNavPerUnit > 0 ? fmtCr(avgNavPerUnit) : '—';
+    // NAV / Unit — FundMetric.nav_per_unit is stored in ₹ Lakhs (universal
+    // P1/P2/P3 ladder in the aggregator). Uses fmtLakh so we NEVER label a
+    // Lakh-scaled value with " Cr". Falls back to the old avgNavPerUnit
+    // only when no FundMetric row is present.
+    const _fmNpu = (typeof fmValue === 'function') ? fmValue('nav_per_unit') : null;
+    if ($('acc-nav-unit')) {
+      if (_fmNpu != null && _fmNpu > 0) {
+        $('acc-nav-unit').textContent = fmtLakh(_fmNpu);
+      } else if (avgNavPerUnit > 0) {
+        // Legacy fallback: NAVRecord.nav_per_unit stored raw ₹ per unit;
+        // apply the same unit-sanity guard (> 10,000 = raw ₹ → /100000).
+        const _fallbackLakh = avgNavPerUnit > 10000 ? avgNavPerUnit / 100000 : avgNavPerUnit;
+        $('acc-nav-unit').textContent = fmtLakh(_fallbackLakh);
+      } else {
+        $('acc-nav-unit').textContent = '—';
+      }
+      if (typeof wireProvenance === 'function') {
+        wireProvenance('acc-nav-unit', 'nav_per_unit', {
+          value: _fmNpu,
+          formula: 'NAV / Unit (₹ Lakhs) = Fund NAV (₹ Cr) × 100 / Total Units Issued',
+          inputs: { nav_per_unit_source: 'FundMetric.nav_per_unit (universal AIF per-unit formula, P1 computed / P2 extracted / P3 blank)' },
+          source: (_fmNpu != null && _fmNpu > 0) ? 'derived' : 'on_the_fly',
+        });
+      }
+    }
     if ($('acc-mgmt-fee'))   $('acc-mgmt-fee').textContent   = totalMgmtFee > 0 ? fmtCr(totalMgmtFee) : '—';
-    if ($('acc-unrealized')) $('acc-unrealized').textContent = totalUnrealized > 0 ? fmtCr(totalUnrealized) : '—';
-    if ($('acc-realized'))   $('acc-realized').textContent   = totalRealized   > 0 ? fmtCr(totalRealized)   : '—';
+
+    // Unrealised Value — FundMetric.unrealised_gain stores Active FV per
+    // user spec (AIF Section-A convention: gross value, not FV−Cost).
+    const _fmUnreal = (typeof fmValue === 'function') ? fmValue('unrealised_gain') : null;
+    if ($('acc-unrealized')) {
+      if (_fmUnreal != null) {
+        $('acc-unrealized').textContent = fmtCr(_fmUnreal);
+      } else {
+        $('acc-unrealized').textContent = totalUnrealized > 0 ? fmtCr(totalUnrealized) : '—';
+      }
+      if (typeof wireProvenance === 'function') {
+        wireProvenance('acc-unrealized', 'unrealised_gain', {
+          value: _fmUnreal,
+          formula: 'Unrealised Value = Σ latest Valuation.fair_value_of_holding per still-held Investment',
+          inputs: { unrealised_source: 'FundMetric.unrealised_gain (AIF Section-A convention — gross value)' },
+          source: (_fmUnreal != null) ? 'derived' : 'on_the_fly',
+        });
+      }
+    }
+    // Realised Value — FundMetric.realised_gain stores Σ ExitEvent.proceeds
+    // (gross cash returned, not the profit portion).
+    const _fmReal = (typeof fmValue === 'function') ? fmValue('realised_gain') : null;
+    if ($('acc-realized')) {
+      if (_fmReal != null) {
+        $('acc-realized').textContent = fmtCr(_fmReal);
+      } else {
+        $('acc-realized').textContent = totalRealized > 0 ? fmtCr(totalRealized) : '—';
+      }
+      if (typeof wireProvenance === 'function') {
+        wireProvenance('acc-realized', 'realised_gain', {
+          value: _fmReal,
+          formula: 'Realised Value = Σ ExitEvent.proceeds across all exits',
+          inputs: { realised_source: 'FundMetric.realised_gain (AIF Section-A convention — gross proceeds)' },
+          source: (_fmReal != null) ? 'derived' : 'on_the_fly',
+        });
+      }
+    }
 
     // Mgmt Fee YTD subtitle — read real {pct}% on {basis} from funds_scheme
     // instead of the old hardcoded "2.0% p.a. on corpus". Honest "—" if

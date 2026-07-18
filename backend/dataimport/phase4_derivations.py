@@ -1294,6 +1294,21 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
     if 'total_distributions' in verified_overrides:
         total_distributed = verified_overrides['total_distributions']
         total_dist_src = 'extracted_verified'
+    # Layer B rollup at aggregator level (2026-07-16, universal) — when
+    # neither atomic Distribution rows NOR a labelled workbook cell gave
+    # us `total_distributed`, sum per-LP Commitment.cumulative_distributed.
+    # This is what LP registers publish (LP_REGISTER "Distributions" column
+    # style) — universal across any workbook that tracks per-LP distributions.
+    # Mirrors the persister-side ladder so TVPI's P1 formula (Distributions
+    # + Residual NAV) / Called can fire whenever ANY of the three sources
+    # (ledger / workbook cell / LP-register rollup) has a value.
+    if total_distributed is None or total_distributed == 0:
+        _lp_cum_dist = (Commitment.objects.filter(scheme=scheme)
+                         .aggregate(s=Sum('cumulative_distributed'))['s']
+                         or Decimal('0'))
+        if _lp_cum_dist > 0:
+            total_distributed = _lp_cum_dist
+            total_dist_src = 'lp_register_cumulative_distributed'
     if 'total_committed_capital' in verified_overrides:
         total_committed = verified_overrides['total_committed_capital']
         total_committed_src = 'extracted_verified'
@@ -1805,11 +1820,55 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
     if total_called and total_called > 0 and total_distributed is not None:
         dpi = (total_distributed / total_called).quantize(Decimal('0.0001'))
 
-    # RVPI = residual NAV / performance denominator — uses atomic FV preferentially.
-    if _perf_denom and _perf_denom > 0:
-        nav_part = _residual_value()
-        if nav_part:
-            rvpi = (nav_part / _perf_denom).quantize(Decimal('0.0001'))
+    # ══ UNIVERSAL RESIDUAL NAV (2026-07-16) ═════════════════════════════════
+    #
+    # Residual NAV = Σ latest fair_value_of_holding − Accrued Carried Interest
+    # Accrued Carried Interest = GP Carry Gross − Realised Carry Already Paid Out
+    #
+    # This is the LP-perspective residual: what LPs would actually receive if
+    # the fund liquidated today, after the GP takes its accrued share. Universal
+    # across every European whole-fund AIF workbook — every input (Σ FV, gross
+    # carry, realised paid-out carry) comes from the atomic ledger via the same
+    # 3-tier ladders already defined above (Priority 1 per-event → formula →
+    # extracted headline). Falls back gracefully:
+    #   • gp_carry_gross None   → accrued = 0     → residual = Σ FV
+    #   • gp_carry_distributed None → treat as 0  → full gross is accrued
+    # If Σ FV itself is unknown we emit None with a reason. No hardcoding.
+    residual_nav = None
+    accrued_carry = None
+    _sigma_fv = db_active_fv if db_active_fv > 0 else None
+    if _sigma_fv is not None:
+        _gross = gp_carry_gross if gp_carry_gross is not None else Decimal('0')
+        _paid  = gp_carry_distributed if gp_carry_distributed is not None else Decimal('0')
+        accrued_carry = (_gross - _paid).quantize(Decimal('0.01'))
+        # Never negative — a fund cannot have "negative accrued carry"
+        if accrued_carry < 0:
+            accrued_carry = Decimal('0')
+        residual_nav = (_sigma_fv - accrued_carry).quantize(Decimal('0.01'))
+    else:
+        reasons.setdefault('residual_nav',
+            'Σ latest fair_value_of_holding is unknown — no Valuation rows persisted for this scheme')
+
+    # ══ UNIVERSAL RVPI (2026-07-16, updated per LPA identity rule) ══════════
+    #
+    # RVPI = Residual NAV / Total Called Capital
+    # (numerator changed from Fund NAV → Residual NAV so the ILPA identity
+    #  TVPI = DPI + RVPI holds. All three ratios now share the same numerator
+    #  basis: Distributions + Residual NAV for TVPI, Distributions for DPI,
+    #  Residual NAV for RVPI.)
+    #
+    # Residual NAV = Σ latest fair_value_of_holding − Accrued Carried Interest
+    # Total Called Capital = strict fund-level Σ CapitalCall.total_call_amount
+    # (never LP-cumulative). Both inputs computed above in this same function.
+    if residual_nav is not None and total_called and total_called > 0:
+        rvpi = (residual_nav / total_called).quantize(Decimal('0.0001'))
+    else:
+        if residual_nav is None:
+            reasons.setdefault('rvpi',
+                'Residual NAV is unknown — Σ latest fair_value_of_holding could not be computed for this scheme')
+        elif not total_called or total_called <= 0:
+            reasons.setdefault('rvpi',
+                'Total Called Capital is unknown — no CapitalCall rows persisted for this scheme')
 
     # ══ UNIVERSAL TVPI / NET MOIC (2026-07-12) ═════════════════════════════
     #
@@ -1836,7 +1895,11 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
     tvpi_missing_inputs: list[dict] = []
 
     _tvpi_dist    = total_distributed
-    _tvpi_res_nav = _residual_value()  # per-investment holdings sum (LPA "Residual NAV")
+    # Residual NAV numerator = the LPA-standard residual (Σ FV − Accrued Carry)
+    # computed just above. Falls back to raw _residual_value() if the new
+    # ladder emitted None (e.g. no Valuations persisted) so we still get a
+    # defensible number rather than an unexplained blank.
+    _tvpi_res_nav = residual_nav if residual_nav is not None else _residual_value()
     _tvpi_fund_nav = fund_nav          # accounting NAV (from NAV_CALC / Fund_Overview)
     _tvpi_called  = total_called
 
@@ -2364,6 +2427,225 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
         'missing_inputs': _nav_missing,
     }
 
+    # ══ UNIVERSAL NAV / UNIT (AIF-standard, 2026-07-15) ══════════════════
+    #
+    # Formula:  NAV / Unit (₹ Lakhs) = Fund NAV (₹ Cr) × 100 / Total Units Issued
+    # (× 100 because 1 Cr = 100 Lakhs — brings the per-unit value into Lakhs.)
+    #
+    # 3-tier priority ladder (per user spec):
+    #   P1  p1_computed_universal   Fund NAV + Total Units Issued both present
+    #                               → compute per the AIF-standard formula.
+    #   P2  p2_extracted_from_cell  Fall back to the extracted per-unit cell
+    #                               (Gemini-identified nav_per_unit / closing
+    #                               nav_per_unit). Includes unit sanity guard:
+    #                               values > 10,000 are treated as raw ₹ and
+    #                               normalised to Lakhs (÷ 100,000).
+    #   P3  p3_insufficient_data    Neither compute inputs nor extracted cell
+    #                               → blank ('—') with itemised missing inputs.
+    _npu_units = _safe_decimal(verified_overrides.get('total_units_outstanding'))
+    if _npu_units is None or _npu_units == 0:
+        # Fallback: latest NAVRecord.total_units_outstanding if set
+        from accounting.models import NAVRecord as _NAVRec
+        _latest_nav = (_NAVRec.objects.filter(scheme=scheme)
+                       .order_by('-nav_date').first())
+        if _latest_nav and _latest_nav.total_units_outstanding:
+            _u = _safe_decimal(_latest_nav.total_units_outstanding)
+            if _u is not None and _u > 0:
+                _npu_units = _u
+
+    _npu_extracted_raw = None
+    _npu_extracted_source = {'sheet': None, 'cell': None, 'label': None}
+    # P2 candidate: latest NAVRecord.nav_per_unit
+    from accounting.models import NAVRecord as _NAVRec2
+    _latest_nav_for_npu = (_NAVRec2.objects.filter(scheme=scheme)
+                           .order_by('-nav_date').first())
+    if _latest_nav_for_npu and _latest_nav_for_npu.nav_per_unit:
+        _v = _safe_decimal(_latest_nav_for_npu.nav_per_unit)
+        if _v is not None and _v > 0:
+            _npu_extracted_raw = _v
+            _npu_extracted_source = {
+                'sheet': 'NAV Records',
+                'cell': f'latest ({_latest_nav_for_npu.nav_date})',
+                'label': 'nav_per_unit (extracted per-period)',
+            }
+
+    # Unit-sanity normalisation for extracted value. Universal — every AIF
+    # publishes per-unit values in Lakhs (typically 1–10 Lakh range). A
+    # published value > 10,000 is almost certainly in raw ₹ (Excel's own
+    # bug on Trivesta's NAV_CALC!I column = 182,934 ₹/unit). Divide by
+    # 100,000 to normalise to Lakhs. Threshold chosen conservatively so
+    # any legitimate "very high NAV per unit" fund (e.g. private equity
+    # fund with ₹10,000+ Lakh per unit) is still safe.
+    _npu_extracted = None
+    _npu_extracted_needed_normalise = False
+    if _npu_extracted_raw is not None:
+        if _npu_extracted_raw > Decimal('10000'):
+            _npu_extracted = (_npu_extracted_raw / Decimal('100000')).quantize(Decimal('0.0001'))
+            _npu_extracted_needed_normalise = True
+        else:
+            _npu_extracted = _npu_extracted_raw.quantize(Decimal('0.0001'))
+
+    _npu_computed = None
+    if fund_nav is not None and _npu_units is not None and _npu_units > 0:
+        # Fund NAV is in ₹ Crore → × 100 gives ₹ Lakhs → ÷ units gives ₹ Lakhs per unit
+        _npu_computed = (fund_nav * Decimal('100') / _npu_units).quantize(Decimal('0.0001'))
+
+    _npu_missing = []
+    if _npu_computed is None:
+        if fund_nav is None:
+            _npu_missing.append('Fund NAV (upstream — see Fund NAV provenance panel)')
+        if _npu_units is None or _npu_units == 0:
+            _npu_missing.append('Total Units Issued (fund-master "Total Units Issued" cell OR any NAVRecord with units > 0)')
+
+    if _npu_computed is not None:
+        nav_per_unit = _npu_computed
+        nav_per_unit_method = 'p1_computed_universal'
+    elif _npu_extracted is not None:
+        nav_per_unit = _npu_extracted
+        nav_per_unit_method = 'p2_extracted_from_cell'
+    else:
+        nav_per_unit = None
+        nav_per_unit_method = 'p3_insufficient_data'
+
+    _npu_provenance = {
+        'method': nav_per_unit_method,
+        'method_label': ({
+            'p1_computed_universal':   'P1 — Computed via the universal formula: Fund NAV (₹ Cr) × 100 / Total Units Issued',
+            'p2_extracted_from_cell':  'P2 — Extracted from workbook per-unit cell (Fund NAV or Units missing for P1)',
+            'p3_insufficient_data':    'P3 — Blank. Neither the formula could compute nor a per-unit cell was extracted.',
+        }).get(nav_per_unit_method, nav_per_unit_method),
+        'formula': 'NAV / Unit (₹ Lakhs) = Fund NAV (₹ Cr) × 100 / Total Units Issued',
+        'unit': 'INR Lakhs',
+        'computed_value':  (float(_npu_computed) if _npu_computed is not None else None),
+        'extracted_value': (float(_npu_extracted) if _npu_extracted is not None else None),
+        'extracted_value_raw': (float(_npu_extracted_raw) if _npu_extracted_raw is not None else None),
+        'extracted_needed_normalise': _npu_extracted_needed_normalise,
+        'extracted_source': _npu_extracted_source,
+        'components': {
+            'fund_nav_cr':          (float(fund_nav) if fund_nav is not None else None),
+            'total_units_issued':   (float(_npu_units) if _npu_units is not None else None),
+        },
+        'missing_inputs': _npu_missing,
+    }
+
+    # ══ UNREALISED VALUE + REALISED VALUE (2026-07-15) ═════════════════════
+    #
+    # Per user spec (2026-07-15): the two KPI cards show the AIF Section-A
+    # convention — GROSS values (not mark-to-market gains):
+    #
+    #   Unrealised Value = Σ latest Valuation.fair_value_of_holding per
+    #                      still-held Investment (== FundMetric.active_fair_value)
+    #                      Trivesta: 1,165.33 Cr
+    #   Realised Value   = Σ ExitEvent.proceeds  (gross cash returned)
+    #                      Trivesta: 603.00 Cr
+    #
+    # These match what the user has already verified in the database. The
+    # KPI card labels ("Unrealised Gains" / "Realised Gains") retain their
+    # existing wording but display the AIF Section-A gross value.
+    _uv_active_fv = _safe_decimal(db_active_fv) if db_active_fv else None
+    # Active cost — kept for the audit sidebar so users can also see the
+    # cost basis, but NOT subtracted from FV.
+    _active_investments_q = Investment.objects.filter(scheme=scheme).exclude(
+        pk__in=ExitEvent.objects.filter(investment__scheme=scheme).values('investment_id')
+    )
+    _uv_active_cost_agg = _active_investments_q.aggregate(_c=Sum('total_invested'))
+    _uv_active_cost = _safe_decimal(_uv_active_cost_agg.get('_c'))
+
+    # AIF Section-A convention: Unrealised = Active FV (gross), not FV−Cost.
+    unrealised_gain = _uv_active_fv.quantize(Decimal('0.01')) if _uv_active_fv is not None else None
+
+    # Per-investment breakdown — every row that contributed to the sum. Shown
+    # in the sidebar so the user can see the line-items behind the total.
+    # Mirrors the upstream `db_active_fv` query EXACTLY: iterates ALL
+    # Investments (Coalesce fair_value_of_holding, fair_value; excludes only
+    # synthetic mark-to-cost rows). This guarantees the breakdown Σ matches
+    # the FundMetric.value / KPI display, so the user can reconcile visually.
+    # An 'exited' flag marks investments that also have an ExitEvent row —
+    # these appear at the end and are visually distinct in the sidebar.
+    _exited_ids = set(ExitEvent.objects.filter(
+        investment__scheme=scheme
+    ).values_list('investment_id', flat=True))
+    _uv_lh = Valuation.objects.filter(investment=OuterRef('pk')).exclude(
+        methodology='derived_from_cost_x_scheme_markup',
+    ).order_by('-valuation_date').annotate(
+        _holding=Coalesce('fair_value_of_holding', 'fair_value'),
+    ).values('_holding')[:1]
+    _uv_rows = []
+    for _inv in Investment.objects.filter(scheme=scheme).select_related('portfolio_company').annotate(
+        _latest_fv=Subquery(_uv_lh),
+    ):
+        _fv = _safe_decimal(_inv._latest_fv)
+        if _fv is None or _fv == 0:
+            continue
+        _uv_rows.append({
+            'company':    (_inv.portfolio_company.name if _inv.portfolio_company else 'Unknown'),
+            'fair_value': float(_fv),
+            'cost':       float(_safe_decimal(_inv.total_invested) or Decimal('0')),
+            'exited':     _inv.pk in _exited_ids,
+        })
+    # Deterministic order — active first (descending FV), then exited-but-marked
+    _uv_rows.sort(key=lambda r: (r['exited'], -r['fair_value']))
+
+    _ug_provenance = {
+        'method': 'p1_computed_universal' if unrealised_gain is not None else 'p3_insufficient_data',
+        'formula': 'Unrealised Value = Σ latest Valuation.fair_value_of_holding per still-held Investment (== FundMetric.active_fair_value)',
+        'unit': 'INR Cr',
+        'computed_value': (float(unrealised_gain) if unrealised_gain is not None else None),
+        'components': {
+            'active_fair_value':   (float(_uv_active_fv) if _uv_active_fv is not None else None),
+            'active_cost_for_ref': (float(_uv_active_cost) if _uv_active_cost is not None else None),
+        },
+        # Line-item breakdown — one row per still-held Investment, biggest first.
+        'per_item_breakdown': _uv_rows,
+        'source_note': ('AIF Section-A convention — displays the GROSS fair value of the still-held portfolio, '
+                        'NOT the mark-to-market gain (FV − Cost). Cost is shown in the audit table for reference only. '
+                        'Source: Σ latest Valuation.fair_value_of_holding per Investment without an ExitEvent row. '
+                        'Each Valuation row was extracted from the workbook by the persister.'),
+    }
+
+    # AIF Section-A convention: Realised = gross Σ ExitEvent.proceeds.
+    _rg_agg2 = ExitEvent.objects.filter(
+        investment__scheme=scheme
+    ).aggregate(_gain=Sum('realized_gain_loss'), _proc=Sum('proceeds'))
+    _rg_val = _safe_decimal(_rg_agg2.get('_gain'))
+    _rp_val = _safe_decimal(_rg_agg2.get('_proc'))
+    realised_gain = _rp_val.quantize(Decimal('0.01')) if _rp_val is not None else None
+
+    # Per-exit breakdown — every ExitEvent row that contributed to the sum.
+    # Sorted by exit_date descending (most recent first). Shown in sidebar.
+    _rg_rows = []
+    for _ev in ExitEvent.objects.filter(
+        investment__scheme=scheme
+    ).select_related('investment__portfolio_company').order_by('-exit_date'):
+        _p = _safe_decimal(_ev.proceeds)
+        _g = _safe_decimal(_ev.realized_gain_loss)
+        _rg_rows.append({
+            'company': (_ev.investment.portfolio_company.name
+                        if _ev.investment and _ev.investment.portfolio_company
+                        else 'Unknown'),
+            'exit_date':   (_ev.exit_date.isoformat() if _ev.exit_date else None),
+            'proceeds':    (float(_p) if _p is not None else 0.0),
+            'gain':        (float(_g) if _g is not None else None),
+        })
+
+    _rg_provenance = {
+        'method': 'p1_computed_universal' if realised_gain is not None else 'p3_insufficient_data',
+        'formula': 'Realised Value = Σ ExitEvent.proceeds (gross cash returned to the fund from every exit)',
+        'unit': 'INR Cr',
+        'computed_value': (float(realised_gain) if realised_gain is not None else None),
+        'components': {
+            'sum_exit_proceeds':       (float(_rp_val) if _rp_val is not None else None),
+            'sum_realized_gain_loss':  (float(_rg_val) if _rg_val is not None else None),
+            'exit_count':              len(_rg_rows),
+        },
+        # Line-item breakdown — one row per ExitEvent, most recent first.
+        'per_item_breakdown': _rg_rows,
+        'source_note': ('AIF Section-A convention — displays the GROSS realised proceeds (cash returned from exits), '
+                        'NOT the profit portion (proceeds − cost). Realised gain shown in the audit table for reference. '
+                        'Source: Σ ExitEvent.proceeds across every exit. Each ExitEvent row was extracted from the '
+                        "workbook's EXITS sheet by the persister."),
+    }
+
     return {
         # Totals (atomic facts)
         'total_capital_called':   total_called,
@@ -2373,6 +2655,14 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
         'total_invested_capital':  total_invested,
         'total_realised_proceeds': total_realised,
         'total_unrealised_fv_holding': db_active_fv if db_active_fv > 0 else None,
+        # ── Residual NAV + Accrued Carry (universal LPA rule, 2026-07-16) ──
+        # Residual NAV = Σ latest fair_value_of_holding − Accrued Carry
+        # Accrued Carry = GP Carry Gross − Realised Carry Paid Out
+        # Persisted as its own FundMetric row so the dashboard can display it
+        # alongside Fund NAV and drive the ILPA-standard TVPI = (Distributions
+        # + Residual NAV) / Called Capital formula.
+        'residual_nav':           residual_nav,
+        'accrued_carry':          accrued_carry,
         # Portfolio-equity FV (SUM of fair_value column) — for the dashboard's
         # "Total Fair Value" tile and Portfolio MOIC display. Matches Cover
         # "Total Fair Value" on workbooks with distinct FV Holding / Equity Val
@@ -2384,6 +2674,17 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
         # source sheet+cell for the extracted cell. Persisted verbatim into
         # FundMetric.inputs_used by _persist_fund_metrics.
         'fund_nav_provenance':    _nav_provenance,
+        # NAV / Unit — universal P1/P2/P3 ladder. P1 computes from Fund NAV
+        # + Total Units Issued; P2 falls back to extracted per-unit cell
+        # with unit-sanity normalisation; P3 is blank. Displayed in ₹ Lakhs.
+        'nav_per_unit':           nav_per_unit,
+        'nav_per_unit_method':    nav_per_unit_method,
+        'nav_per_unit_provenance': _npu_provenance,
+        # Unrealised + Realised Gains — universal AIF definitions.
+        'unrealised_gain':        unrealised_gain,
+        'realised_gain':          realised_gain,
+        'unrealised_gain_provenance': _ug_provenance,
+        'realised_gain_provenance':   _rg_provenance,
         # Waterfall (extracted-first, else Python-computed)
         'carry_base':             carry_base,
         'preferred_return_amount': preferred_return,

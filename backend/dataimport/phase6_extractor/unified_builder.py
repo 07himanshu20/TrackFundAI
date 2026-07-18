@@ -615,9 +615,23 @@ _METRIC_LABEL_RULES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     'total_distributions': (
         ('distributions made', 'distributions paid', 'total distributions',
          'lp distributions', 'net distributions', 'cash returned to lps',
-         'cash returned', 'returned to lps', 'distributions to partners'),
+         'cash returned', 'returned to lps', 'distributions to partners',
+         'distributions to lps', 'total lp distributions',
+         'annual distribution to lps', 'cumulative distributions'),
         ('per lp', 'per investor', 'unrealised', 'unrealized', 'fv',
          'fair value', 'gp carry', 'management fee', 'interim only', 'rate'),
+    ),
+    # DPI extracted from a labelled workbook cell (e.g. MOIC_TVPI_DPI!R18
+    # "DPI (Distributions to Paid-In)"). Whitelist uses full multi-word
+    # phrases to avoid matching short tokens like "GDP" / "API". When present,
+    # this feeds verified_overrides['dpi'] via phase4_reconciler.LABEL_WHITELIST
+    # which already has an identically-keyed 'dpi' entry.
+    'dpi': (
+        ('dpi (distributions', 'distributions to paid-in',
+         'distributed to paid-in', 'dpi ratio', 'dpi multiple',
+         'dpi (net)', 'dpi (gross)'),
+        ('rvpi', 'tvpi', 'moic', 'per lp', 'per investor',
+         'target', 'projected'),
     ),
     'total_realised_proceeds': (
         ('realised proceeds', 'realized proceeds', 'realised value',
@@ -776,6 +790,17 @@ _METRIC_LABEL_RULES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ('paid', 'ytd', 'per lp', 'per investor',
          'management fee', 'carry', 'borrowings', 'expenses payable',
          'fund expense'),
+    ),
+    # ── Total Units Issued / Units Outstanding — needed for NAV/Unit compute ──
+    # Universal AIF label; typically lives on the fund-master sheet (e.g.
+    # MASTER_INPUTS "Total Units Issued") and is a single fund-level scalar,
+    # NOT per-period like NAVRecord.total_units_outstanding.
+    'total_units_outstanding': (
+        ('total units issued', 'units issued', 'units outstanding',
+         'total units', 'no. of units', 'no of units', 'number of units',
+         'units at face value'),
+        ('per lp', 'per investor', 'commitment', 'call', 'called',
+         'undrawn', 'per unit', 'rate', '%'),
     ),
 }
 
@@ -963,6 +988,18 @@ def build_unified_json(per_sheet: dict, workbook_data: dict) -> dict:
     waterfall = _remap_waterfall(wf_kv, fund_master)
 
     portfolio_investments = list(by_dom.get('portfolio_investments', []))
+
+    # Universal tranche routing (Stage-1 now has a dedicated `investment_tranches`
+    # domain). A sheet classified as investment_tranches carries one row PER
+    # ROUND/TRANCHE per company. Fold those rows into the portfolio_investments
+    # pipeline so their data is NEVER dropped — behaviour is identical to when
+    # Gemini used to classify the tranche sheet as portfolio_investments. Rows
+    # are tagged __from_tranche_sheet__ so future tranche-aware persistence can
+    # attach them as InvestmentTranche children instead of master Investments.
+    for _tr in by_dom.get('investment_tranches', []):
+        if isinstance(_tr, dict):
+            _tr.setdefault('__from_tranche_sheet__', True)
+            portfolio_investments.append(_tr)
 
     # Universal LP routing: An LP row is an LP row regardless of whether
     # Gemini classified the sheet as "commitments", "investors_aml", or

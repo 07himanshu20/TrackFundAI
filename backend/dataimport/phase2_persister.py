@@ -2525,16 +2525,24 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
               else lp_cumulative_dist_sum)
     )
 
-    # ── (a3) Authoritative Called Capital (Bug 4 fix) ───────────────────
-    # Source priority (universal — works across any AIF Excel):
-    #   1. Gemini fund_performance.total_called_capital  (explicit headline)
-    #   2. Sum of CapitalCall events                    (per-event rollup)
-    #   3. Sum of per-LP cumulative_called               (Investors sheet)
-    #   4. waterfall.total_capital_called                (cross-check from wf block)
-    # Many fund-admin Excels publish per-LP drawdowns on the Investors
-    # sheet only, with a sparse Capital Calls sheet — the LP sum is the
-    # truer number in that case. We prefer larger sources to avoid
-    # under-reporting Called Capital when explicit events are incomplete.
+    # ── (a3) Authoritative Called Capital (universal fund-level rule) ────
+    # Per user's universal rule (2026-07-16): the denominator for DPI /
+    # RVPI / TVPI MUST be the ACTUAL capital called from LPs INTO the fund
+    # at scheme level — i.e. the fund-level CapitalCall ledger sum. Never
+    # substitute an LP-cumulative reconciliation total, because when the
+    # workbook's LP register has been over-allocated (e.g. per-LP splits
+    # sum to a higher figure than the fund-level drawdown notices), that
+    # inflated number would understate every ratio.
+    #
+    # Priority (strict, universal across every AIF Excel):
+    #   1. Σ CapitalCall events                    (fund-level ledger — THE truth)
+    #   2. Gemini fund_performance.total_called_capital  (headline extract)
+    #   3. waterfall.total_capital_called          (waterfall cross-check)
+    #   4. Σ Commitment.cumulative_called          (LP-side, ONLY when 1-3 empty)
+    #
+    # LP-cumulative is now a LAST-RESORT rescue for workbooks where the
+    # CapitalCall sheet is genuinely empty (data not extracted) — never a
+    # primary source.
     from lp.models import CapitalCall
     db_capital_calls_sum = CapitalCall.objects.filter(
         scheme=scheme,
@@ -2546,14 +2554,14 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
         fp.get('total_called_capital'),
         wf.get('total_capital_called'),
     ))
-    # Pick the largest non-None source. This catches the Tata-style case
-    # where Capital Calls sheet has 1 row of ₹44 Cr but Investors sheet
-    # has per-LP drawdowns summing to ₹500+ Cr — without distorting funds
-    # where the explicit Capital Calls sheet IS complete.
-    called_candidates = [v for v in (
-        gemini_called, db_capital_calls_sum, lp_cumulative_called_sum,
-    ) if v is not None]
-    called_capital_value = max(called_candidates) if called_candidates else None
+    if db_capital_calls_sum and db_capital_calls_sum > 0:
+        called_capital_value = db_capital_calls_sum
+    elif gemini_called is not None and gemini_called > 0:
+        called_capital_value = gemini_called
+    elif lp_cumulative_called_sum and lp_cumulative_called_sum > 0:
+        called_capital_value = lp_cumulative_called_sum
+    else:
+        called_capital_value = None
 
     # ── (c) Build a provenance lookup keyed by FundMetric.metric_key.
     #        Each Gemini block has a `provenance` sub-object mapping its
@@ -2953,10 +2961,17 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
     # produce (LPA terms, accrued mgmt fees, step_1_return_of_capital).
     agg = aggregates or {}
     metric_map = {
-        # Performance ratios — aggregator-derived from atomic ledgers
+        # Performance ratios — aggregator-derived from atomic ledgers.
+        # DPI falls back to the persister-local `dpi_value` (computed at
+        # line ~2942 from called + lp_distributions_value) when the
+        # aggregator returned None — this happens when the workbook has
+        # NO Distribution rows in the atomic ledger but DOES have per-LP
+        # cumulative_distributed fields on the Commitment table (e.g.
+        # Trivesta's LP_REGISTER column J = ₹198 Cr). Universal Layer B
+        # rollup — same pattern used for called_capital.
         'moic':                     agg.get('moic'),
         'tvpi':                     agg.get('tvpi'),
-        'dpi':                      agg.get('dpi'),
+        'dpi':                      _first_present(agg.get('dpi'), dpi_value),
         'rvpi':                     agg.get('rvpi'),
         'net_irr':                  agg.get('net_irr'),
         # Universal Net-IRR method tag — passes the tier used (Priority 1/2/3)
@@ -2972,7 +2987,16 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
         'uncalled_capital':         agg.get('total_uncalled_capital'),
         'invested_cost':            agg.get('total_invested_capital'),
         'realized_proceeds':        agg.get('total_realised_proceeds'),
-        'lp_distributions':         agg.get('total_distributions'),
+        # LP distributions — Layer B multi-source fallback ladder. When the
+        # atomic Distribution ledger is empty (workbook has no dedicated
+        # DISTRIBUTIONS sheet), fall back to the persister-local
+        # `lp_distributions_value` (line ~2522) which walks:
+        #   P1: Σ Distribution.total_gross_amount    (atomic ledger)
+        #   P2: Gemini fp.total_distributions        (headline extract)
+        #   P3: Σ Commitment.cumulative_distributed  (per-LP LP-register rollup)
+        # For Trivesta, P3 yields ₹198 Cr from LP_REGISTER column J even
+        # though the aggregator sees zero atomic Distribution rows.
+        'lp_distributions':         _first_present(agg.get('total_distributions'), lp_distributions_value),
         # Universal FV tile (2026-07-11 semantic clarification):
         #
         #   active_fair_value  =  fund's stake in still-held positions only
@@ -3000,6 +3024,22 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
                                         realised=agg.get('total_realised_proceeds'),
                                     ),
         'fund_nav':                 agg.get('fund_nav_latest'),
+        # Residual NAV (universal LPA rule, 2026-07-16):
+        #   residual_nav = Σ latest fair_value_of_holding − Accrued Carry
+        #   accrued_carry = GP Carry Gross − Realised Carry Paid Out
+        # Computed in phase4_derivations.py with the same universal 3-tier
+        # ladders for gross carry and realised-carry-paid. Feeds ILPA-standard
+        # TVPI = (Distributions + Residual NAV) / Called Capital.
+        'residual_nav':             agg.get('residual_nav'),
+        # NAV / Unit — universal P1/P2/P3 ladder (see aggregator). Value in
+        # ₹ Lakhs. Rich provenance attached below via _NAV_PER_UNIT_* branch.
+        'nav_per_unit':             agg.get('nav_per_unit'),
+        # Unrealised Gains — mark-to-market gain on active portfolio
+        # (Active FV − Active Cost). Universal AIF definition.
+        'unrealised_gain':          agg.get('unrealised_gain'),
+        # Realised Gains — profit portion of exited investments
+        # (sum ExitEvent.realized_gain_loss). Universal AIF definition.
+        'realised_gain':            agg.get('realised_gain'),
         # Waterfall — aggregator-derived (extracted-first, else Python)
         # Waterfall metrics with Phase-3 wf-block fallback (Gemini-extracted
         # values take precedence over formula-computed 0 when atomic ledger
@@ -3199,6 +3239,158 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
                                 f'{_os.get("tax")}) + Borrowings ('
                                 f'{_os.get("borrowings")})')},
                 ]
+
+        # ── NAV / Unit provenance ─────────────────────────────────────
+        # P1/P2/P3 ladder — computed via Fund NAV × 100 / Units, else
+        # extracted per-unit cell with unit-sanity normalisation, else blank.
+        if key == 'nav_per_unit':
+            _npu_prov = (agg or {}).get('nav_per_unit_provenance') or {}
+            if _npu_prov:
+                prov['nav_per_unit_method']       = _npu_prov.get('method')
+                prov['nav_per_unit_method_label'] = _npu_prov.get('method_label')
+                prov['nav_per_unit_formula']      = _npu_prov.get('formula')
+                prov['nav_per_unit_unit']         = _npu_prov.get('unit') or 'INR Lakhs'
+                prov['nav_per_unit_priority_ladder'] = [
+                    'P1 — Compute universally: NAV / Unit (₹ Lakhs) = Fund NAV (₹ Cr) × 100 / Total Units Issued. Requires both Fund NAV and Total Units Issued. Wins over any extracted per-unit cell.',
+                    'P2 — Fall back to extracted per-unit cell (Gemini-identified). Unit-sanity guard: values > 10,000 are treated as raw ₹ and divided by 100,000 to normalise to Lakhs.',
+                    'P3 — Blank (—). Neither computable nor extractable — see Missing inputs.',
+                ]
+                prov['nav_per_unit_computed_value']  = _npu_prov.get('computed_value')
+                prov['nav_per_unit_extracted_value'] = _npu_prov.get('extracted_value')
+                prov['nav_per_unit_extracted_value_raw'] = _npu_prov.get('extracted_value_raw')
+                prov['nav_per_unit_extracted_needed_normalise'] = _npu_prov.get('extracted_needed_normalise', False)
+                prov['nav_per_unit_extracted_source'] = _npu_prov.get('extracted_source') or {}
+                prov['nav_per_unit_components']       = _npu_prov.get('components') or {}
+                prov['nav_per_unit_missing_inputs']   = _npu_prov.get('missing_inputs') or []
+                _cn = prov['nav_per_unit_components']
+                # Professional 2-row inputs table matching the sidebar contract
+                prov['nav_per_unit_inputs_breakdown'] = [
+                    {'label': 'Fund NAV (₹ Cr)',
+                     'value': _cn.get('fund_nav_cr'),
+                     'unit': 'INR Cr',
+                     'role': 'Multiplier',
+                     'origin': 'FundMetric.fund_nav — universal AIF NAV formula (see Fund NAV provenance panel)'},
+                    {'label': 'Total Units Issued',
+                     'value': _cn.get('total_units_issued'),
+                     'unit': 'units',
+                     'role': 'Divisor',
+                     'origin': 'Extracted from fund-master sheet — "Total Units Issued" / "Units Outstanding" label'},
+                ]
+
+        # ── Unrealised Gain / Realised Gain provenance ────────────────
+        # Both are computed universally from atomic DB rows. The sidebar
+        # shows the components + source note so the user can audit exactly
+        # where each number came from.
+        if key in ('unrealised_gain', 'realised_gain'):
+            _g_prov_key = key + '_provenance'
+            _g_prov = (agg or {}).get(_g_prov_key) or {}
+            if _g_prov:
+                prov[key + '_method']       = _g_prov.get('method')
+                prov[key + '_formula']      = _g_prov.get('formula')
+                prov[key + '_unit']         = _g_prov.get('unit') or 'INR Cr'
+                prov[key + '_source_note']  = _g_prov.get('source_note')
+                prov[key + '_components']   = _g_prov.get('components') or {}
+                prov[key + '_computed_value'] = _g_prov.get('computed_value')
+                # Line-item breakdown — every DB row that summed into the total.
+                # Frontend renders this as a scrollable table with company + amount.
+                prov[key + '_per_item_breakdown'] = _g_prov.get('per_item_breakdown') or []
+                _gc = prov[key + '_components']
+                if key == 'unrealised_gain':
+                    prov[key + '_inputs_breakdown'] = [
+                        {'label': 'Active Fair Value (shown value)',
+                         'value_rs_cr': _gc.get('active_fair_value'),
+                         'role': 'Displayed',
+                         'origin': 'Σ latest Valuation.fair_value_of_holding per still-held Investment (excludes exited). '
+                                   'This is what appears on the KPI card.'},
+                        {'label': 'Active Cost (for reference only)',
+                         'value_rs_cr': _gc.get('active_cost_for_ref'),
+                         'role': 'Context',
+                         'origin': 'Σ Investment.total_invested for Investments without an ExitEvent row. Not subtracted — '
+                                   'shown so you can compare mark-to-market gain (FV − Cost) if needed.'},
+                    ]
+                else:
+                    prov[key + '_inputs_breakdown'] = [
+                        {'label': 'Sum of Gross Exit Proceeds (shown value)',
+                         'value_rs_cr': _gc.get('sum_exit_proceeds'),
+                         'role': 'Displayed',
+                         'origin': f'Σ ExitEvent.proceeds across {_gc.get("exit_count", "?")} exits. Excel source: EXITS sheet (one row per exit). '
+                                   'This is what appears on the KPI card.'},
+                        {'label': 'Sum of Realised Gain/Loss (for reference only)',
+                         'value_rs_cr': _gc.get('sum_realized_gain_loss'),
+                         'role': 'Context',
+                         'origin': 'Σ ExitEvent.realized_gain_loss — profit portion (proceeds − cost). Not shown on the '
+                                   'KPI card; provided here so you can see the gain vs the gross.'},
+                    ]
+
+        # ── Called Capital — per-CapitalCall line-items breakdown ─────
+        # The Overview 2×2 "Total Called" cell opens a sidebar that lists
+        # every CapitalCall row that summed to the total. Universal — one
+        # row per CapitalCall event, sorted by date. No hardcoded assumptions.
+        if key == 'called_capital':
+            from lp.models import CapitalCall
+            _cc_rows = []
+            for _cc in (CapitalCall.objects
+                        .filter(scheme=scheme)
+                        .select_related('scheme')
+                        .order_by('call_date', 'call_number')):
+                _amt = _d(_cc.total_call_amount)
+                _cc_rows.append({
+                    'call_date':   (_cc.call_date.isoformat() if _cc.call_date else None),
+                    'call_number': str(_cc.call_number) if _cc.call_number is not None else None,
+                    'investor':    (_cc.scheme.name if _cc.scheme else None),
+                    'amount':      (float(_amt) if _amt is not None else 0.0),
+                })
+            prov['called_capital_per_item_breakdown'] = _cc_rows
+            prov['called_capital_formula'] = (
+                'Total Called = Σ CapitalCall.total_call_amount across all LP capital calls'
+            )
+            prov['called_capital_unit'] = 'INR Cr'
+
+        # ── Residual NAV — universal LPA rule (2026-07-16) ─────────────
+        # Residual NAV = Σ latest fair_value_of_holding − Accrued Carry
+        # Accrued Carry = GP Carry Gross − Realised Carry Paid Out
+        # Attach rich provenance so the sidebar can show the formula with
+        # substituted values + a "line items" table listing every still-held
+        # investment's FV contribution (mirrors active_fair_value pattern).
+        if key == 'residual_nav':
+            _sigma_fv = agg.get('total_unrealised_fv_holding') or Decimal('0')
+            _accrued  = agg.get('accrued_carry') or Decimal('0')
+            _gross    = agg.get('carry_amount_gross') or Decimal('0')
+            _paid     = agg.get('gp_carry_distributed') or Decimal('0')
+            prov['provenance_kind'] = 'computed_from_canonical_formula'
+            prov['formula_expression'] = (
+                f'Residual NAV = Σ latest fair_value_of_holding − Accrued Carry  =  '
+                f'₹{_sigma_fv} Cr − ₹{_accrued} Cr  =  ₹{val} Cr'
+            )
+            prov['residual_nav_formula'] = (
+                'Residual NAV = Σ latest Valuation.fair_value_of_holding per still-held '
+                'Investment − Accrued Carry (where Accrued = Gross Carry − Realised Paid)'
+            )
+            prov['residual_nav_inputs_breakdown'] = [
+                {'label': 'Σ latest fair_value_of_holding',
+                 'value_rs_cr': float(_sigma_fv) if _sigma_fv is not None else None,
+                 'role': 'Positive (+)',
+                 'origin': 'Sum of the latest Valuation.fair_value_of_holding per Investment (fund-stake basis, excludes synthetic mark-ups)'},
+                {'label': 'Accrued Carry (subtracted)',
+                 'value_rs_cr': float(_accrued) if _accrued is not None else None,
+                 'role': 'Negative (−)',
+                 'origin': 'GP Carry Gross − Realised Carry Paid Out — the GP\'s currently-unpaid share of profit'},
+            ]
+            prov['residual_nav_accrued_breakdown'] = [
+                {'label': 'GP Carry Gross',
+                 'value_rs_cr': float(_gross) if _gross is not None else None,
+                 'role': 'Positive (+)',
+                 'origin': 'FundMetric.carry_amount_gross — from aggregator\'s 3-tier ladder (P1 extracted / P2 formula / P3 blank)'},
+                {'label': 'Realised Carry Paid Out',
+                 'value_rs_cr': float(_paid) if _paid is not None else None,
+                 'role': 'Negative (−)',
+                 'origin': 'gp_carry_distributed = Σ Distribution.gp_carry_amount + Σ (Distribution.total_net_amount WHERE type=carry). Falls back to European-waterfall formula, then to waterfall.gp_share cell'},
+            ]
+            # Per-item breakdown = same still-held investment rows as active_fair_value
+            prov['residual_nav_per_item_breakdown'] = [
+                {'company': c, 'fair_value': float(v)}
+                for c, v in (contributing_companies or [])
+            ]
 
         # For active_fair_value, supplement with the live DB breakdown so
         # the panel can show "= co1 + co2 + ..." with real numbers.

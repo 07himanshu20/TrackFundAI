@@ -465,6 +465,24 @@ body {
 .v5-kpi-trend.up   { color: var(--green); }
 .v5-kpi-trend.down { color: var(--red); }
 
+/* Split KPI cards — 2-col and 2×2 grid variants. Each cell is independently
+   clickable, separated from its neighbours by a low-opacity divider so the
+   grouping stays readable. Neutralises the parent card's padding so cells
+   own their own spacing (colour top-strip + hover chrome are untouched). */
+.v5-kpi-card.kpi-split-2col,
+.v5-kpi-card.kpi-split-2x2 { padding: 0; }
+.v5-kpi-card.kpi-split-2col { display: grid; grid-template-columns: 1fr 1fr; }
+.v5-kpi-card.kpi-split-2x2  { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+.kpi-split-cell {
+  padding: 14px 16px;
+  cursor: pointer;
+  transition: background-color 0.15s;
+  min-width: 0;
+}
+.kpi-split-cell:hover { background-color: rgba(148,163,184,0.06); }
+.kpi-split-border-left { border-left: 1px solid rgba(148,163,184,0.22); }
+.kpi-split-border-top  { border-top:  1px solid rgba(148,163,184,0.22); }
+
 /* ═══ SECTION GRID ═══════════════════════════════════════════ */
 .v5-grid { display: grid; gap: 14px; margin-bottom: 14px; }
 .v5-grid.two   { grid-template-columns: 1fr 1fr; }
@@ -2440,7 +2458,8 @@ html:not([data-theme="light"]) .v5-sector-fill {
 }
 
 /* Click affordance on KPI values backed by provenance */
-.v5-kpi-value.has-prov, .v5-kpi-value[data-prov-key] {
+.v5-kpi-value.has-prov, .v5-kpi-value[data-prov-key],
+.kpi-split-cell[data-prov-key] {
   cursor: pointer;
   position: relative;
 }

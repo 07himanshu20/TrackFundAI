@@ -51,16 +51,24 @@ def build_stage1_prompt(workbook_data: dict) -> str:
         {d: list(DOMAIN_FIELDS[d].keys()) for d in sorted(DOMAIN_FIELDS.keys())},
         indent=2,
     )
+    # Domain menu is generated from DOMAIN_FIELDS so it can never drift out of
+    # sync with the canonical schema — every domain that has a field dictionary
+    # (including investment_tranches, nav_calculation, fund_pl_bs, fees_register)
+    # is offered to Gemini as a selectable option.
+    domain_menu = ', '.join(sorted(DOMAIN_FIELDS.keys()))
 
     return f"""You are an Indian AIF (Alternative Investment Fund) data analyst.
 
 For each SHEET below, decide:
   1. domain — the canonical business area it holds. Pick ONE:
-     fund_scheme_master, investors_aml, commitments, capital_calls,
-     portfolio_investments, valuations_kpis, exits_distributions,
-     nav_accounting, waterfall_carry, financials_pl_bva, portfolio_hierarchy,
-     compliance, lp_capital_accounts, quoted_unquoted, burn_runway.
+     {domain_menu}.
      Use null for Cover/Summary/Index/Dashboard/Overview sheets.
+     NOTE: a "Formula" column or a computed appearance does NOT by itself make a
+     sheet a summary — a NAV build-up (nav_calculation), a distribution/carry
+     waterfall (waterfall_carry), and a fund-level income statement (fund_pl_bs)
+     are authoritative source sheets: classify them to their domain. A sheet with
+     multiple funding rounds/tranches per company is investment_tranches (NOT
+     portfolio_investments).
   2. layout — one of:
        "tabular"     : normal rows x columns table (default)
        "key_value"   : two columns "Parameter | Value" (Fund_Overview style)
