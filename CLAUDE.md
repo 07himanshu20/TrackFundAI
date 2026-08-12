@@ -23,6 +23,17 @@ Never query or create records without scoping to the correct `organization`.
 
 ## Critical Rules — NEVER Violate
 
+### 0. Root-Cause Over Patches (governs every fix)
+If you ever encounter a bug/issue/failure, do NOT apply a patch to immediately fix it. Do not jump
+or rush to a fix. Instead, think properly and deep-dive to find the ROOT CAUSE — the actual
+ground-truth reason the failure occurs. Only once the true root cause is identified, think
+vigorously and design a **universal solution** that resolves it permanently. "Universal solution" means:
+1. It must NOT affect any existing functionality or feature.
+2. It must be universally applicable to ALL Excel files and data the user may upload — any format,
+   layout, or type — never tuned to the one file in front of you.
+A calibrated threshold, a special-case guard, or a fix that only works for the current example is a
+patch, not a universal solution — reject it and keep digging for the root cause.
+
 ### 1. No Hardcoding of Excel Structure
 Never write logic that assumes a specific sheet name, column name, or row number.
 All Excel ingestion must be format-agnostic: use Gemini column mapping + `_find_col()` fuzzy matching.

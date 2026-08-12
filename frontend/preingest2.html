@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem('tfai_theme')==='light')document.documentElement.setAttribute('data-theme','light');</script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TFAI — Consolidation v2 (Stages 0-8)</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='16' fill='%230a0f1e'/><text y='.9em' font-size='62' x='10' fill='%232563eb' font-family='monospace' font-weight='bold'>TF</text></svg>" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="v5-design.css" />
+  <style>
+    .pi-wrap{max-width:1150px;margin:0 auto;padding:28px 20px 80px}
+    .pi-card{background:var(--v5-surface,#111a2e);border:1px solid var(--v5-border,#23324d);border-radius:14px;padding:22px;margin-bottom:20px}
+    .pi-h1{font-size:24px;font-weight:700;margin:0 0 4px}
+    .pi-sub{color:var(--v5-text-dim,#90a0bd);font-size:14px;margin:0 0 18px}
+    .pi-drop{border:2px dashed var(--v5-border,#33445f);border-radius:12px;padding:34px;text-align:center;cursor:pointer;transition:.15s}
+    .pi-drop:hover,.pi-drop.drag{border-color:#2563eb;background:rgba(37,99,235,.06)}
+    .pi-filelist{margin:14px 0 0;display:flex;flex-direction:column;gap:6px}
+    .pi-fileitem{display:flex;justify-content:space-between;align-items:center;background:rgba(255,255,255,.03);border:1px solid var(--v5-border,#23324d);border-radius:8px;padding:8px 12px;font-size:13px}
+    .pi-fileitem button{background:none;border:none;color:#ef6a6a;cursor:pointer;font-size:16px}
+    .pi-btn{background:#2563eb;color:#fff;border:none;border-radius:9px;padding:11px 22px;font-weight:600;cursor:pointer;font-size:14px}
+    .pi-btn:disabled{opacity:.5;cursor:not-allowed}.pi-btn.sec{background:transparent;border:1px solid var(--v5-border,#33445f);color:var(--v5-text,#dbe4f3)}
+    .pi-bar{height:10px;background:rgba(255,255,255,.07);border-radius:6px;overflow:hidden}.pi-bar>div{height:100%;background:linear-gradient(90deg,#2563eb,#3b82f6);width:0;transition:width .4s}
+    .pi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px}
+    .pi-stat{background:rgba(255,255,255,.03);border:1px solid var(--v5-border,#23324d);border-radius:10px;padding:14px}.pi-stat .n{font-size:24px;font-weight:700}.pi-stat .l{font-size:12px;color:var(--v5-text-dim,#90a0bd);margin-top:2px}
+    table.pi-tbl{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}
+    table.pi-tbl th,table.pi-tbl td{text-align:left;padding:6px 10px;border-bottom:1px solid var(--v5-border,#23324d)}
+    table.pi-tbl th{color:var(--v5-text-dim,#90a0bd);font-weight:600}
+    .ok{color:#4bd07a}.warn{color:#f0a94b}.fail{color:#ef6a6a}.muted{color:var(--v5-text-dim,#90a0bd)}
+    .pi-note{font-size:12.5px;color:var(--v5-text-dim,#90a0bd);line-height:1.5}
+  </style>
+</head>
+<body>
+  <nav class="v5-navbar">
+    <a class="v5-logo" href="index.html"><div class="v5-logo-icon">TF</div><div><div class="v5-logo-text">Track<span>Fund</span>AI</div></div></a>
+    <div class="v5-nav-tabs">
+      <a href="index.html" class="v5-nav-tab">Overview</a>
+      <a href="preingest.html" class="v5-nav-tab">Consolidate v1</a>
+      <a href="preingest2.html" class="v5-nav-tab active">Consolidate v2</a>
+    </div>
+    <div class="v5-nav-right"><button id="btn-logout" class="pi-btn sec">Logout</button></div>
+  </nav>
+
+  <div class="pi-wrap">
+    <div class="pi-card">
+      <h1 class="pi-h1">Consolidation v2 — document architecture (Stages 0–8)</h1>
+      <p class="pi-sub">Profile → classify → semantic-chunked extract (cache-frozen) → normalize → map →
+        reconcile → assemble → verify. Derived sheets (NAV, Waterfall, Cover) use the formula.html rules.
+        Company MIS collapses to one Portfolio_KPI row; ledgers are aggregated in code (no explosion).</p>
+      <div id="drop" class="pi-drop">
+        <div style="font-size:34px">📂</div>
+        <div style="margin-top:6px;font-weight:600">Drop the client Excel files here or click to browse</div>
+        <div class="pi-note" style="margin-top:4px">MIS + fund files · .xlsx / .xls</div>
+        <input id="fileinput" type="file" accept=".xlsx,.xls" multiple style="display:none" />
+      </div>
+      <div id="filelist" class="pi-filelist"></div>
+      <div style="margin-top:18px;display:flex;gap:10px;align-items:center">
+        <button id="btn-run" class="pi-btn" disabled>Consolidate</button>
+        <span id="run-hint" class="pi-note"></span>
+      </div>
+    </div>
+
+    <div id="progress-card" class="pi-card" style="display:none">
+      <div style="display:flex;justify-content:space-between;margin-bottom:8px"><b id="prog-msg">Starting…</b><span id="prog-pct" class="muted">0%</span></div>
+      <div class="pi-bar"><div id="prog-fill"></div></div>
+    </div>
+    <div id="result-card" class="pi-card" style="display:none"></div>
+  </div>
+
+  <script src="env.js"></script>
+  <script src="auth.js"></script>
+  <script src="preingest2.js"></script>
+</body>
+</html>

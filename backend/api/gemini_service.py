@@ -13,17 +13,89 @@ calls generate_content() / create_chat() and gets a response object.
 import json
 import logging
 import os
+import random
 import re
+import time
 
 from django.conf import settings
 from google import genai
 from google.genai import types as genai_types
+from google.genai import errors as genai_errors
+
+import requests.exceptions as _req_exc
 
 logger = logging.getLogger(__name__)
 
-# Module-level singleton client — instantiating Client per call is slow
-# and creates redundant auth handshakes. One process-wide client is fine.
-_client = None
+# ─────────────────────────────────────────────────────────────────────────
+# Call-layer hardening — the deadline lives on the CALL, not on a process kill
+# ─────────────────────────────────────────────────────────────────────────
+# Root cause of the "request sent, reply never comes, SDK timeout never fires"
+# hangs: google-genai 0.5.0's transport is `requests`, and NO timeout was ever
+# reaching it (the old code referenced types.HttpOptions — absent in 0.5.0 —
+# inside a swallowed try/except, so `requests` got timeout=None → infinite recv
+# on a half-open socket). The universal fix is a real socket-level READ timeout:
+# `requests` honours a (connect, read) tuple where `read` fires when no bytes
+# arrive between reads — exactly what unblocks a stalled connection. Because the
+# SDK streams with stream=True on the streamed path, that read timeout doubles
+# as an inter-chunk idle timeout. Every call is then bounded, retried with
+# jittered backoff, and idempotent — the process-kill in the pipeline is demoted
+# to a pure backstop that should now almost never fire.
+
+# HttpOptions moved modules across SDK versions; in 0.5.0 it lives in
+# _api_client and its `timeout` is seconds (requests). Newer SDKs expose it on
+# `types` with a millisecond scalar (httpx). Support both.
+try:
+    from google.genai._api_client import HttpOptions as _HttpOptions
+    _TIMEOUT_IS_MS = False   # 0.5.x → requests → seconds, (connect, read) tuple
+except Exception:  # pragma: no cover — newer SDK layout
+    from google.genai.types import HttpOptions as _HttpOptions
+    _TIMEOUT_IS_MS = True
+
+_CONNECT_TIMEOUT_S = float(os.environ.get('GEMINI_CONNECT_TIMEOUT_S', '10'))
+_READ_TIMEOUT_S = float(os.environ.get('GEMINI_READ_TIMEOUT_S', '60'))
+_MAX_ATTEMPTS = int(os.environ.get('GEMINI_MAX_ATTEMPTS', '3'))
+_BACKOFF_BASE_S = float(os.environ.get('GEMINI_BACKOFF_BASE_S', '1.5'))
+_BACKOFF_CAP_S = float(os.environ.get('GEMINI_BACKOFF_CAP_S', '20'))
+
+# Legacy knob — still honoured, converted to a read-timeout in seconds.
+_DEFAULT_TIMEOUT_MS = int(os.environ.get('GEMINI_CALL_TIMEOUT_MS', '0'))
+
+# Clients are cached by (backend, connect, read) so a caller that wants a longer
+# read window for a heavy locator call gets its own client without a fresh auth
+# handshake every time. 0.5.0 honours http_options ONLY at the client level
+# (GenerateContentConfig has no http_options field), so the timeout must live
+# here, not on the per-call config.
+_client_cache = {}
+
+
+def _build_http_options(connect_s, read_s):
+    if _TIMEOUT_IS_MS:
+        return _HttpOptions(timeout=int(read_s * 1000))
+    return _HttpOptions(timeout=(float(connect_s), float(read_s)))
+
+
+def _is_retryable(exc) -> bool:
+    """Transient transport / server faults are retryable; 4xx client errors
+    (bad request, auth, quota-of-shape) are not — retrying them just wastes
+    time and money."""
+    if isinstance(exc, (_req_exc.Timeout, _req_exc.ConnectionError,
+                        _req_exc.ChunkedEncodingError)):
+        return True
+    if isinstance(exc, genai_errors.ServerError):
+        return True
+    if isinstance(exc, genai_errors.ClientError):
+        return False
+    code = getattr(exc, 'code', None) or getattr(exc, 'status_code', None)
+    if isinstance(code, int) and 500 <= code < 600:
+        return True
+    # Unknown timeout-shaped errors by name (defensive across SDK versions).
+    return 'timeout' in exc.__class__.__name__.lower()
+
+
+def _backoff_sleep(attempt: int):
+    delay = min(_BACKOFF_CAP_S, _BACKOFF_BASE_S * (2 ** (attempt - 1)))
+    delay += random.uniform(0, delay * 0.5)  # full jitter on the top half
+    time.sleep(delay)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -39,18 +111,27 @@ def _is_vertex_mode() -> bool:
     return str(raw).lower() in ('true', '1', 'yes')
 
 
-def get_client():
-    """Return the singleton google.genai.Client for the active backend.
+def get_client(connect_timeout_s: float = None, read_timeout_s: float = None):
+    """Return a google.genai.Client for the active backend, carrying an explicit
+    socket-level read timeout so no call can hang indefinitely.
 
-    Branches on GOOGLE_GENAI_USE_VERTEXAI:
+    Clients are cached per (backend, connect, read) timeout profile — a heavy
+    call that needs a longer read window gets its own client without repeating
+    the auth handshake. Branches on GOOGLE_GENAI_USE_VERTEXAI:
       True  → Vertex AI via Application Default Credentials
       False → AI Studio via GOOGLE_API_KEY
     """
-    global _client
-    if _client is not None:
-        return _client
+    connect_s = _CONNECT_TIMEOUT_S if connect_timeout_s is None else connect_timeout_s
+    read_s = _READ_TIMEOUT_S if read_timeout_s is None else read_timeout_s
+    vertex = _is_vertex_mode()
+    key = (vertex, round(connect_s, 3), round(read_s, 3))
+    cached = _client_cache.get(key)
+    if cached is not None:
+        return cached
 
-    if _is_vertex_mode():
+    http_options = _build_http_options(connect_s, read_s)
+
+    if vertex:
         project = (
             os.environ.get('GOOGLE_CLOUD_PROJECT')
             or getattr(settings, 'GOOGLE_CLOUD_PROJECT', '')
@@ -66,9 +147,11 @@ def get_client():
                 'Either set GOOGLE_CLOUD_PROJECT, or flip GOOGLE_GENAI_USE_VERTEXAI=False '
                 'to use AI Studio with an API key instead.'
             )
-        _client = genai.Client(vertexai=True, project=project, location=location)
+        client = genai.Client(vertexai=True, project=project, location=location,
+                              http_options=http_options)
         logger.info(
-            f'Gemini client (Vertex AI) initialised — project={project} location={location}'
+            f'Gemini client (Vertex AI) initialised — project={project} location={location} '
+            f'connect={connect_s}s read={read_s}s'
         )
     else:
         api_key = (
@@ -81,11 +164,13 @@ def get_client():
                 'Get one at https://aistudio.google.com/app/apikey, or flip '
                 'GOOGLE_GENAI_USE_VERTEXAI=True to use Vertex AI with gcloud ADC.'
             )
-        _client = genai.Client(api_key=api_key)
+        client = genai.Client(api_key=api_key, http_options=http_options)
         # Never log the key — even partially. Just confirm the backend is up.
-        logger.info('Gemini client (AI Studio) initialised — api_key auth')
+        logger.info(f'Gemini client (AI Studio) initialised — api_key auth '
+                    f'connect={connect_s}s read={read_s}s')
 
-    return _client
+    _client_cache[key] = client
+    return client
 
 
 def get_model_name(default: str = 'gemini-2.5-flash') -> str:
@@ -97,7 +182,41 @@ def get_model_name(default: str = 'gemini-2.5-flash') -> str:
     )
 
 
-_DEFAULT_TIMEOUT_MS = int(os.environ.get('GEMINI_CALL_TIMEOUT_MS', '300000'))
+class _StreamedResponse:
+    """Minimal response shim for the streamed path — exposes `.text` (and a
+    best-effort `.parsed`) so callers that read `response.text` are unaffected."""
+    __slots__ = ('text', 'parsed', 'candidates')
+
+    def __init__(self, text, parsed=None, candidates=None):
+        self.text = text
+        self.parsed = parsed
+        self.candidates = candidates
+
+
+def _generate_streamed(client, model_name, prompt, config, read_s):
+    """Stream the response, enforcing an inter-chunk idle deadline in Python on
+    top of the transport read timeout. If no new chunk arrives for `read_s`
+    seconds the call is aborted (raised as a Timeout so the retry loop catches
+    it) — the targeted cure for 'the reply never comes back'."""
+    stream = client.models.generate_content_stream(
+        model=model_name, contents=prompt, config=config,
+    )
+    parts = []
+    last = time.monotonic()
+    last_chunk = None
+    for chunk in stream:
+        now = time.monotonic()
+        if now - last > read_s:
+            raise _req_exc.ReadTimeout(
+                f'inter-chunk idle > {read_s}s — aborting stalled stream')
+        last = now
+        last_chunk = chunk
+        piece = getattr(chunk, 'text', None)
+        if piece:
+            parts.append(piece)
+    parsed = getattr(last_chunk, 'parsed', None) if last_chunk is not None else None
+    cands = getattr(last_chunk, 'candidates', None) if last_chunk is not None else None
+    return _StreamedResponse(''.join(parts), parsed=parsed, candidates=cands)
 
 
 def generate_content(
@@ -109,16 +228,30 @@ def generate_content(
     response_schema=None,
     temperature: float = None,
     timeout_ms: int = None,
+    connect_timeout_s: float = None,
+    read_timeout_s: float = None,
+    max_attempts: int = None,
+    stream: bool = False,
     **extra_config,
 ):
-    """One-shot Gemini call. Returns the raw response object.
+    """One-shot Gemini call with a bounded deadline, idempotent retry, and an
+    optional streamed inter-chunk idle timeout. Returns the response object
+    (or a `.text`-compatible shim when `stream=True`).
 
-    `timeout_ms` caps the HTTP call so a hung Vertex backend can't stall the
-    caller indefinitely. Defaults to GEMINI_CALL_TIMEOUT_MS (300_000ms = 5min).
-    `response_schema` forces Gemini to emit JSON matching the given schema
-    when combined with response_mime_type='application/json'.
+    The deadline is a real socket read timeout carried by the client (see
+    get_client). `read_timeout_s` (or legacy `timeout_ms`) sets the max seconds
+    with no bytes/chunks before the call aborts and retries. Retries use
+    jittered exponential backoff and fire only on transient transport/5xx
+    faults — never on 4xx client errors.
     """
-    client = get_client()
+    read_s = read_timeout_s
+    if read_s is None and timeout_ms:
+        read_s = timeout_ms / 1000.0
+    if read_s is None:
+        read_s = (_DEFAULT_TIMEOUT_MS / 1000.0) if _DEFAULT_TIMEOUT_MS > 0 else _READ_TIMEOUT_S
+    connect_s = _CONNECT_TIMEOUT_S if connect_timeout_s is None else connect_timeout_s
+
+    client = get_client(connect_timeout_s=connect_s, read_timeout_s=read_s)
     model_name = model or get_model_name()
 
     config_kwargs = dict(extra_config)
@@ -131,24 +264,28 @@ def generate_content(
     if temperature is not None:
         config_kwargs['temperature'] = temperature
 
-    effective_timeout_ms = timeout_ms if timeout_ms is not None else _DEFAULT_TIMEOUT_MS
-    if effective_timeout_ms and effective_timeout_ms > 0:
-        try:
-            config_kwargs['http_options'] = genai_types.HttpOptions(
-                timeout=effective_timeout_ms,
-            )
-        except Exception:
-            # Older SDK versions may not expose HttpOptions on this path —
-            # fall through; the global client timeout (if any) still applies.
-            pass
-
     config = genai_types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
 
-    return client.models.generate_content(
-        model=model_name,
-        contents=prompt,
-        config=config,
-    )
+    attempts = max_attempts or _MAX_ATTEMPTS
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            if stream:
+                return _generate_streamed(client, model_name, prompt, config, read_s)
+            return client.models.generate_content(
+                model=model_name, contents=prompt, config=config,
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < attempts and _is_retryable(exc):
+                logger.warning(
+                    '[gemini] %s on attempt %d/%d (read=%ss) — backing off',
+                    exc.__class__.__name__, attempt, attempts, read_s,
+                )
+                _backoff_sleep(attempt)
+                continue
+            raise
+    raise last_exc
 
 
 def create_chat(

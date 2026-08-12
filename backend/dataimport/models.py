@@ -384,3 +384,107 @@ class FundMetric(models.Model):
     def __str__(self):
         v = self.value if self.value is not None else 'null'
         return f'FundMetric {self.metric_key}={v} (scheme={self.scheme_id})'
+
+
+def preingest_input_path(instance, filename):
+    org_slug = instance.job.organization.slug if instance.job.organization else 'default'
+    return f'preingest/{org_slug}/{str(instance.job_id)[:8]}/in/{filename}'
+
+
+def preingest_output_path(job, filename):
+    org_slug = job.organization.slug if job.organization else 'default'
+    return f'preingest/{org_slug}/{str(job.id)[:8]}/out/{filename}'
+
+
+class PreIngestJob(models.Model):
+    """One consolidation run — many raw client Excel files (MIS + fund) folded
+    into a single canonical TFAI.xlsx via the pre-ingestion layer."""
+
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('processing', 'Processing'),
+        ('completed', 'Completed'),
+        ('completed_with_errors', 'Completed With Errors'),
+        ('failed', 'Failed'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        'accounts.Organization', on_delete=models.CASCADE,
+        related_name='preingest_jobs',
+    )
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True,
+        related_name='preingest_jobs',
+    )
+
+    status = models.CharField(max_length=25, choices=STATUS_CHOICES, default='pending')
+    progress_pct = models.IntegerField(default=0)
+    progress_message = models.CharField(max_length=500, blank=True)
+
+    total_files = models.IntegerField(default=0)
+
+    # relative path (MEDIA_ROOT) of the produced TFAI.xlsx
+    output_file = models.CharField(max_length=500, blank=True)
+    output_name = models.CharField(max_length=255, blank=True, default='TFAI.xlsx')
+
+    # full run report: {domains, total_records, review_items, coverage, manifest...}
+    summary = models.JSONField(default=dict, blank=True)
+    error_log = models.JSONField(default=list, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'PreIngestJob {str(self.id)[:8]} — {self.status} ({self.total_files} files)'
+
+
+class PreIngestInputFile(models.Model):
+    """One raw client file uploaded into a PreIngestJob."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    job = models.ForeignKey(
+        PreIngestJob, on_delete=models.CASCADE, related_name='input_files',
+    )
+    file = models.FileField(upload_to=preingest_input_path)
+    original_name = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.original_name
+
+
+class PreIngestAlias(models.Model):
+    """The preingest3 alias ledger, ORG-SCOPED and DB-backed (the 'learn once'
+    store). A confirmed identifier→company binding for ONE organization — never
+    shared across tenants (org A's aliases must not steer org B's resolution).
+    DB-backed so it is transactional and safe across multiple worker processes,
+    unlike the file+threading.Lock the standalone library defaults to.
+
+    `src` distinguishes 'human' (reviewer-confirmed, authoritative, never
+    overwritten by a machine guess) from 'auto' (machine-resolved, purgeable)."""
+    SRC_CHOICES = [('human', 'Human confirmed'), ('auto', 'Auto resolved')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        'accounts.Organization', on_delete=models.CASCADE,
+        related_name='preingest_aliases',
+    )
+    key = models.CharField(max_length=255, db_index=True)   # normalised identifier tokens
+    entity_id = models.CharField(max_length=255)            # resolved company key/name
+    src = models.CharField(max_length=8, choices=SRC_CHOICES, default='auto')
+    confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='preingest_aliases',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [('organization', 'key')]
+        ordering = ['organization', 'key']
+
+    def __str__(self):
+        return f'{self.key} → {self.entity_id} ({self.src})'
