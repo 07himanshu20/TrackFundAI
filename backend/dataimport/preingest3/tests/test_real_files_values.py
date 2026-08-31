@@ -88,15 +88,95 @@ def test_hubler_mis_values_trace_to_cells():
     f = _extract(_anchors(), 'hubbler', 'AVF_2026_03_11_P_Hubler_MIS_Feb26.xlsx')
     _close(f['revenue'], '4.1837', basis='TTM', n_cells=12)     # 12-month sum, row 20 (label@D20)
     _close(f['ebitda'], '-0.4304', basis='TTM', n_cells=12)     # EBITDA line, not EBIT — row 72
-    # CASH re-pointed (advisor 2026-07-23): the deterministic binder lands on D22
-    # "Cash Collected" — a period FLOW, not the cash STOCK. The stock-vs-flow guard
-    # (U5) HOLDS it (before collapse, so it keeps the label-cell provenance D22) instead
-    # of emitting the wrong ₹0.1822 Cr flow. The correct cash is the balance-sheet
-    # "Closing balance" (row 98), reachable only via the model locator, never this bind.
-    cash = f['cash']
-    assert cash.value_cr is None and cash.held, 'Hubler cash must HOLD, not emit the Cash-Collected flow'
-    assert 'flow-labelled' in (cash.hold_reason or ''), cash.hold_reason
-    assert 'D22' in (cash.provenance.note or '')     # the flow row (label@D22) it correctly refused
+    # CASH RECOVERED (R4, advisor 2026-08-14): the deterministic binder lands `cash` on D22
+    # "Cash Collected" — a period FLOW, not the cash STOCK — which the stock-vs-flow guard (U5)
+    # correctly refuses. R4 then rebinds cash to its balance-sheet equivalent, the "Closing
+    # balance" (row 98), located via closing_cash's OWN lexicon (_find_equivalent_stock_row —
+    # NOT the _DISAMBIG cross-concept contest, which would tie 'Closing Cash Balance' and regress
+    # CPC). The emitted ₹1.0621 Cr is the LATEST closing bank balance (BB98 = 10,620,993), the
+    # point-in-time stock the prior comment always named as the correct answer — now reachable on
+    # the DETERMINISTIC path, not only via the model locator. Fail-closed: had no non-flow balance
+    # existed, cash would still HOLD (see test_find_equivalent_stock_row negative control).
+    _close(f['cash'], '1.0621', basis='point_in_time', cell='BB98')
+
+
+def test_find_equivalent_stock_row_recovers_balance_and_reddens_when_absent():
+    """R4 unit + NEGATIVE CONTROL. The dedicated closing_cash locator finds a real 'Closing
+    balance' stock row (so a flow-bound cash can recover), while SKIPPING flow lines ('Cash
+    Collected') and opening lines ('Opening balance'). The load-bearing proof is the negative
+    control: with only flow rows present it returns None, so the recovery cannot spuriously fire
+    and cash stays HELD — the fail-closed floor the guard promises."""
+    import types
+    from backend.dataimport.preingest3.extract import _find_equivalent_stock_row
+    axis = [types.SimpleNamespace(col=1), types.SimpleNamespace(col=2)]
+    rows_full = [
+        ['Particulars', 'Apr', 'May'],
+        ['Cash Collected', 5, 6],        # flow — must be skipped
+        ['Opening balance', 90, 100],    # opening — must be skipped (_AGG_ANTI)
+        ['Closing balance', 100, 110],   # the real stock — must be found
+    ]
+    assert _find_equivalent_stock_row(rows_full, 0, 'closing_cash', 1, len(rows_full), axis) == 3
+    # NEGATIVE CONTROL: no non-flow balance → None → a flow-bound cash STAYS HELD (fail-closed)
+    rows_flowonly = [['Particulars', 'Apr', 'May'], ['Cash Collected', 5, 6], ['Cash outflow', 7, 8]]
+    assert _find_equivalent_stock_row(rows_flowonly, 0, 'closing_cash', 1, 3, axis) is None
+    # an opening-only sheet must never be mistaken for the closing stock
+    rows_openonly = [['Particulars', 'Apr', 'May'], ['Opening balance', 90, 100]]
+    assert _find_equivalent_stock_row(rows_openonly, 0, 'closing_cash', 1, 2, axis) is None
+
+
+def test_closing_cash_stays_out_of_disambig_so_cpc_cash_binds_via_contest():
+    """R4 DESIGN LOCK (advisor 2026-08-14). The R4 recovery uses a DEDICATED locator precisely so
+    closing_cash need NOT enter the cross-concept _DISAMBIG set. Were it leaked in, CPC's 'Closing
+    Cash Balance including Fix' would tie against `cash` → margin-fail → CPC's cash bind regresses
+    to a gap. Pin the invariant so that regression REDDENS here, not silently in production."""
+    from backend.dataimport.preingest3.extract import _DISAMBIG
+    for anchor in ('closing_cash', 'opening_cash', 'receipts', 'payments'):
+        assert anchor not in _DISAMBIG, (
+            f'{anchor} leaked into _DISAMBIG — a cash-flow anchor in the cross-concept contest '
+            f'regresses stock binds (e.g. CPC cash). Use _find_equivalent_stock_row instead.')
+
+
+def test_figure_anchor_guard_exempts_profit_and_reddens():
+    """The centralised figure-anchor magnitude guard (ONE predicate `_figure_anchor_hold_reason` now
+    shared by BOTH emit paths — collapse + re-source — so they cannot drift). A profit/burn concept is
+    EXEMPT: a near-breakeven EBITDA orders below company valuation is legitimate, not a wrong row. A
+    size-scaling concept (revenue/cash) is NOT exempt and still holds when orders from scale. REDDENING
+    PAIRS — same tiny value, only the concept differs → exempt=emit / non-exempt=hold — proving the
+    exemption is load-bearing, not a blanket disable of the guard."""
+    from backend.dataimport.preingest3.extract import _figure_anchor_hold_reason
+    anchor = Decimal('82')
+    # too-SMALL (|value| << anchor): profit exempt (None ⇒ emits); size-scaling concepts still hold
+    assert _figure_anchor_hold_reason('ebitda', Decimal('-0.0117'), anchor) is None      # near-breakeven emits
+    assert _figure_anchor_hold_reason('net_income', Decimal('0.01'), anchor) is None      # profit exempt
+    assert _figure_anchor_hold_reason('revenue', Decimal('0.0117'), anchor) is not None   # revenue this tiny holds
+    assert _figure_anchor_hold_reason('cash', Decimal('0.0117'), anchor) is not None      # cash this tiny holds
+    # too-BIG (>3 orders above): profit fully exempt (matches the re-source path's long-standing
+    # behaviour); a non-profit concept this far above scale still holds
+    assert _figure_anchor_hold_reason('ebitda', Decimal('100000'), anchor) is None
+    assert _figure_anchor_hold_reason('revenue', Decimal('100000'), anchor) is not None
+    # in-range / exact-zero / no-anchor never fire
+    assert _figure_anchor_hold_reason('revenue', Decimal('5.3'), anchor) is None
+    assert _figure_anchor_hold_reason('revenue', Decimal('0'), anchor) is None
+    assert _figure_anchor_hold_reason('revenue', Decimal('0.0001'), None) is None
+
+
+def test_aliste_ebitda_recovered_and_depends_on_the_profit_exemption(monkeypatch):
+    """R1d recovery + LOAD-BEARING control. Aliste EBITDA was FALSELY held: the figure-anchor guard in the
+    deterministic COLLAPSE path was a duplicate that lacked the profit exemption the re-source path already
+    had (centralise-don't-duplicate drift). Centralised, EBITDA now EMITS the real FYTD −₹0.0117 Cr — the
+    11-month Apr-25..Feb-26 sum (Mar-26=0 placeholder excluded), = the sheet's OWN 'YTD' column to the
+    rupee. Revenue likewise 11-month FYTD (basis='partial', NOT mislabelled TTM). Cash stays correctly held
+    (BS 3-block ambiguity). REDDENING: neutralise the exemption set → the near-zero EBITDA reverts to a
+    figure-anchor hold, proving the recovery is the exemption and not a bare GT edit."""
+    import backend.dataimport.preingest3.extract as ex
+    f = _extract(_anchors(), 'aliste', 'AVF_2026_03_26_P_Aliste_MIS_Feb26.xlsx')
+    _close(f['revenue'], '5.3052', basis='partial', n_cells=11)   # 11-month FYTD (partial, not TTM)
+    _close(f['ebitda'], '-0.0117', basis='partial', n_cells=11)   # the recovery
+    assert f['cash'].held, 'Aliste cash is a correct HOLD (real value on the ambiguous BS 3-block)'
+    monkeypatch.setattr(ex, '_FIGURE_SANITY_EXEMPT', frozenset())
+    f2 = _extract(_anchors(), 'aliste', 'AVF_2026_03_26_P_Aliste_MIS_Feb26.xlsx')
+    assert f2['ebitda'].held and 'orders from company scale' in (f2['ebitda'].hold_reason or ''), \
+        'without the profit exemption the near-zero EBITDA must revert to a figure-anchor hold (RED)'
 
 
 def test_ldc_mis_values_trace_to_cells():

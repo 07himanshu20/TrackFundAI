@@ -85,7 +85,7 @@ def _fmt_for(label):
         return _FMT_MONEY
     return None                       # ratios/counts/text left general (full precision)
 _SHEETS = ['MASTER_INPUTS', 'LP_REGISTER', 'CAPITAL_CALLS', 'PORTFOLIO_MASTER',
-           'VALUATIONS', 'NAV_CALC', 'MOIC_TVPI_DPI', 'WATERFALL_EUR',
+           'VALUATIONS', 'QUOTED_UNQUOTED', 'NAV_CALC', 'MOIC_TVPI_DPI', 'WATERFALL_EUR',
            'SECTOR_ALLOCATION', 'EXITS', 'FEES', 'PORTFOLIO_KPI', 'DASHBOARD_BRIDGE',
            'RECONCILIATION']
 _Q = Decimal('0.0001')
@@ -172,6 +172,7 @@ def build_master(cir: CIR, *, rate_card=None, files: List[str] = None,
     _capital_calls(wb, cir, ctx)
     _portfolio_master(wb, cir, ctx)
     _valuations(wb, cir, ctx)
+    _quoted_unquoted(wb, cir, ctx)
     _nav_calc(wb, cir, ctx)
     _moic_tvpi_dpi(wb, cir, ctx)
     _waterfall(wb, cir, ctx)
@@ -573,6 +574,60 @@ def _valuations(wb, cir, ctx):
     _row(ws, ['', 'Σ', '', '', _f(ctx.sum_cost) if not ctx.cost_held else 'INCOMPLETE',
               _f(ctx.sum_fv) if not ctx.fv_held else 'INCOMPLETE',
               _f(ctx.sum_fv - ctx.sum_cost) if not (ctx.cost_held or ctx.fv_held) else 'INCOMPLETE'])
+
+
+# ── 5b. QUOTED_UNQUOTED (additive overlay over the untouched per-company FV) ──
+def _quoted_unquoted(wb, cir, ctx):
+    inv = sorted(_recs(cir, 'portfolio_investments'), key=_entity)
+    if not inv:
+        return
+    ws = wb.create_sheet('QUOTED_UNQUOTED')
+    _rowh(ws, ['QUOTED / UNQUOTED CLASSIFICATION (₹Cr) — as-of ' + str(ctx.fund_asof) +
+               '. A partition of the SAME per-company fair values shown in VALUATIONS — it '
+               're-labels, it never re-values. Basis=inferred means derived from valuation '
+               'methodology (no source-stated ISIN / exchange / share type), ready to be overridden.'])
+    _rowh(ws, ['#', 'Company', 'Fair Value', 'Classification', 'Basis', 'ISIN', 'Exchange',
+               'Evidence / hold reason'])
+    q = u = h = Decimal('0')
+    nq = nu = nh = 0
+    fv_incomplete = False
+    for i, rec in enumerate(inv, start=1):
+        f = rec.fields
+        fv = _num(f.get('fair_value'))
+        iq = f.get('is_quoted')
+        basis = f.get('quoted_basis', '')
+        klass = 'QUOTED' if iq is True else 'UNQUOTED' if iq is False else 'HELD'
+        val = fv if fv is not None else Decimal('0')
+        if fv is None:
+            fv_incomplete = True
+        if iq is True:
+            q += val; nq += 1
+        elif iq is False:
+            u += val; nu += 1
+        else:
+            h += val; nh += 1
+        _row(ws, [i, _entity(rec), _f(fv) if fv is not None else HELD_MARK, klass, basis or NR,
+                  str(f.get('isin') or NR), str(f.get('listing_exchange') or NR),
+                  str(f.get('quoted_evidence') or '')[:70]],
+             good=(3,) if iq is True else (), warn=(3, 7) if iq is None else ())
+    _row(ws, [])
+    _rowh(ws, ['BUCKET', 'Companies', 'Σ Fair Value', '% of Σ FV'])
+    tot = q + u + h
+    def _pct(x):
+        return _f(x / tot) if tot else NR                     # fraction → 0.00%
+    _row(ws, ['Quoted', nq, _f(q), _pct(q)], good=(0,) if nq else ())
+    _row(ws, ['Unquoted', nu, _f(u), _pct(u)])
+    _row(ws, ['Held (unclassified)', nh, _f(h), _pct(h)], warn=(0,) if nh else ())
+    _row(ws, ['Σ Total', nq + nu + nh, _f(tot),
+              _f(Decimal('1')) if tot else NR])
+    _row(ws, [])
+    _rowh(ws, ['RECONCILIATION', 'LHS', 'RHS', 'Verdict', 'Detail'])
+    # HARD control: the partition must tie to the independently-summed Σ portfolio FV — this
+    # is what proves the labelling dropped or double-counted no company (struck in pipeline).
+    _catrow(ws, 'quoted_unquoted_partition_ties_to_total', 'Σ buckets = Σ portfolio FV', ctx)
+    if fv_incomplete:
+        _row(ws, ['note', 'a company fair value is HELD upstream — bucket sums exclude it; '
+                  'partition tie deferred (indeterminate), never a false pass'], warn=(1,))
 
 
 # ── 6. NAV_CALC (two independent paths: §5.1 balance-sheet + roll-forward) ───
@@ -995,7 +1050,11 @@ def _reconciliation(wb, cir, ctx):
     npass = nfail = nsoft = ndisc = 0
     for c in sorted(cir.checks, key=lambda c: (_order.get(c.get('class'), 9), c.get('id', ''))):
         cls, status = c.get('class', ''), c.get('status', '')
-        lhs, rhs = c.get('lhs', ''), c.get('rhs', '')
+        # soft_correspondence emits its two figures as a/b (not lhs/rhs) — fall back so a soft
+        # check's numbers RENDER instead of being silently dropped (they were, pre-fix). U7:
+        # a soft check is published WITH both figures and the variance, never as a bare verdict.
+        lhs = c.get('lhs', c.get('a', ''))
+        rhs = c.get('rhs', c.get('b', ''))
         var = varpct = ''
         try:
             l, r = Decimal(str(lhs)), Decimal(str(rhs))
@@ -1010,7 +1069,7 @@ def _reconciliation(wb, cir, ctx):
         nsoft += cls == 'soft'
         ndisc += cls == 'disclosure'
         _row(ws, [c.get('id', ''), cls, str(lhs), str(rhs), var, varpct, status.upper(),
-                  (c.get('detail', '') or '')[:90]],
+                  (c.get('detail', '') or '')[:180]],   # audit sheet — the coverage/basis explanation IS the value
              good=(6,) if ok else (), warn=(6,) if bad else ())
     _row(ws, [])
     _rowh(ws, [f'TOTALS: {npass} pass · {nfail} fail/indeterminate · {len(cir.checks)} total '

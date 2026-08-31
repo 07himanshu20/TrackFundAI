@@ -27,10 +27,11 @@ from decimal import Decimal
 from typing import Dict, List, Optional
 
 from . import lexicon
+from . import quoted_unquoted
 from .namematch import similarity
 from .profiler import _cell_type, profile_file
 from .quantity import to_decimal
-from .units import whole_company_anchor
+from .units import expected_currency, whole_company_anchor
 
 # a schedule sheet must expose the company axis + at least one of these.
 # 'irr' is the stated per-company IRR%(Gross) column (Valuation working) — a company
@@ -42,6 +43,13 @@ _ATTRS = ('cost', 'ownership_pct', 'fair_value', 'domicile', 'irr')
 # already selected, so they never change WHICH sheet/header/company rows are chosen
 # (zero blast radius on the money anchor). Values are plain strings.
 _DESC_ATTRS = ('sector', 'stage', 'investment_date', 'instrument', 'valuation_method')
+# listing signals (ISIN / exchange / share type) for the quoted-unquoted overlay — located
+# on the ALREADY-CHOSEN header via the isolated quoted_unquoted.locate_listing_signals (its
+# own richer synonym set + ISIN checksum gate), so like _DESC_ATTRS they are pure text
+# enrichment: never gating which sheet/header/rows are chosen, never touching the money
+# anchor. Absent in every file we have today (a no-op); the capability is READY the day a
+# real listed-holdings fund arrives. The column-LOCATION is spec-tested-until-field-tested.
+_LISTING_ATTRS = ('isin', 'listing_exchange', 'share_type')
 _MATCH_FLOOR = 0.5      # min name similarity to attach an MIS file to an anchor
 # a schedule's total/subtotal row is NOT a portfolio company — reading it as one
 # double-counts every headline (Total Deployed Cost 448 → 896). Universal junk
@@ -59,6 +67,9 @@ def _is_junk_company(name: str) -> bool:
 class CompanyAnchor:
     company: str
     domicile: Optional[str] = None
+    domicile_conflict: bool = False            # schedules disagreed on domicile in a way that implies
+                                               # DIFFERENT currencies → domicile withheld (None) so U6
+                                               # fail-closes the currency, and the pipeline discloses it
     cost_cr: Optional[Decimal] = None
     ownership_frac: Optional[float] = None
     fair_value_cr: Optional[Decimal] = None
@@ -71,6 +82,10 @@ class CompanyAnchor:
     investment_date: Optional[str] = None
     instrument: Optional[str] = None
     valuation_method: Optional[str] = None
+    # listing signals — populated only when a source carries them (none do today)
+    isin: Optional[str] = None
+    listing_exchange: Optional[str] = None
+    share_type: Optional[str] = None
     sources: List[str] = field(default_factory=list)
 
 
@@ -90,12 +105,18 @@ def _find_col(rows, header_row: int, concept: str) -> Optional[int]:
 
 
 def _ownership_frac(v) -> Optional[float]:
-    """A stake as a fraction: 0.18 stays 0.18; 18 or '18%' → 0.18. Universal."""
+    """A stake as a fraction in (0, 1]: 0.18 stays 0.18; 18 or '18%' → 0.18; 100 → 1.0. A value that
+    CANNOT be a valid ownership fraction — ≤0, or >100% after normalisation — is REJECTED as None.
+    UNIVERSAL domain invariant: no entity owns >100% of another, on any file or format, so a normalised
+    ownership >1 is always a misparse (e.g. an 'FV of holding' column mis-read as ownership → 148%), never
+    a real stake. Rejecting it keeps the whole-company anchor (cost ÷ ownership) sane, and — because the
+    merge then never captures the bogus value — removes the order-dependence it caused."""
     d = to_decimal(str(v).replace('%', '') if isinstance(v, str) else v)
     if d is None or d <= 0:
         return None
     f = float(d)
-    return f / 100.0 if f > 1 else f
+    frac = f / 100.0 if f > 1 else f
+    return frac if 0 < frac <= 1 else None
 
 
 def _ledger_row_indices(rows) -> set:
@@ -136,6 +157,10 @@ def _schedule_rows_from_sheet(rows) -> Optional[List[dict]]:
         dc = _find_col(rows, best_hr, a)
         if dc is not None:
             best_cols[a] = dc
+    # listing signals via the isolated locator (own synonym set) — same chosen header,
+    # same enrichment-only contract; empty for every file we have today.
+    for a, dc in quoted_unquoted.locate_listing_signals(rows[best_hr]).items():
+        best_cols[a] = dc
     ledger_rows = _ledger_row_indices(rows)
     out = []
     for r in range(best_hr + 1, len(rows)):
@@ -159,7 +184,7 @@ def _schedule_rows_from_sheet(rows) -> Optional[List[dict]]:
                 rec[a] = str(v).strip() if _cell_type(v) == 'text' else None
             else:  # cost / fair_value → numeric
                 rec[a] = to_decimal(v)
-        for a in _DESC_ATTRS:               # text enrichment (never gates a row)
+        for a in _DESC_ATTRS + _LISTING_ATTRS:   # text enrichment (never gates a row)
             c = best_cols.get(a)
             if c is None or c >= len(rows[r]):
                 continue
@@ -169,7 +194,7 @@ def _schedule_rows_from_sheet(rows) -> Optional[List[dict]]:
             if a == 'investment_date':
                 rec[a] = str(v).strip()     # a date or a text date — keep as displayed
             elif _cell_type(v) == 'text':
-                rec[a] = str(v).strip()     # sector / stage / instrument are text
+                rec[a] = str(v).strip()     # sector / stage / instrument / listing signals are text
         # A portfolio investment row MUST carry a monetary/ownership attribute
         # (cost, fair value, or ownership). A bare name with no such value is a
         # metric label ('Revenue'), a GL line, or a heading — NOT an investment.
@@ -181,52 +206,104 @@ def _schedule_rows_from_sheet(rows) -> Optional[List[dict]]:
     return out or None
 
 
+def _resolve_ownership(cands: List[tuple]) -> Optional[float]:
+    """cands = [(value, from_cost_sheet)]. Agree → use. Disagree → prefer a value stated on a
+    schedule that also carries COST (the deployment/Investments schedule is authoritative for the
+    fund's stake), else the deterministic minimum. Order-INDEPENDENT (no first-seen)."""
+    if not cands:
+        return None
+    vals = sorted({v for v, _ in cands})
+    if len(vals) == 1:
+        return vals[0]
+    from_cost = sorted({v for v, c in cands if c})
+    return (from_cost or vals)[0]
+
+
+def _resolve_domicile(doms: List[str]) -> tuple:
+    """Return (domicile, conflict). Agree, or all imply the SAME currency → deterministic pick.
+    Disagree in a way that implies DIFFERENT currencies (including a known-vs-unmappable split) →
+    (None, True): domicile is withheld so U6 fail-closes the currency (no geo evidence) and the
+    pipeline discloses the conflict. A pure spelling variant that maps to one currency is NOT a
+    conflict (no over-hold — same principle as coexisting-concept non-conflicts)."""
+    distinct = sorted({d for d in doms if d})
+    if not distinct:
+        return None, False
+    ccys = {expected_currency(d) for d in distinct}
+    if len(ccys) > 1:                      # currencies genuinely differ → currency ambiguous → hold
+        return None, True
+    return distinct[0], False              # one currency (or all unmappable) → deterministic, no conflict
+
+
 def build_fund_anchors(paths: List[str]) -> Dict[str, CompanyAnchor]:
-    """Read every fund file's schedule sheets → {normalised company → CompanyAnchor}."""
-    # gather per (sheet, company): summed cost, and single-valued ownership/fv/domicile
-    merged: Dict[str, CompanyAnchor] = {}
-    # per-sheet accumulation keyed by company, so tranche rows sum within a sheet
+    """Read every fund file's schedule sheets → {normalised company → CompanyAnchor}.
+
+    COLLECT-then-RESOLVE: every attribute is gathered across all sheets with provenance, then merged
+    by an order-INDEPENDENT rule — never silent first-wins (which locks in whichever sheet happened to
+    be read first). cost/fair_value = MAX of per-sheet sums; ownership/domicile/irr resolved
+    deterministically (see the _resolve_* helpers); descriptive text = agreed value or the
+    deterministic minimum. So build_fund_anchors(files) == build_fund_anchors(reversed(files))."""
+    acc: Dict[str, dict] = {}
     for path in paths:
         prof = profile_file(path.split('/')[-1], path)
         for s in prof['sheets']:
             recs = _schedule_rows_from_sheet(prof['grid'][s.sheet])
             if not recs:
                 continue
+            # ── per-sheet reduction: sum cost across tranche rows; first row per company for the
+            #    single-valued attrs (within-sheet row order is stable, not upload order) ──
             sheet_cost: Dict[str, Decimal] = {}
-            sheet_other: Dict[str, dict] = {}
+            sheet_one: Dict[str, dict] = {}
             for rec in recs:
                 key = lexicon.normalise_label(rec['company'])
                 if not key:
                     continue
                 if rec.get('cost') is not None:
                     sheet_cost[key] = sheet_cost.get(key, Decimal('0')) + rec['cost']
-                o = sheet_other.setdefault(key, {'company': rec['company']})
-                for a in ('ownership_pct', 'fair_value', 'domicile', 'irr') + _DESC_ATTRS:
+                o = sheet_one.setdefault(key, {'company': rec['company']})
+                for a in ('ownership_pct', 'fair_value', 'domicile', 'irr') + _DESC_ATTRS + _LISTING_ATTRS:
                     if rec.get(a) is not None and o.get(a) is None:
                         o[a] = rec[a]
-            for key in set(list(sheet_cost) + list(sheet_other)):
-                ca = merged.setdefault(key, CompanyAnchor(
-                    company=sheet_other.get(key, {}).get('company', key)))
-                if key in sheet_cost:
-                    # ACROSS sheets: MAX of per-sheet sums (no double-count)
-                    ca.cost_cr = max(ca.cost_cr or Decimal('0'), sheet_cost[key])
-                o = sheet_other.get(key, {})
-                if ca.ownership_frac is None and o.get('ownership_pct') is not None:
-                    ca.ownership_frac = o['ownership_pct']
-                if o.get('fair_value') is not None:
-                    ca.fair_value_cr = max(ca.fair_value_cr or Decimal('0'), o['fair_value'])
-                if ca.domicile is None and o.get('domicile'):
-                    ca.domicile = o['domicile']
-                if ca.irr_gross is None and o.get('irr') is not None:   # first-seen (IRR isn't additive/max-able)
-                    ca.irr_gross = o['irr']
-                for a in _DESC_ATTRS:                                     # first-seen text enrichment
-                    if getattr(ca, a) is None and o.get(a) is not None:
-                        setattr(ca, a, o[a])
-                if s.sheet not in ca.sources:
-                    ca.sources.append(s.sheet)
-    for ca in merged.values():
+            # ── push this sheet's per-company results into cross-sheet candidate lists ──
+            for key in set(list(sheet_cost) + list(sheet_one)):
+                o = sheet_one.get(key, {})
+                a = acc.setdefault(key, {'company': o.get('company', key), 'cost': [], 'fair_value': [],
+                                         'own': [], 'dom': [], 'irr': [],
+                                         'desc': {d: [] for d in _DESC_ATTRS + _LISTING_ATTRS}, 'sheets': set()})
+                has_cost = key in sheet_cost
+                has_fv = o.get('fair_value') is not None
+                if has_cost:
+                    a['cost'].append(sheet_cost[key])
+                if has_fv:
+                    a['fair_value'].append(o['fair_value'])
+                if o.get('ownership_pct') is not None:
+                    a['own'].append((o['ownership_pct'], has_cost))
+                if o.get('domicile'):
+                    a['dom'].append(o['domicile'])
+                # IRR: the stated GROSS IRR is the one on the MARK/valuation schedule (it carries the
+                # company's fair value). A realisation schedule's IRR is a DIFFERENT figure (realised
+                # IRR-on-exit) already retained by the exits pipeline — never merge it into irr_gross.
+                if o.get('irr') is not None and has_fv:
+                    a['irr'].append(o['irr'])
+                for d in _DESC_ATTRS + _LISTING_ATTRS:
+                    if o.get(d) is not None:
+                        a['desc'][d].append(o[d])
+                a['sheets'].add(s.sheet)
+    merged: Dict[str, CompanyAnchor] = {}
+    for key, a in acc.items():
+        ca = CompanyAnchor(company=a['company'])
+        ca.cost_cr = max(a['cost']) if a['cost'] else None
+        ca.fair_value_cr = max(a['fair_value']) if a['fair_value'] else None
+        ca.ownership_frac = _resolve_ownership(a['own'])
+        ca.domicile, ca.domicile_conflict = _resolve_domicile(a['dom'])
+        ca.irr_gross = sorted(set(a['irr']))[0] if a['irr'] else None   # deterministic if marks disagree
+        for d in _DESC_ATTRS + _LISTING_ATTRS:
+            vals = sorted({v for v in a['desc'][d]})
+            if vals:
+                setattr(ca, d, vals[0])                                  # agreed value, or deterministic min
+        ca.sources = sorted(a['sheets'])
         ca.anchor_cr = whole_company_anchor(cost_cr=ca.cost_cr, ownership_frac=ca.ownership_frac,
                                             fair_value_cr=ca.fair_value_cr)
+        merged[key] = ca
     return merged
 
 

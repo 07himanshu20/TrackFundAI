@@ -63,6 +63,8 @@ MIS = [
 GT = {
     ('Hubler', 'revenue'): '4.1837', ('Hubler', 'ebitda'): '-0.4304',
     ('Hubler', 'headcount'): '13',          # fork-b re-source: KPIs!AZ146 'Total employees', 28-Feb-26
+    ('Hubler', 'cash'): '1.0621',           # R4 recovery: P&L!BB98 'Closing balance' latest = 10,620,993
+
     ('Agnikul', 'revenue'): '5.1460', ('Agnikul', 'cash'): '117.6646',
     ('Agnikul', 'headcount'): '299',        # Feb'26 period-end (B29); NOT an average/sum
     ('InstaAstro', 'ebitda'): '-8.8686', ('InstaAstro', 'cash'): '17.7422',
@@ -70,6 +72,15 @@ GT = {
     ('CPC', 'ebitda'): '15.6492',
     ('CPC', 'revenue'): '111.4026',         # fork-b re-source: PL Summary!F8 'Total Revenue' YTD (₹M);
                                             # corroborated by 'PL schedule' (same 1114.03) → own statement
+    ('Aliste', 'revenue'): '5.3052',        # R1a recovery: live 'P&L' row 15 'Revenue From Operation',
+                                            # FYTD Apr-25..Feb-26 (11 months, Mar-26=0 placeholder) =
+                                            # ₹53,052,306 = 5.3052 Cr; corroborated TO THE RUPEE by the
+                                            # sheet's OWN 'YTD' column (P15 = 53,052,306.19)
+    ('Aliste', 'ebitda'): '-0.0117',        # R1d recovery: live 'P&L' row 44 'EBITDA', FYTD Apr-25..Feb-26
+                                            # = −₹117,058 = −0.0117 Cr (roughly breakeven — +/- months net
+                                            # near-zero); corroborated TO THE RUPEE by the sheet's OWN 'YTD'
+                                            # column (P44 = −117,057.56). Was FALSELY held by the figure-
+                                            # anchor magnitude guard (profit legitimately << valuation scale)
     ('Clientell', 'cash'): '9.3253',        # fork-b re-source: Analysis!B19 'Cash Balance' Feb-26 (₹Lakh),
                                             # corroborated by the ~₹9.2Cr summary cell in the same column
     ('Clientell', 'headcount'): '19',       # Feb'26 period-end (AM80); NOT an average/sum

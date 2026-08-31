@@ -33,6 +33,7 @@ from decimal import Decimal
 from typing import List, Optional
 
 from .quantity import SCALE_TO_ABS, normalise_scale, to_decimal
+from . import currency_ledger
 
 # domicile → expected currency (universal country/currency map, not fund-specific)
 GEO_CCY = {
@@ -85,34 +86,54 @@ class MonetaryFrame:
 
 def resolve_currency(*, stmt_currency, geo_currency, inr_mentioned):
     """Resolve ONE currency for a whole statement, geography-gated. Precedence:
-      1. the statement's OWN header currency (strongest local evidence).
-      2. the entity's geography-implied currency (its domicile).
-      3. an INR mention ANYWHERE in the workbook — but ONLY when geography is
-         unknown. An anywhere-mention must NEVER override a known foreign
-         domicile (a Malaysian company's MYR sheet is not INR because some FX
-         note names rupees).
-      4. INR default when there is no evidence at all.
+      1. the statement's OWN header currency (strongest local evidence), UNLESS a known
+         domicile contradicts it (either direction) → conflict, hold.
+      2. else the entity's geography-implied currency (its domicile).
+      3. else HOLD — no positive evidence; there is NO INR default.
 
-    A statement whose OWN header says INR while a known-foreign domicile says
-    otherwise is a contradiction (a Singapore entity does not report in INR) —
-    escalated and held, never auto-applied. Returns
-    (currency, escalate, reason, flags)."""
+    Currency is CONFIRMED only by POSITIVE, NON-CONFLICTING evidence — a statement
+    token, or a known domicile. Any statement-token-vs-domicile disagreement is a
+    conflict (a Singapore entity does not report in INR; an INR-domicile statement
+    stamped MYR is equally unproven) → AMBIGUOUS, held, never auto-applied in EITHER
+    direction. Absence of evidence (no token AND no known domicile) is AMBIGUOUS too —
+    a workbook-wide INR mention is not on-figure/header evidence and can never currency
+    an unknown-domicile figure (a foreign file's FX note names rupees). This closes the
+    untokened-foreign hole: a foreign figure with no marker must never silently ship as
+    INR (a 15-20× error). Returns (currency, escalate, reason, flags).
+
+    This is the SINGLE complete choke for currency detection (U6 Phase-2 enumeration): every
+    site that can yield a foreign or conflicting currency reaches it. The observing wrapper
+    records each verdict into the run's currency ledger so the uncovered-currency report is
+    complete by construction — capturing DOMICILE-implied currencies a token scan would miss."""
+    result = _resolve_currency(stmt_currency=stmt_currency, geo_currency=geo_currency,
+                               inr_mentioned=inr_mentioned)
+    currency_ledger.observe(currency=result[0], escalate=result[1], reason=result[2], flags=result[3])
+    return result
+
+
+def _resolve_currency(*, stmt_currency, geo_currency, inr_mentioned):
     flags: List[str] = []
+    # Rule (i): a statement-header token is positive local evidence — trusted UNLESS a known domicile
+    # contradicts it (either direction), which is a genuine conflict that cannot be resolved → hold.
     if stmt_currency:
         if geo_currency and stmt_currency != geo_currency:
-            if stmt_currency == 'INR':
-                return (None, True,
-                        f'statement shows INR but domicile implies {geo_currency} — a foreign '
-                        f'entity cannot be auto-INR; hold', ['currency_inr_vs_foreign_domicile'])
-            flags.append(f'currency_{stmt_currency}_vs_domicile_{geo_currency}')
+            return (None, True,
+                    f'statement shows {stmt_currency} but domicile implies {geo_currency} — currency '
+                    f'conflict, cannot confirm; hold',
+                    [f'currency_conflict_{stmt_currency}_vs_domicile_{geo_currency}'])
         return stmt_currency, False, f'statement-header currency {stmt_currency}', flags
+    # Rule (ii): no token, but a known domicile implies its currency. A workbook INR mention never
+    # overrides a foreign domicile.
     if geo_currency:
         if inr_mentioned and geo_currency != 'INR':
             flags.append('inr_mention_ignored_foreign_domicile')
         return geo_currency, False, f'domicile-implied currency {geo_currency}', flags
-    if inr_mentioned:
-        return 'INR', False, 'workbook mentions rupees/INR and domicile unknown', ['currency_inr_by_mention']
-    return 'INR', False, 'no currency evidence — default INR', ['currency_assumed_inr']
+    # Rule (iii): NO positive evidence — no statement token AND no known domicile. AMBIGUOUS ⇒ hold,
+    # never INR-by-default/by-mention (the untokened-foreign hole). inr_mentioned is deliberately NOT
+    # trusted here: it is workbook-wide, not on the figure/header, and a foreign statement carries
+    # rupee FX notes too.
+    return (None, True, 'no positive currency evidence (no statement token, no known domicile) — '
+            'ambiguous, hold', ['currency_ambiguous_no_evidence'])
 
 
 def resolve_monetary_frame(*, stmt_currency, geo_currency, inr_mentioned, declared_unit,
@@ -129,6 +150,18 @@ def resolve_monetary_frame(*, stmt_currency, geo_currency, inr_mentioned, declar
                                  sample_values=sample_values, anchor_cr=anchor_cr, ratecard=ratecard)
     if ss.escalate or ss.scale is None:
         return MonetaryFrame(ccy, None, True, f'{ccy_reason}; scale: {ss.reason}', ccy_flags)
+    # A resolved FOREIGN currency needs a rate to become ₹Cr. If the card does not cover it, hold the
+    # whole statement HERE (FX_UNCOVERED) — fail-closed and UNIFORM across every emit path, so the
+    # conversion is never attempted on an uncovered currency and to_inr never raises for a missing rate.
+    # This keeps a benign 'awaiting a rate' hold cleanly distinct from a genuine code fault (which stays
+    # a broad-except UNEXPECTED_ERROR). Neutral on the emit set: a foreign figure could only ever emit
+    # WITH a rate, so a covered currency still resolves and an uncovered one was already held.
+    if ccy and ccy != 'INR':
+        rates = getattr(ratecard, 'rates', None) or {}
+        if ccy not in rates:
+            return MonetaryFrame(ccy, ss.scale, True,
+                                 f'{ccy_reason}; FX_UNCOVERED: no rate for {ccy} in the card — hold',
+                                 list(ccy_flags) + [f'fx_uncovered_{ccy}'])
     return MonetaryFrame(ccy, ss.scale, False, f'{ccy_reason}; {ss.reason}', ccy_flags)
 
 
@@ -339,23 +372,26 @@ def resolve(*, value, declared_unit=None, declared_ccy=None, header_hints=None,
         v = to_decimal(value)
         anchor = float(anchor_cr)
         if v is not None and v != 0 and anchor > 0:
-            def cr_under(sc):
-                native = abs(v) * SCALE_TO_ABS[sc]
-                return float(ratecard.to_inr(native, currency)) / 1e7
-            def orders_from_anchor(sc):
-                c = cr_under(sc)
-                return abs(math.log10(c / anchor)) if c > 0 else 99.0
-            best = min(_ALT_SCALES, key=orders_from_anchor)
-            # trust the declared/hinted scale unless it sits ≥2 orders from the
-            # anchor AND a different scale sits within one order (a real mislabel).
-            if orders_from_anchor(scale) >= _ORDERS_MISMATCH and orders_from_anchor(best) < 1.0 and best != scale:
-                return UnitResolution(scale, currency, escalate=True,
-                                      flags=flags + ['magnitude_mismatch'],
-                                      suggested_scale=best,
-                                      reason=(f'scale {scale!r} → ₹{cr_under(scale):.1f}Cr, '
-                                              f'{orders_from_anchor(scale):.1f} orders off anchor '
-                                              f'₹{anchor:.0f}Cr; {best!r} fits — escalate, do not trust the label'))
-        # else value 0 / no anchor magnitude → nothing to test
+            try:
+                def cr_under(sc):
+                    native = abs(v) * SCALE_TO_ABS[sc]
+                    return float(ratecard.to_inr(native, currency)) / 1e7
+                def orders_from_anchor(sc):
+                    c = cr_under(sc)
+                    return abs(math.log10(c / anchor)) if c > 0 else 99.0
+                best = min(_ALT_SCALES, key=orders_from_anchor)
+                # trust the declared/hinted scale unless it sits ≥2 orders from the
+                # anchor AND a different scale sits within one order (a real mislabel).
+                if orders_from_anchor(scale) >= _ORDERS_MISMATCH and orders_from_anchor(best) < 1.0 and best != scale:
+                    return UnitResolution(scale, currency, escalate=True,
+                                          flags=flags + ['magnitude_mismatch'],
+                                          suggested_scale=best,
+                                          reason=(f'scale {scale!r} → ₹{cr_under(scale):.1f}Cr, '
+                                                  f'{orders_from_anchor(scale):.1f} orders off anchor '
+                                                  f'₹{anchor:.0f}Cr; {best!r} fits — escalate, do not trust the label'))
+            except Exception:  # noqa: BLE001 — no FX rate for this currency → cannot cross-check the scale;
+                flags.append('magnitude_unchecked_no_fx')  # keep the precedence scale, never crash (mirrors
+        # else value 0 / no anchor magnitude → nothing to test  # the wrapped statement-scale path 230/284)
     elif not anchor_cr:
         flags.append('magnitude_unchecked_no_anchor')
 

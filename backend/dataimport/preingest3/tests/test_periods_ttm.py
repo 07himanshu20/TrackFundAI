@@ -197,6 +197,124 @@ def test_old_period_conflict_does_not_hold_a_clean_stock_asof():
     assert not c.escalate and c.value == Decimal('19')
 
 
+# ── Stated as-of bound (Rung 2): exclude a forward-projection MONTH, never a cumulative span ──
+# Root cause it closes: the label-based scenario filter misses an UNLABELED future month (LDC 'Mar'26'
+# with a value), and the cadence-peel misses a plausibly-spaced one (gap == modal cadence). The bound
+# uses the source's own STATED as-of (from the filename) to drop a discrete month dated past it.
+# DESIGN TRAP the kind-scoping avoids: a naive 'order > as_of' also drops a cumulative column whose
+# `order` is a SORT-SENTINEL (YTD→(yr,12), TOTAL→(9999,12)) — false-dropping an ACTUAL (Agnikul YTD).
+
+_TOTAL = periods.TOTAL
+_YEAR = periods.YEAR
+
+
+def test_asof_bound_drops_future_month_for_stock_and_reddens_without_bound():
+    # LDC shape: monthly run to Feb-2026 plus a Mar-2026 forecast MONTH carrying a value. The stock
+    # `max` would grab Mar without a bound; with as_of=Feb-2026 it binds the true Feb balance.
+    cols = _months([(2026, 1), (2026, 2), (2026, 3)])       # Jan, Feb, Mar
+    vals = {0: Decimal('50'), 1: Decimal('60'), 2: Decimal('999')}   # Mar = forecast stub
+    bounded = periods.collapse('cash', 'stock', cols, vals, as_of=(2026, 2))
+    assert bounded.value == Decimal('60') and bounded.source_cols == [1]      # Feb, not Mar
+    # REDDENING negative control: bound ABSENT → the defect returns (Mar-2026 forecast is picked)
+    unbounded = periods.collapse('cash', 'stock', cols, vals)
+    assert unbounded.value == Decimal('999') and unbounded.source_cols == [2]
+
+
+def test_asof_bound_excludes_future_month_from_flow_sum_and_reddens_without_bound():
+    # a discrete monthly flow with a trailing forecast month: the bound keeps it out of the sum.
+    cols = _months([(2026, 1), (2026, 2), (2026, 3)])
+    vals = {0: Decimal('10'), 1: Decimal('10'), 2: Decimal('10')}
+    bounded = periods.collapse('revenue', 'flow', cols, vals, as_of=(2026, 2))
+    assert bounded.value == Decimal('20') and 3 not in [c for c in bounded.source_cols]   # Jan+Feb only
+    unbounded = periods.collapse('revenue', 'flow', cols, vals)          # bound absent → Mar summed in
+    assert unbounded.value == Decimal('30')
+
+
+def test_asof_bound_NEVER_drops_cumulative_ytd_the_design_trap_control():
+    # THE ANTI-CORRUPTION CONTROL. Agnikul: Jan'26, Feb'26 months + 'YTD FY26' (order (2026,12), the
+    # emitted revenue). as_of=Feb-2026. The kind-aware bound MUST keep the YTD (a cumulative span, not
+    # a future month) — and we prove a NAIVE 'order > as_of' bound WOULD have deleted it (the trap).
+    jan = PeriodColumn(col=0, label="Jan'26", kind=MONTH, months=1, order=(2026, 1))
+    feb = PeriodColumn(col=1, label="Feb'26", kind=MONTH, months=1, order=(2026, 2))
+    ytd = PeriodColumn(col=2, label='YTD FY26', kind=YTD, months=0, order=(2026, 12))
+    vals = {0: Decimal('5.73'), 1: Decimal('4.89'), 2: Decimal('51.46')}
+    c = periods.collapse('revenue', 'flow', [jan, feb, ytd], vals, as_of=(2026, 2))
+    assert not c.escalate and c.value == Decimal('51.46')                # YTD preserved
+    # the trap made explicit: a naive same-order comparison drops the YTD (its sentinel (2026,12) > as_of)
+    naive_survivors = [col for col in (jan, feb, ytd) if not (col.order != (0, 0) and col.order > (2026, 2))]
+    assert ytd not in naive_survivors                                     # naive bound WOULD corrupt
+
+
+def test_asof_bound_never_drops_total_or_year_columns():
+    # TOTAL (9999,12) and YEAR (yr,12) are cumulative sentinels, never future months → always kept.
+    # A NAIVE 'order > as_of' bound would drop them (sentinel year >> as_of), emptying the axis to an
+    # escalate; the kind-aware bound keeps them so the single-total path reads the value directly.
+    tot = PeriodColumn(col=0, label='Grand Total', kind=_TOTAL, months=12, order=(9999, 12))
+    c = periods.collapse('revenue', 'flow', [tot], {0: Decimal('48')}, as_of=(2026, 2))
+    assert not c.escalate and c.value == Decimal('48')                    # total kept, read directly
+    yr = PeriodColumn(col=0, label='FY26', kind=_YEAR, months=12, order=(2026, 12))
+    c2 = periods.collapse('revenue', 'flow', [yr], {0: Decimal('60')}, as_of=(2026, 2))
+    assert not c2.escalate and c2.value == Decimal('60')                  # FY-year kept, not dropped
+
+
+def test_asof_bound_keeps_straddling_quarter():
+    # Q4 FY26 (Jan–Mar) has order == end-month (2026,3); as_of Feb-2026 STRADDLES it. A quarter is a
+    # span (partial actual through the as-of), not a future point → the month-scoped bound never drops it.
+    q4 = PeriodColumn(col=0, label='Q4', kind=QUARTER, months=3, order=(2026, 3))
+    vals = {0: Decimal('30')}
+    c = periods.collapse('cash', 'stock', [q4], vals, as_of=(2026, 2))
+    assert c.value == Decimal('30')                                       # kept, not stripped
+
+
+def test_asof_bound_none_is_the_LIBRARY_DEFAULT_noop_not_a_blessed_failopen():
+    # as_of=None + require_bound=False is the LIBRARY default (backward-compatible no-op) — NOT a
+    # blessed production fail-open. Production (extract_company) NEVER relies on it: it either resolves a
+    # bound or sets require_bound=True (the fail-closed floor below). This test pins the primitive; the
+    # require_bound tests pin the production floor. Keeping both apart is the fix for 'fail-open looks green'.
+    cols = _months([(2026, 1), (2026, 2), (2026, 3)])
+    vals = {0: Decimal('10'), 1: Decimal('20'), 2: Decimal('30')}
+    a = periods.collapse('cash', 'stock', cols, vals, as_of=None)
+    b = periods.collapse('cash', 'stock', cols, vals)
+    assert a.value == b.value == Decimal('30')                            # library default unchanged
+
+
+# ── Fail-closed FLOOR (Rung-2 bottom rung): no bound established → never proceed unguarded ──
+
+def test_require_bound_holds_projection_ambiguous_multimonth_and_reddens_without_it():
+    # PRODUCTION FLOOR: no reporting as-of could be established (as_of=None) and the caller REQUIRES one.
+    # A latest MONTH pick over ≥2 month periods cannot be proven an actual vs a projection → HOLD.
+    cols = _months([(2026, 1), (2026, 2), (2026, 3)])
+    vals = {0: Decimal('10'), 1: Decimal('20'), 2: Decimal('30')}
+    held = periods.collapse('cash', 'stock', cols, vals, as_of=None, require_bound=True)
+    assert held.escalate and held.value is None and 'unbounded_projection_risk' in held.flags
+    # REDDENING control: WITHOUT the floor (require_bound=False) the defect returns (unguarded max picked)
+    open_ = periods.collapse('cash', 'stock', cols, vals, as_of=None, require_bound=False)
+    assert open_.value == Decimal('30') and not open_.escalate
+
+
+def test_require_bound_still_emits_single_month_no_ambiguity():
+    # only ONE month period → no trailing projection to rule out → emits even with require_bound.
+    cols = _months([(2026, 2)])
+    c = periods.collapse('cash', 'stock', cols, {0: Decimal('20')}, as_of=None, require_bound=True)
+    assert not c.escalate and c.value == Decimal('20')
+
+
+def test_require_bound_still_emits_cumulative_only_no_month_ambiguity():
+    # a cumulative-only axis (YTD/total) has no discrete month whose actuality is in doubt → emits.
+    ytd = PeriodColumn(col=0, label='YTD FY26', kind=YTD, months=0, order=(2026, 12))
+    c = periods.collapse('revenue', 'flow', [ytd], {0: Decimal('51.46')}, as_of=None, require_bound=True)
+    assert not c.escalate and c.value == Decimal('51.46')
+
+
+def test_asof_bound_never_empties_the_axis_fail_open():
+    # a too-early / mislabeled as_of that would remove EVERY column → keep them all (better a flagged
+    # figure than a false hold from a bad bound); downstream escalation still guards it.
+    cols = _months([(2026, 1), (2026, 2)])
+    vals = {0: Decimal('10'), 1: Decimal('20')}
+    c = periods.collapse('cash', 'stock', cols, vals, as_of=(2025, 1))    # before all data
+    assert c.value == Decimal('20')                                       # not emptied → latest kept
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_') and callable(fn):

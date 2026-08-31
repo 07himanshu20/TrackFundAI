@@ -212,11 +212,20 @@ def _conflicting_periods(cols: List[PeriodColumn], values: Dict[int, object]) ->
 
 
 def collapse(concept: str, nature: str, columns: List[PeriodColumn],
-             values: Dict[int, object], *, as_of_year: int = None) -> Collapsed:
+             values: Dict[int, object], *, as_of_year: int = None,
+             as_of: tuple = None, require_bound: bool = False) -> Collapsed:
     """Collapse a concept's per-column values into ONE figure.
 
     `columns` — parsed period columns for the statement.
     `values`  — {col_index: raw cell value} for THIS concept's row.
+    `as_of`   — the source's own STATED reporting boundary as (year, month), when known
+                (from a header 'as on' cell or the filename month). Columns dated strictly
+                after it are forward projections, not actuals — see the kind-aware guard below.
+    `require_bound` — the caller COULD NOT establish any reporting boundary (no filename month,
+                no flow-derived date) and demands a fail-CLOSED outcome: a latest/summed MONTH
+                selection that cannot be proven to be an actual (rather than a projection) HOLDS
+                rather than proceed unguarded. The library DEFAULT (False) keeps the old behaviour;
+                production (extract_company) sets it so fail-open is never the floor.
     Nature drives the branch: STOCK → latest balance (never summed); FLOW →
     evidence-based axis classification.
     """
@@ -230,6 +239,31 @@ def collapse(concept: str, nature: str, columns: List[PeriodColumn],
     outliers = _period_outlier_cols([c for c in cols if c.kind in (MONTH, QUARTER)])
     if outliers:
         cols = [c for c in cols if c.col not in outliers]
+    # Stated as-of bound (Rung 2): a DISCRETE month dated strictly AFTER the source's own stated
+    # reporting as-of is a forward projection, never an actual of that report — exclude it from BOTH
+    # the stock latest-pick and the flow sum (the label-based scenario filter misses an UNLABELED
+    # future month like 'Mar'26'; the cadence-peel misses a plausibly-spaced one). SCOPED TO kind==
+    # MONTH by design: a month's `order` is a true point-in-time, so `> as_of` is meaningful. A
+    # cumulative span carries a SORT-SENTINEL order (YTD→(yr,12), TOTAL→(9999,12), YEAR→(yr,12)) and a
+    # QUARTER's order is its end-month (Q4→(yr,3)) which can STRADDLE the as-of — comparing either to a
+    # month would false-drop an ACTUAL (a YTD-through-as-of, a straddling partial quarter). Fail-open:
+    # no as_of, or the bound would empty the axis (a mislabeled/too-early as_of) → columns unchanged.
+    if as_of is not None:
+        kept = [c for c in cols if not (c.kind == MONTH and c.order != (0, 0) and c.order > as_of)]
+        if kept:
+            cols = kept
+    # Fail-closed floor (Rung-2, the agreed ladder's bottom rung): if NO reporting boundary could be
+    # established (as_of is None) and the caller REQUIRES one, a latest/summed MONTH selection cannot be
+    # proven to be an actual rather than a projection → HOLD, never proceed unguarded. Fires only on
+    # genuine ambiguity (≥2 distinct MONTH periods); a single month or a cumulative-only axis has no
+    # trailing projection to rule out, so it still emits. This is why fail-open is reserved for NEVER.
+    if as_of is None and require_bound:
+        month_orders = {c.order for c in cols if c.kind == MONTH and c.order != (0, 0)}
+        if len(month_orders) >= 2:
+            return Collapsed(None, 'point_in_time', 0, ESCALATE, True,
+                             flags=['unbounded_projection_risk'],
+                             reason=('no reporting as-of (filename/flow-derived) to rule out a projection '
+                                     'in the latest month column — hold (fail-closed floor)'))
     val = lambda c: to_decimal(values.get(c.col))
     # Unlabeled plan/actual overlap (D3, guard A): fail-closed. Scoped to the emit-relevant periods so
     # a benign old conflict far from the figure never causes a false hold.

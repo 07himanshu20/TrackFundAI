@@ -38,6 +38,23 @@
                        margin-bottom: 8px; background: var(--card); }
     .pi3-muted { color: var(--text3); font-size: 11px; }
     .pi3-section-title { font-size: 12px; font-weight: 700; color: var(--white); margin: 18px 0 8px; }
+    /* U6 currency-coverage prompt */
+    .pi3-ccy-intro { font-size: 12px; color: var(--text2); margin-bottom: 12px; line-height: 1.5; }
+    .pi3-ccy-intro b { color: var(--white); }
+    .pi3-rate-row { display: grid; grid-template-columns: 84px 1fr 1.4fr; gap: 8px; align-items: center;
+                    padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+                    margin-bottom: 6px; background: var(--card); }
+    .pi3-rate-row .ccy { font-weight: 700; color: var(--white); font-family: var(--font-mono, monospace); }
+    #ccy-body input { width: 100%; background: var(--card2, #0f1729); border: 1px solid var(--border);
+                      color: var(--text); border-radius: var(--radius-sm); padding: 7px 9px; font-size: 12px;
+                      font-family: inherit; }
+    #ccy-body input:focus { outline: none; border-color: var(--accent); }
+    .pi3-ccy-sites { font-size: 10px; color: var(--text3); margin-top: 3px; }
+    .pi3-ccy-actions { display: flex; gap: 8px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+    .pi3-ccy-disclose { margin-top: 14px; padding: 10px 12px; border: 1px dashed var(--border);
+                        border-radius: var(--radius-sm); font-size: 11px; color: var(--text3); line-height: 1.6; }
+    .pi3-ccy-disclose b { color: var(--text2); }
+    .pi3-ccy-disclose i { color: var(--accent3); font-style: normal; }
   </style>
 </head>
 <body>
@@ -121,6 +138,15 @@
 
           <div class="pi3-section-title">Files</div>
           <div id="files-list"></div>
+
+          <!-- U6 currency coverage — shown ONLY when a foreign currency was detected. REQUESTS a rate for
+               each uncovered currency; DISCLOSES foreign exposure a rate cannot surface. Hidden on all-INR. -->
+          <div class="v5-panel" id="ccy-panel" style="margin-top:14px;display:none;">
+            <div class="v5-panel-header">
+              <div class="v5-panel-title">Foreign currency detected — supply an exchange rate to convert these figures</div>
+            </div>
+            <div class="v5-panel-body" id="ccy-body"></div>
+          </div>
 
           <div class="v5-panel" id="review-panel" style="margin-top:14px;display:none;">
             <div class="v5-panel-header">

@@ -116,18 +116,15 @@ class SheetProfile:
 
 
 def _read_grid(path: str) -> Dict[str, List[List[Any]]]:
-    """Load every sheet as a 2-D list of values (data_only — cached values,
-    never formulas)."""
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    grid: Dict[str, List[List[Any]]] = {}
-    for sn in wb.sheetnames:
-        ws = wb[sn]
-        rows = [[c.value for c in row] for row in ws.iter_rows()]
-        grid[sn] = rows
-    try:
-        wb.close()
-    except Exception:
-        pass
+    """Load every sheet as a 2-D list of values (data_only — cached values, never formulas).
+    PARSE-ONCE: delegates to identity._parse_workbook_cached so the identity fingerprint pass and
+    this grid pass share ONE openpyxl open per run. The grid is byte-identical to the historical
+    [[c.value for c in row] for row in ws.iter_rows()]; a parse error is re-raised so profile_file's
+    except reproduces the exact error-profile."""
+    from . import identity
+    _bfp, _cfp, _lfp, grid, err = identity._parse_workbook_cached(path)
+    if err is not None:
+        raise err
     return grid
 
 

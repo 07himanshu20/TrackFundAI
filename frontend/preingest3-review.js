@@ -15,6 +15,7 @@
   let jobId = null;
   let poll = null;
   let PROV = [];          // provenance objects, referenced by index (no attr-escaping hazard)
+  let currentReport = null;  // U6 uncovered-currency report from the last run (drives the rate prompt)
 
   if (window.Auth && Auth.requireAuth) Auth.requireAuth();
   (function () { const u = window.Auth && Auth.getUser && Auth.getUser(); if (u) $('user-badge').textContent = u.email || u.username || '—'; })();
@@ -118,9 +119,101 @@
       ['Companies', c.companies], ['Read errors', c.read_errors],
     ].map(([l, v]) => `<div class="pi3-kpi"><div class="lab">${l}</div><div class="val">${v ?? 0}</div></div>`).join('');
     renderFiles(rv.files || []);
+    currentReport = rv.currency_report || null;
+    renderCurrencyPrompt(currentReport);
     renderReview(rv.review_queue || []);
     renderCompanies(rv.companies || []);
     renderDisclosures(rv.disclosures || []);
+  }
+
+  // ── U6 currency-coverage prompt — conditional on detection (never an always-rule) ──
+  // REQUESTS a rate for each uncovered currency (the fail-closed manual gate; the server re-validates);
+  // DISCLOSES foreign exposure a rate cannot surface (inform, not request). Skipping keeps figures HELD.
+  function renderCurrencyPrompt(report) {
+    const panel = $('ccy-panel'), body = $('ccy-body');
+    const uncovered = (report && report.uncovered) || [];
+    const fdu = (report && report.foreign_domicile_unresolved) || [];
+    const fdcu = (report && report.foreign_domicile_currency_unmapped) || [];
+    if (!uncovered.length && !fdu.length && !fdcu.length) { panel.style.display = 'none'; return; }
+    panel.style.display = 'block';
+    const asOf = (report && report.as_of) || '';
+
+    const reqRows = uncovered.map((u) => {
+      const sites = (u.sites || []).map((s) => esc(s.entity || s.file || '')).filter(Boolean).join(', ');
+      return `<div class="pi3-rate-row">
+          <span class="ccy">${esc(u.currency)}</span>
+          <input type="number" step="any" min="0" placeholder="INR per 1 ${esc(u.currency)}" data-ccy="${esc(u.currency)}" />
+          <input type="text" placeholder="source (e.g. RBI reference)" data-src="${esc(u.currency)}" />
+          ${sites ? `<div class="pi3-ccy-sites" style="grid-column:1/-1;">affects: ${sites}</div>` : ''}
+        </div>`;
+    }).join('');
+
+    const request = uncovered.length ? `
+      <div class="pi3-ccy-intro">These figures reported in a foreign currency and no rate is on file. Enter
+        the exchange rate <b>as of ${esc(asOf)}</b> to convert and emit them — anything you skip stays
+        <b>held</b>, never guessed. Manual entry and an uploaded rate schedule are equally trusted; both are
+        validated before anything converts.</div>
+      ${reqRows}
+      <div class="pi3-ccy-actions">
+        <button class="v5-btn v5-btn-primary" id="ccy-submit">Supply rates &amp; re-run</button>
+        <label class="v5-btn v5-btn-ghost" style="cursor:pointer;">&#8681; Upload a rate schedule instead
+          <input type="file" id="ccy-file" accept=".xlsx,.xls" style="display:none;" /></label>
+        <span class="pi3-muted" id="ccy-hint"></span>
+      </div>` : '';
+
+    const items = fdu.map((e) =>
+        `<div><b>${esc(e.entity)}</b> (${esc(e.implied_currency || '')}) — held upstream; a rate won't surface it.
+          Resolve the statement separately.</div>`)
+      .concat(fdcu.map((e) =>
+        `<div><b>${esc(e.entity)}</b> — domicile <i>${esc(e.domicile || '')}</i> maps to no known currency.
+          Add the domicile&rarr;currency mapping, then a rate.</div>`));
+    const disclose = items.length
+      ? `<div class="pi3-ccy-disclose"><b>Also foreign, but a rate won't help — for your awareness:</b>${items.join('')}</div>`
+      : '';
+
+    body.innerHTML = request + disclose;
+    if (uncovered.length) {
+      $('ccy-submit').onclick = submitManualRates;
+      $('ccy-file').onchange = (ev) => { if (ev.target.files[0]) submitScheduleFile(ev.target.files[0]); };
+    }
+  }
+
+  async function submitManualRates() {
+    const asOf = currentReport && currentReport.as_of;
+    const rows = [];
+    document.querySelectorAll('#ccy-body [data-ccy]').forEach((inp) => {
+      const ccy = inp.dataset.ccy, rate = String(inp.value || '').trim();
+      const srcEl = document.querySelector(`#ccy-body [data-src="${ccy}"]`);
+      const src = srcEl ? String(srcEl.value || '').trim() : '';
+      if (rate) rows.push({ currency: ccy, rate: rate, date: asOf, source: src });
+    });
+    if (!rows.length) { notify('Enter at least one rate', 'error'); return; }
+    $('ccy-submit').disabled = true; $('ccy-hint').textContent = 'Validating…';
+    try {
+      afterCardAccepted(await Auth.apiPost(`${API}/${jobId}/ratecard/`, { manual_rates: rows }));
+    } catch (e) {
+      $('ccy-submit').disabled = false; $('ccy-hint').textContent = '';
+      notify('Rate card refused: ' + (e.message || ''), 'error');   // the gate's reason surfaces verbatim
+    }
+  }
+
+  async function submitScheduleFile(file) {
+    const fd = new FormData();
+    fd.append('schedule_file', file, file.name);
+    $('ccy-hint').textContent = 'Reading schedule…';
+    try {
+      afterCardAccepted(await Auth.apiUpload(`${API}/${jobId}/ratecard/`, fd));
+    } catch (e) { $('ccy-hint').textContent = ''; notify('Schedule refused: ' + (e.message || ''), 'error'); }
+  }
+
+  function afterCardAccepted(r) {
+    const noop = (r.noop_currencies || []).map((n) => n.currency).join(', ');
+    const still = (r.still_uncovered || []).join(', ');
+    let msg = 'Rate card accepted — re-running';
+    if (noop) msg += ` · noted, not needed this run: ${noop}`;
+    if (still) msg += ` · still uncovered: ${still}`;
+    notify(msg, still ? 'info' : 'success');
+    rerun();
   }
 
   function statusClass(s) { return s === 'attributed' ? 'active' : s === 'read_error' ? 'rejected' : 'pending'; }

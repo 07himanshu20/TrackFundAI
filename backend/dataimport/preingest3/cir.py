@@ -128,6 +128,7 @@ class CIR:
     records: List[Record] = field(default_factory=list)
     disclosures: List[dict] = field(default_factory=list)   # U7 disclosure rows
     checks: List[dict] = field(default_factory=list)        # U7 hard/soft results
+    comparators: List[dict] = field(default_factory=list)   # REFERENCE-ONLY soft-check inputs (see below)
     run_signature: str = ''
     rate_card_id: str = ''
     as_of: str = ''
@@ -136,6 +137,20 @@ class CIR:
     # ── writers (extraction side) ───────────────────────────────────────
     def add(self, record: Record):
         self.records.append(record)
+
+    def add_comparator(self, comparator: dict):
+        """A fund's OWN top-down aggregate figure (e.g. total portfolio revenue from a
+        budget-vs-actual sheet) captured as the RHS of a U7 soft correspondence.
+
+        REFERENCE-ONLY, and the segregation is STRUCTURAL, not a convention: a comparator
+        is NOT a Record and carries no Figure, so it never flows through `records`,
+        `by_domain()`, `domain_dicts()`, `as_flat_dict()` or `provenance_rows()` — the only
+        paths the actuals assembler reads. It can therefore never be emitted as an
+        authoritative actual (which would breach the Budget-vs-Actual guard: a budget/forecast
+        number must never be read as an actual). Its sole consumer is the reconciliation
+        stage, which turns it into a published soft-check variance row. A reddening test
+        asserts no comparator value ever appears in an emitted output cell."""
+        self.comparators.append(comparator)
 
     def disclose(self, kind: str, detail: str, **extra):
         row = {'kind': kind, 'detail': detail}

@@ -66,23 +66,33 @@ class _Spec:
     base_kind: str = ''             # 'fee_base' (committed/invested/nav) | 'gain_base' | ''
 
 
+# Each rate concept lists BOTH the bare label and its '% '-suffixed form. Since normalise_label now
+# preserves '%' as a 'pct' token (it is the signal, see lexicon), a header like 'Carry %' normalises to
+# 'carry pct'; without the '%'-form synonym its label_coverage is diluted by the extra token and a longer
+# heading that merely mentions the concept ('Performance fee (carry) terms:') can out-rank the actual
+# rate row. The '%'-forms restore full coverage — the same authoring ownership_pct already uses
+# ('ownership %'/'stake %'). Only the RATE concepts get them (a '%' on a label term is meaningless).
 _CATALOGUE = [
     _Spec('management_fee', 'rate',
-          ('management fee', 'mgmt fee', 'amc fee', 'asset management fee', 'investment management fee'),
+          ('management fee', 'mgmt fee', 'amc fee', 'asset management fee', 'investment management fee',
+           'management fee %', 'mgmt fee %', 'amc fee %'),
           band=(Decimal('0.0025'), Decimal('0.035')),
           applies_base=True, applies_phase=True, base_kind='fee_base'),
     _Spec('carried_interest', 'rate',
-          ('carried interest', 'carry', 'performance fee', 'perf fee', 'incentive fee', 'profit share'),
+          ('carried interest', 'carry', 'performance fee', 'perf fee', 'incentive fee', 'profit share',
+           'carried interest %', 'carry %', 'performance fee %', 'incentive fee %'),
           band=(Decimal('0.05'), Decimal('0.30')),
           applies_base=True, base_kind='gain_base'),   # carry base = total vs realized gains (no detector yet → UNSPECIFIED)
     _Spec('hurdle_rate', 'rate',
-          ('hurdle', 'preferred return', 'pref return', 'hurdle rate', 'irr hurdle'),
+          ('hurdle', 'preferred return', 'pref return', 'hurdle rate', 'irr hurdle',
+           'hurdle %', 'hurdle rate %', 'preferred return %', 'pref return %'),
           band=(Decimal('0.04'), Decimal('0.12'))),
     _Spec('catch_up', 'rate',
-          ('catch up', 'catch-up', 'gp catch up', 'catchup'),
+          ('catch up', 'catch-up', 'gp catch up', 'catchup', 'catch up %', 'catch-up %', 'catchup %'),
           band=(Decimal('0'), Decimal('1'))),
     _Spec('clawback_holdback', 'rate',
-          ('clawback', 'holdback', 'clawback holdback reserve', 'holdback reserve'),
+          ('clawback', 'holdback', 'clawback holdback reserve', 'holdback reserve',
+           'clawback %', 'holdback %'),
           band=(Decimal('0'), Decimal('0.50'))),
     _Spec('waterfall', 'label',
           ('waterfall', 'distribution waterfall')),
@@ -342,11 +352,12 @@ def _read_fund_identity(grid) -> dict:
     RIGHT of a matching label. Whole-word match via the one shared matcher, never a copy."""
     out: dict = {}
     for row in grid:
-        lab_idx = next((i for i, v in enumerate(row) if isinstance(v, str) and str(v).strip()), None)
+        vals = [c[0] if isinstance(c, tuple) else c for c in row]     # cells are (value, number_format)
+        lab_idx = next((i for i, v in enumerate(vals) if isinstance(v, str) and str(v).strip()), None)
         if lab_idx is None:
             continue
-        label = row[lab_idx]
-        val = next((v for v in row[lab_idx + 1:] if v not in (None, '') and str(v).strip()), None)
+        label = vals[lab_idx]
+        val = next((v for v in vals[lab_idx + 1:] if v not in (None, '') and str(v).strip()), None)
         if val is None:
             continue
         if 'fund_name' not in out and lexicon.label_matches_any(label, _ID_FUND_NAME):
@@ -437,6 +448,117 @@ def resolve_actual_annual_fee(label, prof, *, content_fp='') -> Tuple[Optional[D
             if period not in ('balance', 'itd') and chosen[0] is None:   # annual/unknown-annual actual
                 chosen = (val, prov)
     return chosen[0], chosen[1], candidates
+
+
+# ── Reference-only fund AGGREGATE comparators (U7 soft-check RHS) ─────────────────
+# A fund file may state its OWN top-down aggregate portfolio figures — total portfolio
+# revenue / EBITDA, budget AND actual — typically on a budget-vs-actual or forecast sheet.
+# These are the RIGHT-HAND SIDE of the portfolio-vs-fund soft correspondence: they let the
+# bottom-up Σ of the company MIS files be checked against the fund's own recorded aggregate.
+#
+# They are REFERENCE-ONLY and NEVER emitted as authoritative actuals — that would breach the
+# Budget-vs-Actual guard (a budget/forecast number must never be read as an actual). They land
+# in cir.comparators (a Record-free store the assembler never reads), never in a Figure. This
+# reader is the deliberate EXTENSION of that guard, not a breach: it reaches into the fenced
+# sheet ONLY to draw reference comparators, tagged reference_only.
+#
+# Keyed on CONCEPT (revenue / EBITDA lexicon) + an AGGREGATE-ROLE marker (portfolio /
+# aggregate / consolidated / total) — never a sheet NAME — so it generalises to any fund's
+# file. A concept with no such line is simply absent (the reconciliation stage discloses it,
+# never fabricates a comparison).
+_AGG_REV_SYN = ('revenue', 'turnover', 'sales', 'total income', 'top line', 'topline',
+                'income from operations', 'operating revenue', 'revenue from operations',
+                'revenues from operations')
+_AGG_EBITDA_SYN = ('ebitda', 'operating profit', 'operating income')
+_AGG_ROLE_MARKERS = ('portfolio', 'aggregate', 'consolidated', 'investee', 'combined', 'total')
+# The stated period basis lives in a PARENTHETICAL qualifier ("(aggregate, ann.)"), which
+# normalise_label strips — so basis is read off the RAW label, whole-word, never the normalised form.
+_ANNUALISED_RE = re.compile(r'\bann|\bp\.?\s?a\b|per\s+annum', re.I)
+_REFERENCE_COMPARATORS = (
+    ('portfolio_revenue', _AGG_REV_SYN),
+    ('portfolio_ebitda', _AGG_EBITDA_SYN),
+)
+
+
+def _stated_basis(raw_label) -> str:
+    """The period basis a fund aggregate line states about ITSELF, read from the raw label's
+    parenthetical qualifier ('… ann.' / 'p.a.' / 'per annum'). 'annualised' or 'unspecified'
+    (never guessed — an unlabelled aggregate is disclosed as basis-unspecified, not assumed annual)."""
+    return 'annualised' if raw_label and _ANNUALISED_RE.search(str(raw_label)) else 'unspecified'
+
+
+def extract_reference_comparators(label, prof, *, content_fp='') -> List[dict]:
+    """Read a fund's OWN aggregate portfolio revenue/EBITDA (budget AND actual) as REFERENCE-ONLY
+    comparators — the RHS of the U7 portfolio-vs-fund soft check. Returns a list of dicts; each is
+    self-describing (concept, budget/actual value + cell, stated basis, provenance). Never mutates
+    the CIR and never produces a Figure — the caller files these under cir.comparators. Empty list
+    when the file states no such aggregate (absence is disclosed downstream, never fabricated)."""
+    out: List[dict] = []
+    for s in prof['sheets']:
+        rows = prof['grid'][s.sheet]
+        # a budget-vs-actual grid: a header row carrying BOTH a 'budget' and an 'actual' column.
+        # (Same detection the fee-actual reader uses — the ONE idiom, not a second hand-rolled scan.)
+        budget_col = actual_col = hdr = None
+        for r, row in enumerate(rows):
+            cols = {_norm(v): c for c, v in enumerate(row) if isinstance(v, str)}
+            if 'actual' in cols and 'budget' in cols:
+                budget_col, actual_col, hdr = cols['budget'], cols['actual'], r
+                break
+        if hdr is None:
+            continue                                   # no budget-vs-actual grid here — nothing to draw
+        for concept, syns in _REFERENCE_COMPARATORS:
+            for r in range(hdr + 1, len(rows)):
+                row = rows[r]
+                lbl = next((v for v in row if isinstance(v, str)), '')
+                if not (_has_syn(lbl, syns) and _has_syn(lbl, _AGG_ROLE_MARKERS)):
+                    continue                           # concept + aggregate-role marker BOTH required
+                bud = to_decimal(row[budget_col]) if budget_col < len(row) else None
+                act = to_decimal(row[actual_col]) if actual_col < len(row) else None
+                if bud is None and act is None:
+                    continue
+                out.append({
+                    'concept': concept, 'reference_only': True,
+                    'source_file': label, 'sheet': s.sheet, 'row_label': lbl,
+                    'content_fp': content_fp,
+                    'budget': (str(bud) if bud is not None else None),
+                    'actual': (str(act) if act is not None else None),
+                    'budget_cell': (f'{s.sheet}!{_a1(budget_col, r)}' if bud is not None else ''),
+                    'actual_cell': (f'{s.sheet}!{_a1(actual_col, r)}' if act is not None else ''),
+                    'basis': _stated_basis(lbl),
+                })
+                break                                   # first matching row per concept on this sheet
+    return out
+
+
+def extract_realised_gross(label, prof, *, content_fp='') -> Optional[dict]:
+    """The fund's OWN stated realised GROSS proceeds — the concept-matched RHS for the
+    realisations-vs-exits soft check (Σ of the exit ledger's gross proceeds ties to it). REFERENCE-ONLY.
+
+    Concept-matched to GROSS specifically: realised NET (a smaller figure) and realised GAIN
+    (proceeds − cost) are DIFFERENT concepts, and binding the exit-gross Σ to either would compare
+    two unlike things. The 'gross' qualifier usually sits in a parenthetical ('Realised value (gross
+    proceeds)') which normalise_label strips — so this matches the RAW label, and requires 'gross'
+    while excluding 'net'/'gain'. Returns None when the file states no explicit realised-gross line."""
+    for s in prof['sheets']:
+        rows = prof['grid'][s.sheet]
+        for r, row in enumerate(rows):
+            lbl = next((v for v in row if isinstance(v, str)), '')
+            low = str(lbl).lower()
+            if not ('realis' in low or 'realiz' in low) or 'gross' not in low:
+                continue                                 # realised + GROSS only (net/gain are other concepts)
+            val = vcol = None
+            for c, v in enumerate(row):                  # the value = first numeric cell on the row
+                if isinstance(v, (int, float)):
+                    val, vcol = to_decimal(v), c
+                    break
+            if val is None:
+                continue
+            return {'concept': 'realised_gross', 'reference_only': True,
+                    'source_file': label, 'sheet': s.sheet, 'row_label': lbl,
+                    'content_fp': content_fp, 'actual': str(val), 'budget': None,
+                    'actual_cell': f'{s.sheet}!{_a1(vcol, r)}', 'budget_cell': '',
+                    'basis': 'cumulative'}
+    return None
 
 
 def fee_base_phase(label, path, prof, *, content_fp='') -> Tuple[str, str, Optional[Provenance]]:

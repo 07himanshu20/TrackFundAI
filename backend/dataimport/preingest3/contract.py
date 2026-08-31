@@ -37,7 +37,8 @@ CONCEPT_LEXICON = {
     # operating (company MIS)
     'revenue': ['revenue', 'turnover', 'sales', 'total income', 'net sales',
                 'gross billings', 'total revenue', 'income from operations',
-                'operating revenue', 'total sales'],
+                'operating revenue', 'total sales', 'revenue from operations',
+                'revenues from operations'],
     'cogs': ['cost of goods sold', 'cogs', 'cost of sales', 'cost of revenue',
              'direct costs', 'cost of goods'],
     'gross_profit': ['gross profit', 'gross margin', 'gp', 'gross profit/(loss)'],
@@ -242,14 +243,23 @@ CONFIDENCE_TAU = 0.55          # classifier review gate
 
 
 def contract_signature() -> str:
-    """Part of the run signature / cache key. Any change to schema, lexicon,
-    identities, checks or tolerances changes this, so records built under an old
-    contract are never silently reused (U8)."""
+    """Part of the run signature / cache key. Any change to schema, lexicon (SEED *or*
+    reviewer-LEARNED), identities, checks or tolerances changes this, so records built under
+    an old contract are never silently reused (U8).
+
+    The learned lexicon is included deliberately: the seed CONCEPT_LEXICON is .py source
+    (caught by net_logic_version), but the runtime-grown synonyms live in a JSON file that no
+    source hash sees — omitting them left a live D8 hole where an approved synonym silently
+    served a stale extraction. Deferred import breaks the lexicon↔contract cycle."""
     from ..preingest2.schema import schema_signature
+    from .lexicon import learned_lexicon
+    learned = learned_lexicon()
     blob = json.dumps({
         'v': CONTRACT_VERSION,
         'schema': schema_signature(),
         'lexicon': {k: sorted(v) for k, v in CONCEPT_LEXICON.items()},
+        'learned_lexicon': {k: sorted(v) if isinstance(v, (list, tuple)) else [str(v)]
+                            for k, v in sorted(learned.items())},
         'identities': [i['name'] for i in IDENTITIES],
         'checks': [(c['id'], c['class']) for c in CHECKS],
         'tolerances': {k: str(v) for k, v in TOLERANCES.items()},

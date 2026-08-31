@@ -36,7 +36,7 @@ from .gate import AUTO
 from .identity import compute_identity
 from .profiler import _CCY_HINTS, _UNIT_HINTS, _cell_type, profile_file
 from .profiler import token_present as _token_present
-from .quantity import Quantity
+from .quantity import EXCEL_ERRORS, Quantity
 
 _CR = Decimal('10000000')
 _Q = Decimal('1').scaleb(-ROUNDING_DP)
@@ -109,6 +109,22 @@ def _zero_stock_hold(concept, value_cr) -> bool:
     exact-zero gap that check skips."""
     return (value_cr is not None and value_cr == 0
             and concept_measure(concept) == 'money' and concept_nature(concept) == 'stock')
+
+
+def _figure_anchor_hold_reason(concept, value_cr, anchor_cr):
+    """The ONE figure-anchor magnitude sanity: a money value >_FIGURE_ANCHOR_ORDERS orders of magnitude
+    from the whole-company scale is a likely wrong-row bind → return its hold_reason string; else None.
+    EXEMPT (_FIGURE_SANITY_EXEMPT): profit/burn concepts are legitimately near-zero or negative — a real
+    breakeven EBITDA is 'orders below company scale' by ratio (Aliste FYTD EBITDA = −₹0.01 Cr vs ₹82 Cr) —
+    so magnitude is never a wrong-row signal for them. CENTRALISED so the two emit paths (deterministic
+    collapse + re-source) apply one identical rule and cannot DRIFT — the drift that silently held Aliste
+    EBITDA (this predicate lived in the re-source path with the exemption, but the collapse path had a
+    duplicate WITHOUT it)."""
+    if (anchor_cr and value_cr is not None and value_cr != 0 and concept not in _FIGURE_SANITY_EXEMPT and
+            abs(math.log10(abs(float(value_cr)) / float(anchor_cr))) > _FIGURE_ANCHOR_ORDERS):
+        return (f'₹{value_cr}Cr is >{_FIGURE_ANCHOR_ORDERS:.0f} orders from '
+                f'company scale ₹{float(anchor_cr):.0f}Cr — likely wrong row')[:90]
+    return None
 
 
 def _a1(col0, row0) -> str:
@@ -375,6 +391,36 @@ def _find_concept_row(rows, label_col, concept, r0, r1, axis_cols) -> Optional[i
     return best_row
 
 
+def _find_equivalent_stock_row(rows, label_col, eq_concept, r0, r1, axis_cols) -> Optional[int]:
+    """Locate the balance row for a CONCEPT_EQUIVALENCE anchor (e.g. closing_cash → 'Closing
+    balance') that the cross-concept _DISAMBIG picker cannot reach because the anchor is NOT a
+    disambiguation concept. Deliberately a DIRECT match on the anchor's OWN synonyms, not the
+    cross-concept contest — so it never perturbs how the MIS targets bind (adding closing_cash
+    to _DISAMBIG would tie 'Closing Cash Balance' against `cash` and regress that bind). The
+    _AGG_ANTI guard still blocks an opening line. Fail-closed: needs axis data and a NON-flow
+    label; picks the best synonym match; None if absent so the caller's hold simply stays."""
+    if label_col is None:
+        return None
+    best_row, best_score = None, 0.0
+    for r in range(r0, min(r1, len(rows))):
+        if not (label_col < len(rows[r]) and _cell_type(rows[r][label_col]) == 'text'):
+            continue
+        label = rows[r][label_col]
+        if _is_flow_label(label):
+            continue
+        if set(lexicon.normalise_label(label).split()) & _AGG_ANTI:   # opening/beginning line
+            continue
+        if not any(pc.col < len(rows[r]) and _cell_type(rows[r][pc.col]) == 'num' for pc in axis_cols):
+            continue
+        strength, coverage = lexicon.match_detail(label, eq_concept)
+        if strength == 'none':
+            continue
+        score = coverage + (2.0 if strength == 'exact' else 1.0)
+        if score > best_score:
+            best_row, best_score = r, score
+    return best_row
+
+
 def _sheet_verdict_rank(rows, ax, label_col, found) -> int:
     """Axis-2 for the selector: the best family verdict among the families the FOUND concepts
     belong to. Consulted ONLY to break a (tier, n_found, n_cols) tie — verdict must NEVER override
@@ -430,6 +476,39 @@ def _sigma_consolidated_pick(top):
     return by_label.get(pick) if pick else None
 
 
+def _concept_row_all_error(rows, r: int, columns) -> bool:
+    """True iff a located concept row's period-axis cells are error-dominated — at least one
+    spreadsheet error (#REF!/#DIV!/…) and NO real (non-zero) number. Such a row carries no
+    extractable figure: a deleted-range #REF! or a severed external link, the hallmark of a
+    DEFUNCT sheet (a hidden, abandoned working copy the file author left behind).
+
+    It must not count as a 'found' concept when ranking sheets: `_best_sheet` scores a sheet by
+    how many target concepts its LABELS match, then breaks ties on column count — so a wider
+    sheet whose concept rows are all #REF! out-ranks a narrow CLEAN sheet, and the run holds a
+    figure that is cleanly present elsewhere in the same file (Aliste: the hidden, stale
+    'Profit & Loss' EBITDA row = 54 #REF! / 0 numbers, out-columns the live, clean 'P&L').
+
+    NB visibility is NOT the discriminator — a CORRECT sheet can also be hidden (Analisa's
+    ground-truthed 'ProfitLoss (23)'). VALUE VALIDITY is: this keys only on whether the row
+    holds a real figure. A stray numeric 0 amid the #REF!s (a broken formula openpyxl read as 0)
+    is breakage residue, not a reported figure. A CLEAN all-zero row (no errors) is left
+    untouched — a legitimately-zero line is never disqualified — so behaviour changes ONLY where
+    a concept row is genuinely error-dominated: a sheet-choice signal, never a value decision."""
+    row = rows[r] if r < len(rows) else []
+    n_err = n_real = 0
+    for col in columns:
+        ci = col.col
+        v = row[ci] if ci < len(row) else None
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, (int, float)):
+            if v != 0:
+                n_real += 1                       # a real (non-zero) reported figure
+        elif isinstance(v, str) and v.strip() in EXCEL_ERRORS:
+            n_err += 1
+    return n_err > 0 and n_real == 0
+
+
 def _best_sheet(prof, concepts) -> Optional[Tuple]:
     """Pick the sheet whose TIME-SERIES axis carries the most target concepts — now TIER-AWARE.
     Comparison grids are excluded (not a time series).
@@ -466,7 +545,11 @@ def _best_sheet(prof, concepts) -> Optional[Tuple]:
         found = {}
         for concept in concepts:
             row = _find_concept_row(rows, lc, concept, ax.axis_rows[0] + 1, len(rows), ax.columns)
-            if row is not None:
+            # a located row whose axis cells are ENTIRELY #REF!/error (no real number) carries no
+            # figure — it must not count toward this sheet's concept coverage, else a wider
+            # #REF!-riddled (often hidden, defunct) sheet out-columns a narrow clean one and a
+            # recoverable figure is held. R1a — value validity, NOT sheet visibility.
+            if row is not None and not _concept_row_all_error(rows, row, ax.columns):
                 found[concept] = row
         if not found:
             continue
@@ -531,7 +614,8 @@ def _family_verdicts(rows, ax, label_col) -> dict:
     return out
 
 
-def _alt_stock_sources(prof, concept, selected_sheet, rate_card, geo_ccy, inr_mentioned):
+def _alt_stock_sources(prof, concept, selected_sheet, rate_card, geo_ccy, inr_mentioned, as_of=None,
+                       require_bound=False):
     """Every OTHER sheet that independently carries `concept` (a stock) on a time axis, as
     (sheet, declared_scale, {scale: value_cr}) for the cross-sheet reconciler. Each candidate
     scale's ₹Cr is computed from the alt sheet's OWN declared currency (FX-normalised), so a
@@ -561,7 +645,8 @@ def _alt_stock_sources(prof, concept, selected_sheet, rate_card, geo_ccy, inr_me
             continue
         values = {pc.col: rows[r][pc.col] for pc in ax.columns
                   if pc.col < len(rows[r]) and _cell_type(rows[r][pc.col]) == 'num'}
-        col = periods.collapse(concept, concept_nature(concept), ax.columns, values)
+        col = periods.collapse(concept, concept_nature(concept), ax.columns, values, as_of=as_of,
+                               require_bound=require_bound)
         if col.value is None or col.escalate:
             continue
         scale_crs, ok = {}, True
@@ -690,15 +775,14 @@ def _emit_from_collapse(concept, col, prov, *, stmt_kind, frame, rows, ax, label
         if _zero_stock_hold(concept, value_cr):
             return Figure(concept, None, None, prov, held=True, basis=col.basis, months=col.months,
                           hold_reason='money stock rounds to ₹0 Cr — empty/wrong-row bind — held')
-        if (anchor_cr and value_cr != 0 and
-                abs(math.log10(abs(float(value_cr)) / float(anchor_cr))) > _FIGURE_ANCHOR_ORDERS):
+        _anchor_reason = _figure_anchor_hold_reason(concept, value_cr, anchor_cr)
+        if _anchor_reason:
             return Figure(concept, None, None, prov, held=True, basis=col.basis, months=col.months,
-                          hold_reason=(f'₹{value_cr}Cr is >{_FIGURE_ANCHOR_ORDERS:.0f} orders '
-                                       f'from company scale ₹{float(anchor_cr):.0f}Cr — likely wrong row')[:90])
+                          hold_reason=_anchor_reason)
         return Figure(concept, value_cr, None, prov, basis=col.basis, months=col.months)
-    except Exception as e:  # noqa: BLE001 — never crash; hold
-        return Figure(concept, None, None, prov, held=True, basis=col.basis, months=col.months,
-                      hold_reason=str(e)[:90])
+    except Exception as e:  # noqa: BLE001 — a genuine code fault: FX-uncovered is held earlier at the
+        return Figure(concept, None, None, prov, held=True, basis=col.basis, months=col.months,  # frame
+                      hold_reason=f'UNEXPECTED_ERROR: {type(e).__name__}: {e}'[:90])
 
 
 def _family_carriers(prof, concept, exclude_sheet):
@@ -742,7 +826,8 @@ def _family_carriers(prof, concept, exclude_sheet):
     return cands
 
 
-def _resource_value_cr(concept, rows, ax, lc, row, *, geo_ccy, inr_mentioned, anchor_cr, rate_card):
+def _resource_value_cr(concept, rows, ax, lc, row, *, geo_ccy, inr_mentioned, anchor_cr, rate_card,
+                       as_of=None, require_bound=False):
     """₹Cr for a single concept row on an alternate sheet, via that sheet's own frame — used by
     the cross-tab consistency check. None if it can't be resolved cleanly (never guesses)."""
     acts = _actual_columns(rows, ax)
@@ -750,7 +835,8 @@ def _resource_value_cr(concept, rows, ax, lc, row, *, geo_ccy, inr_mentioned, an
             if pc.col < len(rows[row]) and _cell_type(rows[row][pc.col]) == 'num'}
     if not vals:
         return None
-    col = periods.collapse(concept, concept_nature(concept), acts, vals)
+    col = periods.collapse(concept, concept_nature(concept), acts, vals, as_of=as_of,
+                           require_bound=require_bound)
     if col.escalate or col.value is None:
         return None
     ccy, unit = _local_currency_unit(rows, ax)
@@ -767,7 +853,8 @@ def _resource_value_cr(concept, rows, ax, lc, row, *, geo_ccy, inr_mentioned, an
         return None
 
 
-def _sheet_corroborated(prof, source_sheet, *, geo_ccy, inr_mentioned, anchor_cr, rate_card):
+def _sheet_corroborated(prof, source_sheet, *, geo_ccy, inr_mentioned, anchor_cr, rate_card, as_of=None,
+                        require_bound=False):
     """Is `source_sheet` corroborated as THIS company's OWN statement? True iff at least one of its
     money concepts AGREES (same ₹Cr, within a rounding tolerance) with the same concept on ANOTHER
     income-genuine sheet. Cross-sheet agreement is format-agnostic evidence the sheet is the real
@@ -789,19 +876,21 @@ def _sheet_corroborated(prof, source_sheet, *, geo_ccy, inr_mentioned, anchor_cr
         if r is None:
             continue
         v0 = _resource_value_cr(concept, rows, ax, lc, r, geo_ccy=geo_ccy,
-                                inr_mentioned=inr_mentioned, anchor_cr=anchor_cr, rate_card=rate_card)
+                                inr_mentioned=inr_mentioned, anchor_cr=anchor_cr, rate_card=rate_card,
+                                as_of=as_of, require_bound=require_bound)
         if not v0:
             continue
         for _d, _k, _n, s2, rows2, ax2, lc2, row2 in _family_carriers(prof, concept, source_sheet):
             v2 = _resource_value_cr(concept, rows2, ax2, lc2, row2, geo_ccy=geo_ccy,
-                                    inr_mentioned=inr_mentioned, anchor_cr=anchor_cr, rate_card=rate_card)
+                                    inr_mentioned=inr_mentioned, anchor_cr=anchor_cr, rate_card=rate_card,
+                                    as_of=as_of, require_bound=require_bound)
             if v2 and abs(math.log10(abs(float(v0)) / abs(float(v2)))) <= _AGREE:
                 return True
     return False
 
 
 def _family_resource(prof, concept, primary_sheet, *, ident, label, geo_ccy, inr_mentioned,
-                     anchor_cr, rate_card):
+                     anchor_cr, rate_card, as_of=None, require_bound=False):
     """fork-b: deterministically re-source ONE concept from its best family-appropriate OTHER
     sheet — the architectural fix for 'a company's KPIs span P&L / balance-sheet / cash-flow, so
     one tab cannot source them all'. Resolves THAT sheet's own monetary frame from all its money
@@ -824,7 +913,8 @@ def _family_resource(prof, concept, primary_sheet, *, ident, label, geo_ccy, inr
         vals = {pc.col: rows[r][pc.col] for pc in acts
                 if pc.col < len(rows[r]) and _cell_type(rows[r][pc.col]) == 'num'}
         if vals:
-            collapsed[c] = periods.collapse(c, concept_nature(c), acts, vals)
+            collapsed[c] = periods.collapse(c, concept_nature(c), acts, vals, as_of=as_of,
+                                            require_bound=require_bound)
     local_ccy, local_unit = _local_currency_unit(rows, ax)
     money_samples = [cc.value for cn, cc in collapsed.items()
                      if concept_measure(cn) == 'money' and not cc.escalate and cc.value is not None]
@@ -850,7 +940,8 @@ def _family_resource(prof, concept, primary_sheet, *, ident, label, geo_ccy, inr
     # a count with no cross-sheet money check. Applies to revenue/EBITDA (INCOME_STATEMENT) only.
     if (family.CONCEPT_FAMILY.get(concept) == family.INCOME_STATEMENT
             and not _sheet_corroborated(prof, sheet, geo_ccy=geo_ccy, inr_mentioned=inr_mentioned,
-                                        anchor_cr=anchor_cr, rate_card=rate_card)):
+                                        anchor_cr=anchor_cr, rate_card=rate_card, as_of=as_of,
+                                        require_bound=require_bound)):
         return Figure(concept, None, None, prov, held=True, basis=fig.basis, months=fig.months,
             hold_reason=(f're-source {sheet} not cross-sheet-corroborated as own income statement '
                          f'(possible subsidiary/stray) — held')[:90])
@@ -873,6 +964,15 @@ def extract_company(label: str, path: str, *, rate_card, entity: str = None,
     prof = profile_file(label, path)
     entity = entity or label
     _model = use_model and llm._resolve_provider() is not None
+    # The source's own stated reporting boundary (filename month; header-cell deferred). Threaded into
+    # every value-selecting collapse so a forward-projection column past this date is never picked/summed.
+    # When NO boundary resolves (a file whose name carries no month), the value path must NOT fall back to
+    # the old unguarded max(order) — that is the projection hole this rung closes. `require_bound` makes
+    # collapse fail-CLOSED in that case (hold a projection-ambiguous month selection). Flow-derived tier
+    # (derive the bound from a flow's own latest actual month, flagged) is deferred to the U6 turn-on,
+    # where the currently-None-bound files (CSS/CPM, numeric-prefix names) first begin to emit.
+    stated_asof = _stated_as_of(prof, path)
+    require_bound = stated_asof is None
 
     best = _best_sheet(prof, MIS_CONCEPTS)
     if best is None:
@@ -886,7 +986,8 @@ def extract_company(label: str, path: str, *, rate_card, entity: str = None,
                 source_file=label, content_fingerprint=ident.content_fp,
                 sheet='', cell='', row_label=''), gap=True)
         _model_fill(prof, ident, list(MIS_CONCEPTS), entity=entity, domicile=domicile,
-                    anchor_cr=anchor_cr, rate_card=rate_card, fields=fields, source_label=label)
+                    anchor_cr=anchor_cr, rate_card=rate_card, fields=fields, source_label=label,
+                    as_of=stated_asof, require_bound=require_bound)
         if all(not isinstance(fields[c], Figure) or (fields[c].held or fields[c].gap)
                for c in MIS_CONCEPTS):
             fields['_note'] = 'no time-series statement found'
@@ -911,6 +1012,23 @@ def extract_company(label: str, path: str, *, rate_card, entity: str = None,
     # deferred banner-reader, and an UNLABELED-non-duplicate scenario column summed into a flow is the
     # documented open residual (guard A catches only DUPLICATE-period conflicts).
     acts = _actual_columns(rows, ax)
+    # ── Rung-2 bound-resolution ladder (now the sheet + concept rows are known) ──────────────────────
+    # filename (stated_asof) → under-statement distrust → flow-derived (flagged) → fail-closed floor.
+    # `require_bound` stays True ONLY when NO bound resolves, so the value path is never left fail-open.
+    flow_derived = False
+    if stated_asof is not None and _filename_understated(rows, acts, found, stated_asof):
+        # The filename is a single point of trust; ≥2 valued MONTH columns dated AFTER it on a concept's
+        # own row means the file was re-saved with newer data under a stale name. The bound would silently
+        # drop legitimate recent actuals and bind an older column — a WRONG value staleness can't catch.
+        # Distrust the name and fall to the fail-closed floor (NOT flow-derived: on a contradicted file the
+        # 'newer' columns are themselves unproven). A lone forecast stub (<2) never trips this.
+        stated_asof, require_bound = None, True
+    elif stated_asof is None:
+        # No filename month at all → derive an in-DOCUMENT boundary from a flow's own latest actual month
+        # (tier 3, FLAGGED — not projection-immune). Only when even that is absent does the floor hold.
+        fd = _flow_derived_asof(rows, acts, found)
+        if fd is not None:
+            stated_asof, require_bound, flow_derived = fd, False, True
     collapsed = {}
     provs = {}
     colmap = {pc.col: pc for pc in ax.columns}
@@ -926,7 +1044,8 @@ def extract_company(label: str, path: str, *, rate_card, entity: str = None,
                   if pc.col < len(rows[row]) and _cell_type(rows[row][pc.col]) == 'num'}
         if not values:
             continue
-        collapsed[concept] = periods.collapse(concept, concept_nature(concept), acts, values)
+        collapsed[concept] = periods.collapse(concept, concept_nature(concept), acts, values,
+                                              as_of=stated_asof, require_bound=require_bound)
         _cite_value_cells(provs[concept], collapsed[concept], row, colmap)
 
     # ── Resolve the STATEMENT monetary frame ONCE (money concepts) → apply to ALL ──
@@ -958,16 +1077,53 @@ def extract_company(label: str, path: str, *, rate_card, entity: str = None,
                 (fig.held and 'wrong-source' in (fig.hold_reason or '')))):
             continue
         newfig = _family_resource(prof, concept, sheet, ident=ident, label=label, geo_ccy=geo_ccy,
-                                  inr_mentioned=inr_mentioned, anchor_cr=anchor_cr, rate_card=rate_card)
+                                  inr_mentioned=inr_mentioned, anchor_cr=anchor_cr, rate_card=rate_card,
+                                  as_of=stated_asof, require_bound=require_bound)
         if isinstance(newfig, Figure) and not newfig.gap:        # found on a family sheet (emit or informative hold)
             fields[concept] = newfig
+
+    # ── R4: deterministic cash ⇐ closing_cash recovery (advisor 2026-08-14) ────────
+    # The best sheet's row-picker binds `cash` (a STOCK) to a FLOW line ("Cash Collected"/
+    # "Cash outflow") because the cash lexicon matches "cash*" flows, while the true bank stock
+    # ("Closing balance") lacks a 'cash' token and is reachable ONLY via the closing_cash
+    # synonym. closing_cash is not a MIS target and never enters `remaining`, so the model-path
+    # cash⇐closing_cash equivalence can never locate it — the recovery is absent from the
+    # deterministic path entirely. When a stock target is HELD on a flow row, locate its
+    # balance-sheet equivalent on the SAME statement and rebind. Fail-closed both ways: the
+    # equivalent row must itself be a proper NON-flow balance, and the rebound figure must clear
+    # the full _emit_from_collapse gate (stock/flow, zero-stock, anchor-orders) or the hold
+    # stays. Universal — keys off concept_nature+flow-label, no sheet/label hardcoding.
+    for tgt, eq in CONCEPT_EQUIVALENCE.items():
+        fig = fields.get(tgt)
+        if not (isinstance(fig, Figure) and fig.held and concept_nature(tgt) == 'stock'
+                and _is_flow_label(fig.provenance.row_label)):
+            continue
+        eq_row = _find_equivalent_stock_row(rows, label_col, eq, ax.axis_rows[0] + 1, len(rows), ax.columns)
+        if eq_row is None:
+            continue
+        eq_label = str(rows[eq_row][label_col]).strip()
+        eq_vals = {pc.col: rows[eq_row][pc.col] for pc in acts
+                   if pc.col < len(rows[eq_row]) and _cell_type(rows[eq_row][pc.col]) == 'num'}
+        if not eq_vals:
+            continue
+        eq_prov = Provenance(source_file=label, content_fingerprint=ident.content_fp, sheet=sheet,
+                             cell=_a1(label_col, eq_row), row_label=eq_label)
+        eq_col = periods.collapse(tgt, concept_nature(tgt), acts, eq_vals, as_of=stated_asof,
+                                  require_bound=require_bound)
+        _cite_value_cells(eq_prov, eq_col, eq_row, colmap)
+        newfig = _emit_from_collapse(tgt, eq_col, eq_prov, stmt_kind=stmt_kind, frame=frame,
+                                     rows=rows, ax=ax, label_col=label_col, ebitda_row=None,
+                                     anchor_cr=anchor_cr, rate_card=rate_card)
+        if isinstance(newfig, Figure) and not (newfig.held or newfig.gap):
+            fields[tgt] = newfig
 
     if _model:                                       # locator fallback on holds/gaps only
         held = [c for c in MIS_CONCEPTS
                 if isinstance(fields.get(c), Figure) and (fields[c].held or fields[c].gap)]
         if held:
             _model_fill(prof, ident, held, entity=entity, domicile=domicile,
-                        anchor_cr=anchor_cr, rate_card=rate_card, fields=fields, source_label=label)
+                        anchor_cr=anchor_cr, rate_card=rate_card, fields=fields, source_label=label,
+                        as_of=stated_asof, require_bound=require_bound)
     # ── Cross-sheet STOCK reconciliation (Increment 3a, LOAD-BEARING) ─────────
     # Every emitted money STOCK is cross-checked against the same concept independently
     # sourced on OTHER sheets — ANCHOR-GATED and scale-AWARE (reconcile.stock_corroboration):
@@ -984,7 +1140,8 @@ def extract_company(label: str, path: str, *, rate_card, entity: str = None,
         fig = fields.get(c)
         if not (isinstance(fig, Figure) and fig.confirmed):
             continue
-        alts = _alt_stock_sources(prof, c, sheet, rate_card, geo_ccy, inr_mentioned)
+        alts = _alt_stock_sources(prof, c, sheet, rate_card, geo_ccy, inr_mentioned, as_of=stated_asof,
+                                  require_bound=require_bound)
         res = reconcile.stock_corroboration(f'{entity}_{c}', fig, alts, anchor_cr=anchor_cr)
         stock_recon[c] = res
         if reconcile.blocks_run([res]):                     # genuine divergence → HOLD the emit
@@ -999,6 +1156,14 @@ def extract_company(label: str, path: str, *, rate_card, entity: str = None,
     # re-source anything here, so every emit — and thus coverage/determinism/cite-evidence —
     # is byte-for-byte unchanged. Coverage must stay EXACTLY 12/0/28 (neutral, both directions).
     fields['_family_verdicts'] = _family_verdicts(rows, ax, label_col)
+    # Tier-3 disclosure: when the reporting boundary was FLOW-DERIVED (no filename month), flag every
+    # emitted figure so the weaker (not projection-immune) boundary is auditable, never silent.
+    if flow_derived:
+        for c in MIS_CONCEPTS:
+            f = fields.get(c)
+            if isinstance(f, Figure) and f.confirmed and f.provenance is not None:
+                f.provenance.note = (f.provenance.note + '; ' if f.provenance.note else '') + \
+                    'as-of flow-derived (no stated/filename reporting date) — period boundary unverified'
     _finalize_terminal_state(fields)                 # choke: no figure ships in limbo
     return Record('mis', entity_id=entity, fields=fields)
 
@@ -1068,7 +1233,106 @@ def _actual_columns(rows, ax) -> list:
     return keep or list(ax.columns)
 
 
-def _collapse_row(rows, cols, concept, rec):
+# ── Stated reporting as-of (Rung 2): a NON-CIRCULAR reporting boundary ────────────────────────────
+# The value path selects the latest / summed period column. To exclude a forward PROJECTION column
+# (an unlabeled future month the scenario filter misses), collapse needs the source's own STATED
+# reporting date — read from a DECLARED source, NEVER from a data column (that would be circular: a
+# projected column would inflate the very bound meant to exclude it). Returns (year, month) or None;
+# None → the caller keeps today's behaviour (no bound), so a source without a declared date is never
+# corrupted — it simply gets no projection guard.
+#
+# The bound is the FILENAME's reporting month. A DELIBERATELY-REJECTED alternative was an in-cell
+# 'as on <date>' header scan: measured on the real files it FALSE-POSITIVES on operational notes and
+# prior-year comparatives that share the cue words — Hubler's only 'as on' cell is a stock NOTE
+# ("Orders under delivery - as on 1 march 2023") that would bound out every Feb-2026 actual, and
+# Agnikul carries both true statement titles AND note/comparative dates ("299 employees as on 28th
+# Feb 2025", "For YE as on 31st March 2025"). A reliable header as-of needs a statement-TITLE gate
+# (the date must sit in a 'BALANCE SHEET / INCOME STATEMENT / CASH FLOW … as at' title, not a note),
+# which is a separately-validated enhancement. The filename month is present and consistent across
+# every file and is immune to that in-cell noise, so it is the operative bound today.
+_FILE_PREPDATE_RE = re.compile(r'20\d\d[_\-]\d{1,2}(?:[_\-]\d{1,2})?')   # yyyy_mm_dd prep/version stamp
+
+
+def _filename_month(path) -> Optional[tuple]:
+    """The reporting month declared in the FILENAME as (year, month) — the LAST spelled month-name +
+    year token (…_MIS_Feb26 / _MIS_Feb_2026), after removing the numeric yyyy_mm_dd prep-date the fund
+    prefixes (so 'AVF_2026_03_12_…_Feb26' reads Feb-2026, not Mar). None if no spelled month present.
+    Separators (._-) are normalised to spaces first because '_' is a regex word char — anchoring on
+    \\b would never fire inside 'mis_feb26'. The digit requirement after the month name stops a
+    company name from false-matching; the year window rejects a stray count read as a year."""
+    base = _FILE_PREPDATE_RE.sub(' ', os.path.basename(path).lower())
+    base = re.sub(r'[^a-z0-9]+', ' ', base)          # ._- → space: 'mis_feb26' → 'mis feb26'
+    best = None
+
+    def _yy(s):
+        y = int(s)
+        return y + 2000 if y < 100 else y
+
+    # month-then-year ('Feb26', 'Feb 2026') AND year-then-month ('2025 May', '2025_May_Analisa') —
+    # both orders occur across fund conventions; the LAST spelled month-year token wins.
+    for m in re.finditer(r"([a-z]{3,9})\s*(\d{2,4})", base):          # month → year
+        mon = m.group(1)[:3]
+        if mon in periods._MONTHS and 2000 <= _yy(m.group(2)) <= 2100:
+            best = (_yy(m.group(2)), periods._MONTHS[mon])
+    for m in re.finditer(r"(\d{4})\s+([a-z]{3,9})", base):            # year → month (4-digit year only)
+        mon = m.group(2)[:3]
+        if mon in periods._MONTHS and 2000 <= int(m.group(1)) <= 2100:
+            best = (int(m.group(1)), periods._MONTHS[mon])
+    return best
+
+
+def _stated_as_of(prof, path) -> Optional[tuple]:
+    """The source's own stated reporting boundary as (year, month) — the filename's reporting month —
+    or None when the filename declares no month (caller then keeps today's unbounded behaviour). See
+    the module note above for why the in-cell header scan is deliberately excluded until title-gated."""
+    return _filename_month(path)
+
+
+def _flow_derived_asof(rows, cols, found) -> Optional[tuple]:
+    """Tier-3 bound (the agreed ladder's rung below the filename): the latest MONTH period carrying a
+    value on a FLOW concept's row (revenue/EBITDA) — an IN-DOCUMENT reporting boundary when the filename
+    declares no month. FLAGGED, because it is not projection-immune: a flow can itself carry a forecast
+    column, so the derived date can be an over-statement (never an under-statement — a flow's actuals only
+    run to its latest real month). None when no flow row has a dated month value → caller fails closed."""
+    best = None
+    for concept in ('revenue', 'ebitda'):
+        row = found.get(concept)
+        if row is None:
+            continue
+        for pc in cols:
+            if (pc.kind == periods.MONTH and pc.order != (0, 0)
+                    and pc.col < len(rows[row]) and _cell_type(rows[row][pc.col]) == 'num'):
+                if best is None or pc.order > best:
+                    best = pc.order
+    return best
+
+
+def _filename_understated(rows, cols, found, asof) -> bool:
+    """True when the DATA contradicts the filename as-of — a valued MONTH column dated after `asof`, on a
+    located concept's own row, that is NOT a cadence-peel outlier. The discriminator is CADENCE, not a
+    count: a genuine off-by-one under-statement (a file re-saved ONE month forward under a stale name) is
+    a single cadence-CONSISTENT plausible-next-month — a count threshold would miss it — whereas a typo
+    tail like Clientell's '2026-12-25' is a gross-jump outlier the cadence-peel already removes, so it is
+    excluded here and never trips the guard. The caller then distrusts the filename and fails closed."""
+    peeled = periods._period_outlier_cols([c for c in cols if c.kind in (periods.MONTH, periods.QUARTER)])
+    for row in found.values():
+        if row is None:
+            continue
+        for pc in cols:
+            # a column dated AFTER the filename as-of contradicts the name ONLY if it carries a
+            # real (NON-ZERO) figure. A future-month column holding 0 is an empty placeholder the
+            # template pre-lays (Aliste 'P&L' Mar-2026 = 0 after a Feb-2026 as-of), NOT newer
+            # data — treating it as data distrusts a correct filename and fail-closes a live
+            # figure. (Same principle _conflicting_periods already applies: a zero/blank is not
+            # a real value.) A genuine one-month-forward re-save still carries real actuals here.
+            if (pc.kind == periods.MONTH and pc.order != (0, 0) and pc.order > asof
+                    and pc.col not in peeled and pc.col < len(rows[row])
+                    and _cell_type(rows[row][pc.col]) == 'num' and rows[row][pc.col] != 0):
+                return True
+    return False
+
+
+def _collapse_row(rows, cols, concept, rec, as_of=None, require_bound=False):
     """Read a MODEL-LOCATED row across the actual period columns and CF1-collapse it
     — the identical machinery the deterministic path runs, so a model-found row and a
     code-found row produce the same figure. Expression form sums its component rows
@@ -1091,7 +1355,8 @@ def _collapse_row(rows, cols, concept, rec):
                   if pc.col < len(rows[row]) and _cell_type(rows[row][pc.col]) == 'num'}
     if not values:
         return None
-    return periods.collapse(concept, concept_nature(concept), cols, values)
+    return periods.collapse(concept, concept_nature(concept), cols, values, as_of=as_of,
+                            require_bound=require_bound)
 
 
 def _emit_from_collapsed(concept, col, frame, prov, rate_card, anchor_cr, *,
@@ -1136,15 +1401,14 @@ def _emit_from_collapsed(concept, col, frame, prov, rate_card, anchor_cr, *,
         if _zero_stock_hold(concept, value_cr):
             return Figure(concept, None, None, prov, held=True, basis=basis, months=months,
                           hold_reason='money stock rounds to ₹0 Cr — empty/wrong-row bind — held')
-        if (anchor_cr and value_cr != 0 and concept not in _FIGURE_SANITY_EXEMPT and
-                abs(math.log10(abs(float(value_cr)) / float(anchor_cr))) > _FIGURE_ANCHOR_ORDERS):
+        _anchor_reason = _figure_anchor_hold_reason(concept, value_cr, anchor_cr)
+        if _anchor_reason:
             return Figure(concept, None, None, prov, held=True, basis=basis, months=months,
-                          hold_reason=(f'₹{value_cr}Cr is >{_FIGURE_ANCHOR_ORDERS:.0f} orders from '
-                                       f'company scale ₹{float(anchor_cr):.0f}Cr — likely wrong row')[:90])
+                          hold_reason=_anchor_reason)
         return Figure(concept, value_cr, None, prov, basis=basis, months=months)
-    except Exception as e:  # noqa: BLE001 — never crash; hold
-        return Figure(concept, None, None, prov, held=True, basis=basis, months=months,
-                      hold_reason=str(e)[:90])
+    except Exception as e:  # noqa: BLE001 — a genuine code fault: FX-uncovered is held earlier at the
+        return Figure(concept, None, None, prov, held=True, basis=basis, months=months,  # frame, not here
+                      hold_reason=f'UNEXPECTED_ERROR: {type(e).__name__}: {e}'[:90])
 
 
 def _ref_value(rows, rr, ref_col):
@@ -1235,7 +1499,7 @@ def _finalize_terminal_state(fields):
 
 
 def _model_fill(prof, ident, held, *, entity, domicile, anchor_cr, rate_card,
-                fields, source_label) -> list:
+                fields, source_label, as_of=None, require_bound=False) -> list:
     """S4-REFINED fallback: the model returns a ROW per held concept; CODE resolves the
     period column (CF1 over Actual-only columns), scale, and value. Mutates `fields` IN
     PLACE and returns per-concept DIAGNOSTICS (row, cell, signals, tier). Emit happens
@@ -1301,7 +1565,7 @@ def _model_fill(prof, ident, held, *, entity, domicile, anchor_cr, rate_card,
                 recs[tgt] = recs[eq]
         collapses = {}
         for concept, rr in recs.items():
-            col = _collapse_row(rows, cols, concept, rr)
+            col = _collapse_row(rows, cols, concept, rr, as_of=as_of, require_bound=require_bound)
             if col is not None:
                 collapses[concept] = col
         money_samples = [collapses[c].value for c in collapses

@@ -6,6 +6,7 @@ API for the preingest3 CIR extraction engine + the review-gate write-back loop.
     GET    /api/dataimport/preingest3/<id>/             job status + full review payload
     POST   /api/dataimport/preingest3/<id>/run/         re-run this job's files (after a resolve)
     POST   /api/dataimport/preingest3/<id>/resolve/     confirm an entity alias (human write-back)
+    POST   /api/dataimport/preingest3/<id>/ratecard/    supply a rate card (validated intake) → re-run
     DELETE /api/dataimport/preingest3/files/<file_id>/  remove one uploaded input file
     GET    /api/dataimport/preingest3/<id>/download/    download the consolidated workbook
 
@@ -26,7 +27,7 @@ from django.http import FileResponse, Http404
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes, permission_classes
-from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 
 from accounts.audit import log_audit
@@ -106,6 +107,11 @@ def _serialize(result, as_of, rate_card):
             'revenue_annualized': _total('revenue'), 'ebitda_annualized': _total('ebitda'),
         },
         'model': model_info,
+        # U6 Phase 5 — the uncovered-currency report is the CONTRACT the prompt reads: `prompt_required`
+        # gates whether the UI asks at all; `uncovered` (+ top-level `as_of`) is what it REQUESTS a rate
+        # for; the foreign-domicile buckets are DISCLOSED, not requested. None/empty ⇒ an all-INR run ⇒
+        # no prompt. Passed straight through — it is already plain JSON from `uncovered_report`.
+        'currency_report': result.currency_report,
     }
 
 
@@ -118,6 +124,47 @@ def _parse_rate_card_field(raw):
     if isinstance(raw, dict):
         return raw
     return json.loads(raw)
+
+
+def _rows_from_schedule_upload(uploaded):
+    """Parse an uploaded rate-schedule workbook into the first sheet-grid that carries a recognisable
+    currency+rate header (format-agnostic — via the intake's own header matcher, never hardcoded
+    positions). Returns the rows list, or None if no sheet has a schedule header. A server-side parse
+    (reusing the engine's data_only reader) keeps BOTH intake paths behind the SAME fail-closed gate: an
+    uploaded schedule is then validated exactly like typed entries, never trusted for being a file."""
+    import tempfile
+    from .preingest3.profiler import _read_grid
+    from .preingest3.ratecard_intake import _match_header_row
+    tmp = tempfile.NamedTemporaryFile(suffix=os.path.splitext(uploaded.name)[1] or '.xlsx', delete=False)
+    try:
+        for chunk in uploaded.chunks():
+            tmp.write(chunk)
+        tmp.close()
+        grid = _read_grid(tmp.name)
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+    for rows in grid.values():
+        if _match_header_row(rows) is not None:
+            return rows
+    return None
+
+
+def _accept_card(*, manual, rows, as_of, uncovered):
+    """U6 Phase 5 — validate a user-supplied Rate Card through the fail-closed INTAKE gate and disclose
+    its actionability against the run. Returns (card, noop_currencies, still_uncovered); raises IntakeError
+    on any VALIDITY failure (the caller turns that into a 400). The two inputs are CO-EQUAL — `manual`
+    (typed pair/rate/date/source) and `rows` (an uploaded schedule grid) — and share one gate. A VALID
+    rate the run does not need is NOT refused: it rides on the card (the standing/superset-card case) and
+    is returned in `noop`. `uncovered` is the run's rate-actionable set (None if the job never reported)."""
+    from .preingest3 import ratecard_intake
+    card = (ratecard_intake.card_from_manual(list(manual), as_of=as_of) if manual
+            else ratecard_intake.card_from_schedule(list(rows), as_of=as_of))
+    noop = ratecard_intake.noop_currencies(card, uncovered=uncovered)
+    still = sorted((uncovered or set()) - set(card.rates))       # what the run still needs, uncovered
+    return card, noop, still
 
 
 def _rate_card_for(summary, as_of):
@@ -304,6 +351,54 @@ def resolve(request, job_id):
               {'entity_id': entity_id, 'identifiers': identifiers})
     return Response({'ok': True, 'entity_id': entity_id,
                      'detail': 'Alias confirmed. Re-run to apply.'})
+
+
+@api_view(['POST'])
+@permission_classes([IsGPAdmin])
+@parser_classes([JSONParser, MultiPartParser, FormParser])
+def ratecard(request, job_id):
+    """U6 Phase 5 — accept a user-supplied Rate Card through the VALIDATED intake gate and store it as
+    this job's run input (the 'hold → supply rate → re-run' loop). THREE CO-EQUAL inputs, exactly one per
+    call: `manual_rates` (a list of typed {currency, rate, date, source}), `schedule_rows` (a rate-schedule
+    grid as JSON), or a multipart `schedule_file` (an uploaded rate-schedule workbook, parsed server-side).
+    All funnel through the SAME fail-closed VALIDITY gate — manual entry is first-class, not a fallback. A
+    card that fails validity is REFUSED 400 with the reason (never a silent or coerced rate). A VALID rate
+    the run does not need is accepted onto the card and returned under `noop_currencies` (so a standing/org
+    card, or a pasted full card, is not rejected for covering more than this run needs). The client then
+    calls /run/ to apply the stored card. Privileged: the card is an attributed, disclosed run input."""
+    job = _get_job(request, job_id)
+    from .preingest3.ratecard_intake import IntakeError
+    as_of = (job.summary or {}).get('as_of') or timezone.now().date().isoformat()
+    manual = request.data.get('manual_rates')
+    rows = request.data.get('schedule_rows')
+    sched_file = request.FILES.get('schedule_file')
+    if sched_file is not None:
+        if not sched_file.name.lower().endswith(('.xlsx', '.xls')):
+            return Response({'detail': 'Rate schedule must be an Excel file.'}, status=400)
+        rows = _rows_from_schedule_upload(sched_file)
+        if rows is None:
+            return Response({'detail': 'No rate-schedule header (a currency column and a rate column) '
+                                       'found in the uploaded file.'}, status=400)
+    if bool(manual) == bool(rows):
+        return Response({'detail': 'Supply exactly one of manual_rates, schedule_rows, or schedule_file.'},
+                        status=400)
+    # the run's rate-actionable set (from the last run's report) drives the no-op / still-uncovered
+    # disclosure; None when the job has not reported yet (no report to disclose against).
+    report = (job.summary or {}).get('currency_report')
+    uncovered = None if report is None else {u['currency'] for u in (report.get('uncovered') or [])}
+    try:
+        card, noop, still = _accept_card(manual=manual, rows=rows, as_of=as_of, uncovered=uncovered)
+    except IntakeError as e:
+        return Response({'detail': f'Rate card refused: {e}'}, status=400)
+    summary = job.summary or {}
+    summary['rate_card'] = {'as_of': card.as_of, 'rates': card.disclosure_rows()}
+    job.summary = summary
+    job.save(update_fields=['summary'])
+    log_audit(request, 'update', 'preingest3_ratecard', str(job.id),
+              {'card_id': card.card_id, 'currencies': sorted(card.rates)})
+    return Response({'ok': True, 'card_id': card.card_id, 'rates': card.disclosure_rows(),
+                     'noop_currencies': noop, 'still_uncovered': still,
+                     'detail': 'Rate card accepted. Re-run to apply.'})
 
 
 @api_view(['DELETE'])

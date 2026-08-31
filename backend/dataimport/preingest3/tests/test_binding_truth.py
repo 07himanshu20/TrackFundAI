@@ -52,9 +52,21 @@ VERIFIED = {
     ('InstaAstro', 'cash'): 'Ending Cash Balance',
     ('Agnikul', 'revenue'): 'Total Income',
     ('Agnikul', 'cash'): 'Cash in Bank',             # the regression this fixture guards
-    ('Aliste', 'revenue'): 'Total Revenue billed',   # a TOTAL, not the 'Commission Revenue' component
+    ('Aliste', 'revenue'): 'Total Revenue',          # on the LIVE 'P&L' tab — CORRECTED 2026-08-20:
+    #   the file owner confirmed by inspection that the previously-anchored 'Profit & Loss' is a
+    #   HIDDEN, #REF!-broken, stale (Dec-2025) DEFUNCT tab, while 'P&L' is the maintained monthly
+    #   statement (clean Apr-2025→Feb-2026). Human-AUTHORISED ground-truth correction; the machine
+    #   fix is the error-dominated-row disqualifier (_concept_row_all_error), NOT visibility (a
+    #   correct sheet can also be hidden — Analisa's 'ProfitLoss (23)').
     ('CPC', 'cash'): 'Closing Cash Balance including Fixed deposits',
     ('Analisa', 'revenue'): 'TOTAL REVENUE',
+    ('Clientell', 'revenue'): 'Total Revenues from Operations',   # R1c (2026-08-20): the Schedule-III
+    #   mandated top line was INVISIBLE to the matcher — the plural 'Revenues from Operations' is not a
+    #   synonym of singular 'revenue', so on the ops sheet revenue mis-matched the funnel COUNT 'Sales
+    #   Qualified Leads' (via the 'sales' synonym). Adding the standard 'revenue(s) from operations'
+    #   synonym makes the real financial sheet 'Analysis' win selection (n_found 3>2) and revenue bind to
+    #   the money row. It still HOLDS at emit (2 discrete months + a cumulative YTD sentinel cannot form a
+    #   confident full-period flow), so no wrong number ships — cash=9.3253/headcount=19 are unaffected.
 }
 
 # The negation gate moved CSS off the raw SAP trial balance onto a real-statement
@@ -73,9 +85,11 @@ PENDING = {
 KNOWN_WRONG = {
     # Pure-semantic residue: right value-type/scale/context, differs only in
     # MEANING → the model route resolves these (they HOLD now, quota-blocked, so
-    # none emits a wrong number: Clientell is frame-held; Analisa cash is
-    # held by the >3-orders figure-anchor sanity).
-    ('Clientell', 'revenue'): 'Sales Qualified Leads',          # sales-funnel count, not money
+    # none emits a wrong number: Analisa cash is held by the >3-orders
+    # figure-anchor sanity).
+    #   ('Clientell', 'revenue') — FIXED (R1c, 2026-08-20; now VERIFIED above). Was mis-bound to the
+    #   funnel count 'Sales Qualified Leads'; the Schedule-III 'revenue(s) from operations' synonym flips
+    #   selection onto Analysis's real money line. Removed here (no wrong binding remains to document).
     # ('CPM', 'cash') — STRUCTURALLY FIXED (net axis-1, 2026-07-27). CPM's cash used to bind the
     # SAP-dump GL line '83231010 - Sponsorship-cash-OP' because the dump `SourcePL SAP` WON sheet
     # selection. The tier selector now DEMOTES that dump (GL-code 78%, 647 labels), so CPM selects a
@@ -97,8 +111,11 @@ KNOWN_WRONG = {
 # diagnosable directly, not surface as a mystery value change elsewhere.
 VERIFIED_SHEET = {
     'LDC': 'Consolidated MIS', 'Hubler': 'P&L', 'InstaAstro': 'P&L',
-    'Agnikul': 'Analysis', 'Aliste': 'Profit & Loss', 'CPC': 'CFS EL',
+    'Agnikul': 'Analysis', 'Aliste': 'P&L', 'CPC': 'CFS EL',   # Aliste: P&L is the LIVE tab
+    #   ('Profit & Loss' is hidden+#REF!-broken defunct — human-authorised 2026-08-20, see VERIFIED)
     'Analisa': 'ProfitLoss (23)',
+    'Clientell': 'Analysis',   # R1c flipped selection off 'Operational Metrics' (ops KPIs) onto the real
+    #   financial summary 'Analysis' once revenue's real money line became matchable (n_found 3>2)
 }
 
 _CACHE = {}
@@ -125,6 +142,29 @@ def _bound(name):
 @pytest.mark.parametrize('name,sheet', sorted(VERIFIED_SHEET.items()))
 def test_winning_sheet_never_regresses(name, sheet):
     assert _extract(name)[0] == sheet
+
+
+def test_error_dominated_row_disqualifier_primitive():
+    """R1a primitive: an error-dominated concept row (≥1 spreadsheet error, no real non-zero
+    number) is disqualified; a row with any real value, or a clean all-zero row, is not."""
+    from backend.dataimport.preingest3.extract import _concept_row_all_error
+    from collections import namedtuple
+    C = namedtuple('C', 'col')
+    cols = [C(1), C(2), C(3)]
+    assert _concept_row_all_error([['lbl', '#REF!', '#REF!', 0]], 0, cols) is True   # all #REF! + stray 0
+    assert _concept_row_all_error([['lbl', '#REF!', 5, 0]], 0, cols) is False         # a real number present
+    assert _concept_row_all_error([['lbl', 0, 0, 0]], 0, cols) is False               # clean all-zero (no error)
+
+
+def test_aliste_flip_depends_on_the_disqualifier(monkeypatch):
+    """REDDENING control for the Aliste ground-truth correction: the flip to the live 'P&L' is
+    caused by the error-dominated-row disqualifier, nothing else. Neutralise it and Aliste
+    REVERTS to the hidden, #REF!-broken defunct 'Profit & Loss' — proving the fix is load-bearing
+    and the corrected VERIFIED anchor is not a bare test-edit."""
+    import backend.dataimport.preingest3.extract as ex
+    monkeypatch.setattr(ex, '_concept_row_all_error', lambda *a, **k: False)
+    best = ex._best_sheet(profile_file('Aliste', os.path.join(IN, FILES['Aliste'])), ex.MIS_CONCEPTS)
+    assert best[2] == 'Profit & Loss', 'without the disqualifier the defunct hidden sheet must win (RED)'
 
 
 @pytest.mark.parametrize('key,expected', sorted(VERIFIED.items()))

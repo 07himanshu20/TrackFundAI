@@ -316,8 +316,15 @@ def _extract_block(rows, sheet: str, cfg: LedgerConfig, hdr: int, norm, data_end
                     d = to_decimal(rows[ri][ci])
                     if d is not None:
                         sample.append(d)
+        # anchor_cr is a definitionally-₹Cr (INR) trusted control (capital-account
+        # called/distributed, per-company cost — all .value_cr). Its presence is POSITIVE
+        # INR currency evidence for the block, exactly as it is positive SCALE evidence: a
+        # block tied to a ₹Cr control is INR. A sheet token still wins; a foreign token vs
+        # this INR control is a real conflict → held. With neither a token nor an anchor
+        # there is no currency evidence → held (fail-closed).
         frame = units.resolve_monetary_frame(
-            stmt_currency=ccy, geo_currency=None, inr_mentioned=(ccy == 'INR'),
+            stmt_currency=ccy, geo_currency=('INR' if anchor_cr is not None else None),
+            inr_mentioned=(ccy == 'INR'),
             declared_unit=unit, sample_values=sample[:12], anchor_cr=anchor_cr, ratecard=rate_card)
         frame_ok = not (frame.escalate or not frame.scale)
         hold_reason = '' if frame_ok else f'{cfg.domain}: monetary frame unresolved — {frame.reason}'[:90]

@@ -27,6 +27,7 @@ worker app cleanly):
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ProcessPoolExecutor
 from collections import Counter
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -38,13 +39,20 @@ from . import lexicon
 from . import fund_anchor
 from . import fund_extract
 from . import fund_terms
+from . import currency_ledger
 from . import nav
+from . import waterfall
+from . import sebi_compliance
+from . import golden_store
 from . import llm
+from . import units
+from . import portfolio_correspondence
+from . import quoted_unquoted
 from .alias_ledger import AliasLedger
 from .cir import CIR, Record, Figure, Provenance
 from . import extract as _extract
 from .extract import extract_company
-from .identity import compute_identity, extraction_cache_key
+from .identity import compute_identity, extraction_cache_key, clear_parse_cache
 from .namematch import tokens as _name_tokens
 from .profiler import profile_file, clear_profile_cache, _cell_type
 from .ratecard import RateCard, default_inr_card
@@ -90,6 +98,7 @@ class RunResult:
     extraction: Dict[str, Record] = field(default_factory=dict)   # content_fp → mis Record (for incremental re-run)
     model_metrics: Optional[dict] = None                          # per-run boundary metrics (calls/ok/error/…)
     model_health: Optional[dict] = None                           # health-check result when require_model=True
+    currency_report: Optional[dict] = None                        # U6 uncovered-currency report (empty when all-INR)
 
 
 def _hints(prof, k: int = 10) -> List[str]:
@@ -224,10 +233,58 @@ def _resolve_mis(alias_ids: List[str], file_text: str, anchors: Dict, store) -> 
     return None, 'no unique company match — held for review'
 
 
+def _canonical_order(files: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+    """U3.5 canonical processing order: sort the uploaded (label, path) pairs by CONTENT fingerprint,
+    tie-broken by label. Upload order and filenames never influence the output. Applied before routing
+    and anchor-building so the fund-anchor merge, record append order, and every downstream step see ONE
+    stable order regardless of how the files arrived. NB this determinises ORDER; order-independence of
+    VALUES is a separate guarantee owned by the extractors/merges (a determinism lock over a value that
+    is itself order-dependent would only make a wrong answer stable — see the ownership-anchor fix)."""
+    return sorted(files, key=lambda lp: (compute_identity(lp[0], lp[1]).content_fp, lp[0]))
+
+
+def _extract_company_worker(task):
+    """Pure per-file extraction unit for the L1 pool. Runs `extract_company` under a LOCAL currency
+    ledger so its verdicts are CAPTURED and RETURNED — never written to the shared module global —
+    and the parent merges them in canonical order (byte-identical to a sequential run). Module-level
+    with picklable args/result so it runs under a ProcessPoolExecutor (spawn) as well as serially."""
+    ck, company, path, domicile, anchor_cr, label, rate_card, use_model = task
+    local = currency_ledger.CurrencyLedger()
+    prev = currency_ledger.active()
+    currency_ledger.set_active(local)
+    currency_ledger.context(entity=company, source_file=label)
+    try:
+        rec = extract_company(company, path, rate_card=rate_card, entity=company,
+                              domicile=domicile, anchor_cr=anchor_cr, use_model=use_model)
+    finally:
+        currency_ledger.set_active(prev)          # restore (matters only for the serial/in-process path)
+    return ck, rec, local.observations()
+
+
+def _run_extractions(tasks, *, rate_card, use_model, max_workers):
+    """Map `extract_company` over the cache-miss tasks. Uses a PROCESS pool when max_workers>1 and
+    the model is OFF (the 90% is GIL-bound pure-Python work → processes, not threads; isolated
+    memory makes 'no shared mutable state' structural). Serial otherwise (default max_workers=1) →
+    byte-identical to the pre-parallel path. Returns {ck: (rec, currency_observations)}.
+    Model-ON stays serial: the model boundary/metrics path is a separate concern (Phase 2.7)."""
+    if not tasks:
+        return {}
+    full = [(ck, co, pth, dom, acr, lbl, rate_card, use_model)
+            for (ck, co, pth, dom, acr, lbl) in tasks]
+    if max_workers and max_workers > 1 and not use_model:
+        with ProcessPoolExecutor(max_workers=min(max_workers, len(full))) as ex:
+            results = list(ex.map(_extract_company_worker, full))
+    else:
+        results = [_extract_company_worker(t) for t in full]
+    return {ck: (rec, obs) for ck, rec, obs in results}
+
+
 def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
         rate_card: RateCard = None, alias_store=None,
         reuse: Dict[str, Record] = None,
+        store_dir: Optional[str] = None,
         model_provider: Callable = None, require_model: bool = False,
+        max_workers: int = 1,
         progress: Optional[Callable] = None) -> RunResult:
     """files = [(label, absolute_path)]. Returns a RunResult with the CIR.
     `progress(pct:int, msg:str)` is called at stage boundaries for async workers.
@@ -253,7 +310,11 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
     store = alias_store if alias_store is not None else AliasLedger(org=org)
     reuse = reuse or {}
     clear_profile_cache()   # reuse each file's grid within THIS run; never across runs
+    clear_parse_cache()     # parse-once: reset the unified identity+grid parse cache per run
+    _ccy_ledger = currency_ledger.CurrencyLedger()   # U6 Phase 2: capture every currency verdict this run
+    currency_ledger.set_active(_ccy_ledger)          # (overwrites any leak from a prior aborted run)
     _p(5, 'Reading & routing files')
+    files = _canonical_order(files)                  # U3.5: process in content-fingerprint order, not upload order
 
     # ── Route every file (fund schedule vs company MIS vs unknown) fail-closed ──
     fund_paths: List[str] = []
@@ -303,7 +364,8 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
         fields = {'company': ca.company}
         # descriptive attributes (plain strings, NOT Figures) — enrich the portfolio
         # master; deliberately outside the Figure-based money/coverage/determinism rulers.
-        for _attr in ('sector', 'stage', 'investment_date', 'instrument', 'valuation_method', 'domicile'):
+        for _attr in ('sector', 'stage', 'investment_date', 'instrument', 'valuation_method', 'domicile',
+                      'isin', 'listing_exchange', 'share_type'):
             _v = getattr(ca, _attr, None)
             if _v:
                 fields[_attr] = _v
@@ -329,6 +391,38 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
                                    f'[-99.99%, 500%] — rejected with logged reason')
         cir.add(Record('portfolio_investments', entity_id=ca.company, fields=fields))
 
+    # ── Q2: quoted / unquoted classification — an ADDITIVE overlay over the untouched
+    # per-company FV. Writes plain-scalar verdict fields on each record and appends ONE
+    # HARD partition-tie check; it NEVER rebinds the fair_value/cost/irr Figures, so the
+    # NAV / TVPI / MOIC surfaces are neutral by construction. Classification is
+    # positive-evidence + fail-closed (quoted needs a hard anchor; a private method infers
+    # unquoted; ambiguity/contradiction HOLD). INFERRED and HELD verdicts are disclosed so
+    # a derived label is never read as an extracted fact. ──
+    _pi_recs = [r for r in cir.records if r.domain == 'portfolio_investments']
+    if _pi_recs:
+        _qu_items = []
+        for r in _pi_recs:
+            _cls = quoted_unquoted.classify(quoted_unquoted.signals_from_fields(r.fields))
+            r.fields['is_quoted'] = _cls.is_quoted
+            r.fields['quoted_basis'] = _cls.basis
+            r.fields['quoted_evidence'] = _cls.evidence or _cls.reason
+            _fvf = r.fields.get('fair_value')
+            _fvv = _fvf.value_cr if (isinstance(_fvf, Figure) and _fvf.confirmed) else None
+            _co = r.fields.get('company') or (r.entity_id or '')
+            _qu_items.append((_co, _fvv, _cls))
+            if _cls.basis == quoted_unquoted.INFERRED:
+                cir.disclose('quoted_unquoted_inferred',
+                             f'{_co}: classified {_cls.classification} — {_cls.evidence}; inferred from '
+                             'valuation methodology (no source-stated listing data)', entity=_co)
+            elif _cls.is_quoted is None:
+                cir.disclose('quoted_unquoted_held', f'{_co}: quoted/unquoted HELD — {_cls.reason}',
+                             entity=_co)
+        _qu_part = quoted_unquoted.partition(_qu_items)
+        _qu_fv = [r.fields.get('fair_value') for r in _pi_recs]
+        _qu_total = (sum(f.value_cr for f in _qu_fv if getattr(f, 'confirmed', False))
+                     if _qu_fv and all(getattr(f, 'confirmed', False) for f in _qu_fv) else None)
+        cir.checks.append(quoted_unquoted.tie_check(_qu_part, _qu_total))
+
     # ── Phase-D fund-financials files → deterministic fund extractor ──
     if fund_fin:
         _p(40, f'Extracting {len(fund_fin)} fund file(s)')
@@ -339,6 +433,7 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
     fee_actual = None                               # (value, provenance, candidates) for the annual actual fee
     last_fp = ''
     for label, path, prof in fund_fin:
+        currency_ledger.context(entity='(fund)', source_file=label)
         fp = compute_identity(label, path).content_fp
         last_fp = fp
         rec = fund_extract.extract_fund_financials(label, path, prof, rate_card=rate_card, content_fp=fp)
@@ -373,6 +468,20 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
         if not produced:                           # recognised fund file, no slice concepts yet
             cir.disclose('fund_no_flows', f'{label}: fund file recognised; no capital-account '
                          'flows, LP register, terms or NAV signals found', entity=label)
+
+    # ── REFERENCE-ONLY aggregate comparators (the fund's OWN top-down portfolio revenue/EBITDA
+    # budget+actual, and stated realised-gross) — scanned across ALL fund-domain files, financials
+    # AND schedules, because these lines live on EITHER (budget-vs-act on the accounts file, the
+    # realised-gross line on the valuations/exits schedule). Filed under cir.comparators — never a
+    # Record/Figure, so they can never reach the actuals emit surface; the reconciliation stage turns
+    # them into soft-check rows. (Absent → the soft stage discloses, never fabricates.) ──
+    for label, path, prof in fund_fin + schedule_files:
+        fp = compute_identity(label, path).content_fp
+        for _comp in fund_terms.extract_reference_comparators(label, prof, content_fp=fp):
+            cir.add_comparator(_comp)
+        _rg = fund_terms.extract_realised_gross(label, prof, content_fp=fp)
+        if _rg is not None:
+            cir.add_comparator(_rg)
 
     # ── cross-file fund reconciliation: LP register ↔ capital account. Runs AFTER all
     # fund files are extracted, because the register and the capital account live in
@@ -465,6 +574,7 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
     #    genuinely ambiguous single header is HELD (disclosed), never guessed.
     _domain_blocks: Dict[str, list] = {}
     for label, path, prof in fund_fin + schedule_files:
+        currency_ledger.context(entity='(fund ledger)', source_file=label)
         fp = compute_identity(label, path).content_fp
         for s in prof['sheets']:
             blocks, disclosures = ledger.segment_sheet(prof['grid'][s.sheet], s.sheet, ledger.LEDGERS,
@@ -506,6 +616,47 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
                      f'{dom}: {len(combined.records)} rows across {len(blocks)} block(s) '
                      f'[{combined.sheet}], held={combined.held}', entity=dom)
 
+    # ── ACCRUED-CARRY WATERFALL reconciliation (finance build 1): run the European whole-fund
+    # waterfall at current fair value under EVERY plausible UNSTATED convention (hurdle basis ×
+    # compounding × hard/soft) and reconcile the INDEPENDENTLY-computed accrued carry against the
+    # fund's reported provision. Struck AFTER the dated capital-call ledger exists (the preferred
+    # return accrues on the real drawdown dates) and after terms / NAV / committed-base resolve.
+    # CHECK, NEVER FIT: the scenario table is computed with no knowledge of the reported figure; the
+    # reported figure only partitions it. Emits SOFT rows only — a soft "approx" carry provision must
+    # never BLOCK the workbook; an underdetermined or discrepant figure is HELD + fully disclosed. ──
+    if canonical_terms is not None and nav_inputs:
+        _call_recs = [r for r in cir.records if r.domain == 'capital_calls']
+        _dist_recs_wf = [r for r in cir.records if r.domain == 'distributions']
+        _wf_inputs, _rep_carry, _rep_cell = waterfall.build_waterfall_inputs(
+            canonical_terms=canonical_terms, nav_inputs=nav_inputs, capital=_fin,
+            committed_base=committed_base, call_records=_call_recs, dist_records=_dist_recs_wf,
+            as_of=as_of)
+        wf_checks, wf_disc, wf_verdict = waterfall.reconcile_waterfall(
+            _wf_inputs, reported_carry=_rep_carry, reported_carry_cell=_rep_cell, source_fp=last_fp)
+        for chk in wf_checks:
+            cir.checks.append(chk)
+            if chk.get('class') == 'hard' and chk.get('status') in ('fail', 'indeterminate'):
+                cir.disclose('waterfall_reconciliation',
+                             f'{chk["id"]} — {chk.get("detail", "")}', entity='fund')
+        for d in wf_disc:
+            cir.disclose(d.get('kind', 'waterfall'), d.get('detail', ''), entity=d.get('entity', 'fund'))
+
+        # ── CLAWBACK reconciliation (finance build 2): rides the waterfall entitlement. GP clawback =
+        # max(0, carry RECEIVED − carry ENTITLED). Received = Σ gp_carry from the distributions ledger;
+        # entitlement = the waterfall verdict (point when inferred, range when underdetermined). Fail-
+        # closed: an incomplete received history HOLDS, never asserts 0. When received is 0 (this fund),
+        # clawback is provably 0 even though the entitlement is held — no false liability. ──
+        _dist_recs = [r for r in cir.records if r.domain == 'distributions']
+        _cr_received, _cr_complete = waterfall.carry_received_from_distributions(_dist_recs)
+        _holdback = waterfall._term_value(canonical_terms, 'clawback_holdback')
+        cb_checks, cb_disc = waterfall.reconcile_clawback(
+            carry_received=_cr_received, received_complete=_cr_complete,
+            verdict=wf_verdict, holdback_rate=_holdback)
+        for chk in cb_checks:
+            cir.checks.append(chk)
+        for d in cb_disc:
+            cir.disclose(d.get('kind', 'clawback'), d.get('detail', ''), entity='fund')
+
     # ── MIS files → resolve (pass 1) ──
     _p(45, f'Resolving {len(mis)} company files')
     review: List[ReviewFile] = []
@@ -529,6 +680,28 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
     # structural check, not just careful code. ──
     claim_counts = Counter(ek for *_r, ek, _rz in resolved if ek is not None)
     collided = {ek for ek, n in claim_counts.items() if n > 1}
+
+    # ── L1 PRE-SCAN: dispatch the slow, pure per-file extraction (extract_company, the ~90% of a
+    # large fund's cost) across a process pool. Only cache-MISSES are dispatched (reuse/golden are
+    # cheap parent-side lookups); each unique ck is computed once. The emit loop below then consumes
+    # the precomputed results VERBATIM — same CIR/report/disclosure order — so max_workers=1 (default)
+    # is byte-identical to the pre-parallel path and max_workers>1 must prove byte-identical to it. ──
+    _seen_ck, _tasks = set(), []
+    for _lbl, _pth, _prf, _fp, _ek, _rz in resolved:
+        if _ek is None or _ek in collided:
+            continue
+        _ca = anchors.get(_ek)
+        _ck = extraction_cache_key(_fp, as_of=as_of, rate_card_id=rate_card.card_id,
+                                   anchor_cr=_ca.anchor_cr, domicile=_ca.domicile,
+                                   use_model=require_model)
+        if _ck in _seen_ck or reuse.get(_ck) is not None:
+            continue
+        if store_dir and golden_store.get(store_dir, _ck) is not None:
+            continue
+        _seen_ck.add(_ck)
+        _tasks.append((_ck, _ca.company, _pth, _ca.domicile, _ca.anchor_cr, _lbl))
+    _precomputed = _run_extractions(_tasks, rate_card=rate_card,
+                                    use_model=require_model, max_workers=max_workers)
 
     # ── emit (pass 2) ──
     _p(60, f'Extracting {len(mis)} company files')
@@ -557,15 +730,29 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
         ck = extraction_cache_key(fp, as_of=as_of, rate_card_id=rate_card.card_id,
                                   anchor_cr=ca.anchor_cr, domicile=ca.domicile,
                                   use_model=require_model)
-        rec = reuse.get(ck)                        # incremental: reuse prior extraction
+        currency_ledger.context(entity=ca.company, source_file=label)
+        # Phase 2.4: the reuse cache is the in-run/in-memory layer; the durable golden store (opt-in
+        # via store_dir) is the cross-PROCESS layer. Both are keyed by the SAME provably-complete ck,
+        # so a changed value (→ new content_fp → new ck) is a guaranteed miss in BOTH; a logic change
+        # (→ new net_logic_version → new ck) transparently rebuilds both. store_dir=None → default,
+        # behaviour identical to before this phase.
+        rec = reuse.get(ck)                        # incremental: reuse prior extraction (this session)
+        from_store = False
+        if rec is None and store_dir:
+            rec = golden_store.get(store_dir, ck)  # durable: prior process's extraction, same ck
+            from_store = rec is not None
         if rec is None:
-            rec = extract_company(ca.company, path, rate_card=rate_card,
-                                  entity=ca.company, domicile=ca.domicile,
-                                  anchor_cr=ca.anchor_cr, use_model=require_model)
+            # computed by the L1 pre-scan (parallel when max_workers>1); the worker ran it under a
+            # local currency ledger and returned its verdicts — merge them HERE, at this file's emit
+            # point, so the parent ledger's sequence matches a sequential run exactly.
+            rec, _obs = _precomputed[ck]
+            _ccy_ledger.merge_observations(_obs)
         else:                                     # same file+config, new attribution only
             rec = Record(rec.domain, entity_id=ca.company, fields=dict(rec.fields))
             rec.fields['company'] = ca.company
         extraction[ck] = rec
+        if store_dir and not from_store:          # persist fresh computes (never re-write a disk hit)
+            golden_store.put(store_dir, ck, rec)
         if '_note' in rec.fields:                 # resolved, but no usable statement
             reports.append(FileReport(label, 'mis', 'held', entity_id=ca.company,
                                       reason=str(rec.fields['_note']), content_fp=fp))
@@ -582,8 +769,58 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
             cir.disclose('investment_without_mis',
                          f'{ca.company!r} had no attributed MIS file this run', entity=ca.company)
 
+    # ── portfolio-vs-fund soft correspondence (U7 flagship): bottom-up Σ of the company MIS
+    # revenue/EBITDA vs the fund's OWN top-down aggregate (a reference-only comparator). Struck
+    # HERE because it needs BOTH the company records and the fund comparators. COVERAGE-aware
+    # first (a held company contributes 0 — the row is a completeness meter, not a bare variance),
+    # period-aware second (company flows annualised to the fund's stated basis). Soft → never blocks. ──
+    for chk in portfolio_correspondence.build(cir):
+        cir.checks.append(chk)
+
+    # ── SEBI COMPLIANCE-RECONCILIATION (finance build 3): declarative, category-aware, fail-closed.
+    # Struck HERE because it needs BOTH the fund records (LP register, terms, corpus) and the company
+    # records (per-investee cost → concentration numerator). Each rule's INDEPENDENT value is computed
+    # from the CIR and tied to the compliance-sheet remark located by SEBI ref (parenthetical-preserving,
+    # so 10(b)/(c)/(d)/(f) never collide). Verdicts ride the spine as SOFT rows (PASS/FLAG/HELD/ABSENT).
+    # Concentration stays HELD until investable_funds (corpus − est. expenditure, Reg 2(1)(p)) is supplied
+    # — never FV-basis, never back-solved from the reported figure (P3/P4). ──
+    _sebi_grids = [prof['grid'] for _l, _pth, prof in fund_fin]
+    if _sebi_grids:
+        _sebi_prim = sebi_compliance.build_primitives(
+            lp_registers=lp_registers, cir_records=cir.records, grids=_sebi_grids, investable_funds_cr=None)
+        sebi_checks, sebi_disc = sebi_compliance.reconcile_compliance(_sebi_prim, _sebi_grids)
+        cal_checks, cal_disc = sebi_compliance.check_calendar(
+            [r for r in cir.records if r.domain == 'sebi_calendar'])
+        for chk in sebi_checks + cal_checks:
+            cir.checks.append(chk)
+        for d in sebi_disc + cal_disc:
+            cir.disclose(d.get('kind', 'sebi'), d.get('detail', ''), entity='fund')
+
     _p(90, 'Assembling consolidated record')
     logger.info('[preingest3] run complete — model boundary: %s', metrics.summary())
+    # U6 Phase 2: build the uncovered-currency report from every verdict observed this run,
+    # then release the ledger so it can never bleed into another run. (A reused-cache entity is
+    # not re-extracted, so its currency is not re-observed; any run that CHANGES the rate card
+    # busts that cache and re-observes — which is exactly the remediation loop.)
+    # A company whose schedules disagreed on domicile in a way that implies DIFFERENT currencies has
+    # had its domicile withheld (fund_anchor._resolve_domicile → None), so U6 already fail-closes its
+    # currency for lack of geo evidence; disclose WHY so the fail-closed hold is explained, not silent.
+    for ca in anchors.values():
+        if getattr(ca, 'domicile_conflict', False):
+            cir.disclose('domicile_conflict',
+                         f'{ca.company}: schedules disagree on domicile implying different currencies — '
+                         f'domicile withheld and currency held (fail-closed), resolve to confirm',
+                         entity=ca.company)
+    _foreign_dom = {ca.company: units.expected_currency(getattr(ca, 'domicile', None))
+                    for ca in anchors.values()
+                    if units.expected_currency(getattr(ca, 'domicile', None)) not in (None, 'INR')}
+    # domicile STATED but non-India and unmapped → cannot be named; disclosed so it never hides
+    _unmapped_dom = {ca.company: getattr(ca, 'domicile', None) for ca in anchors.values()
+                     if getattr(ca, 'domicile', None) and units.expected_currency(ca.domicile) is None}
+    _currency_report = _ccy_ledger.uncovered_report(rate_card, foreign_domiciles=_foreign_dom,
+                                                     unmapped_foreign_domiciles=_unmapped_dom)
+    currency_ledger.set_active(None)
     return RunResult(cir=cir, files=reports, review_queue=review, extraction=extraction,
                      model_metrics=metrics.summary(),
-                     model_health=(health.__dict__ if health is not None else None))
+                     model_health=(health.__dict__ if health is not None else None),
+                     currency_report=_currency_report)

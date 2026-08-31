@@ -1,0 +1,1000 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TrackfundAI Dashboard — Product Requirements Document v1.0</title>
+<style>
+/* ============ PAGE / PRINT ============ */
+@page {
+  size: A4;
+  margin: 22mm 20mm 20mm 20mm;
+  @top-center { content: "TrackfundAI Dashboard — Product Requirements Document"; font-family: Arial, sans-serif; font-size: 8pt; color: #8a8a8a; }
+  @bottom-center { content: "Confidential  ·  Page " counter(page); font-family: Arial, sans-serif; font-size: 8pt; color: #8a8a8a; }
+}
+@page :first { @top-center { content: ""; } @bottom-center { content: ""; } }
+
+/* ============ BASE TYPE ============ */
+html { -webkit-text-size-adjust: 100%; }
+body {
+  font-family: Georgia, "Times New Roman", Times, serif;
+  color: #1b1b1b;
+  font-size: 10.8pt;
+  line-height: 1.5;
+  margin: 0 auto;
+  max-width: 200mm;
+  padding: 0 6mm;
+  background: #fff;
+  text-align: justify;
+}
+h1, h2, h3, h4, .sans, figcaption, .tag, table, .toc, .callout .lead, .confbox {
+  font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+h1 { font-size: 20pt; color: #111; line-height: 1.2; margin: 0 0 4px; }
+h2 { font-size: 15pt; color: #141414; margin: 26px 0 8px; line-height: 1.22; border-bottom: 1.5px solid #333; padding-bottom: 4px; }
+h3 { font-size: 12.3pt; color: #1c1c1c; margin: 18px 0 5px; line-height: 1.22; }
+h4 { font-size: 10.8pt; color: #262626; margin: 13px 0 3px; }
+p { margin: 0 0 9px; }
+strong { color: #111; }
+ul, ol { margin: 0 0 10px; padding-left: 20px; }
+li { margin: 0 0 4px; }
+a { color: #1b1b1b; text-decoration: none; }
+
+/* ============ HEADINGS — PAGE-BREAK CONTROL ============ */
+h1, h2, h3, h4 { break-after: avoid; page-break-after: avoid; }
+figure, table, .callout, .confbox, .pullquote, .deflist { break-inside: avoid; page-break-inside: avoid; }
+.newpage { break-before: page; page-break-before: page; }
+
+/* ============ TITLE PAGE ============ */
+.title-page { min-height: 250mm; display: flex; flex-direction: column; justify-content: center; break-after: page; page-break-after: always; text-align: left; }
+.title-rule { border: 0; border-top: 3px solid #111; margin: 0 0 18px; }
+.title-rule-thin { border: 0; border-top: 1px solid #999; margin: 18px 0 0; }
+.title-page .doc-kicker { font-family: -apple-system,"Segoe UI",Helvetica,Arial,sans-serif; letter-spacing: 2.5px; text-transform: uppercase; font-size: 10pt; color: #666; margin: 0 0 10px; }
+.title-page .product { font-family: -apple-system,"Segoe UI",Helvetica,Arial,sans-serif; font-size: 30pt; font-weight: 700; color: #0f0f0f; line-height: 1.1; margin: 6px 0 2px; }
+.title-page .subtitle { font-size: 13pt; color: #444; font-style: italic; margin: 8px 0 26px; }
+.meta-table { font-family: -apple-system,"Segoe UI",Helvetica,Arial,sans-serif; font-size: 10pt; color: #333; margin-top: 6px; }
+.meta-table td { padding: 3px 16px 3px 0; vertical-align: top; }
+.meta-table td.k { color: #777; text-transform: uppercase; letter-spacing: 1px; font-size: 8.5pt; width: 130px; }
+.confbox { margin-top: 40px; border: 1px solid #333; padding: 12px 14px; font-size: 8.8pt; color: #333; line-height: 1.45; }
+.confbox b { text-transform: uppercase; letter-spacing: 1px; font-size: 8.5pt; }
+
+/* ============ TABLE OF CONTENTS ============ */
+.toc { break-after: page; page-break-after: always; font-size: 10.2pt; }
+.toc h2 { border-bottom: 1.5px solid #333; }
+.toc ol { list-style: none; padding-left: 0; margin: 0; }
+.toc ol ol { padding-left: 20px; }
+.toc li { margin: 3px 0; color: #222; }
+.toc .num { display: inline-block; min-width: 34px; color: #555; }
+.toc .fig-list { margin-top: 20px; }
+
+/* ============ TABLES ============ */
+table.data { border-collapse: collapse; width: 100%; margin: 10px 0 14px; font-size: 9.4pt; }
+table.data th, table.data td { border: 1px solid #9a9a9a; padding: 5px 8px; text-align: left; vertical-align: top; }
+table.data th { background: #ececec; color: #111; font-weight: 700; }
+table.data caption { caption-side: top; text-align: left; font-family: -apple-system,"Segoe UI",Helvetica,Arial,sans-serif; font-size: 8.6pt; color: #666; letter-spacing: .5px; text-transform: uppercase; margin-bottom: 5px; }
+table.data tr:nth-child(even) td { background: #f7f7f7; }
+
+/* ============ DEFINITION LIST ============ */
+.deflist { margin: 8px 0 12px; }
+.deflist dt { font-family: -apple-system,"Segoe UI",Helvetica,Arial,sans-serif; font-weight: 700; color: #111; margin-top: 8px; font-size: 10pt; }
+.deflist dd { margin: 1px 0 0 0; padding-left: 0; }
+
+/* ============ CALLOUT ============ */
+.callout { border: 1px solid #444; border-left: 5px solid #333; padding: 10px 14px; margin: 14px 0; font-size: 10pt; }
+.callout .lead { text-transform: uppercase; letter-spacing: 1px; font-size: 8.4pt; color: #555; margin-bottom: 4px; }
+
+/* ============ PULL QUOTE ============ */
+.pullquote { border-top: 2px solid #222; border-bottom: 2px solid #222; padding: 16px 24px; margin: 20px 8px; font-size: 13pt; font-style: italic; line-height: 1.5; color: #111; text-align: center; }
+.pullquote .after { display: block; font-style: normal; font-size: 9.4pt; color: #555; margin-top: 8px; font-family: -apple-system,"Segoe UI",Helvetica,Arial,sans-serif; }
+
+/* ============ FIGURES / SVG ============ */
+figure { margin: 16px 0 18px; text-align: center; }
+figure svg { width: 100%; height: auto; display: block; border: 1px solid #ccc; background: #fff; }
+figcaption { font-size: 9pt; color: #333; margin-top: 7px; text-align: left; line-height: 1.4; }
+figcaption .fno { font-weight: 700; color: #111; }
+figcaption .cap { font-weight: 700; color: #111; }
+.svg-legend { font-size: 8.6pt; color: #555; font-family: -apple-system,"Segoe UI",Helvetica,Arial,sans-serif; margin-top: 4px; text-align: left; }
+
+/* SVG element styling (colour permitted ONLY inside diagrams) */
+figure svg text { font-family: -apple-system,"Segoe UI",Helvetica,Arial,sans-serif; fill: #232323; }
+.st-t { font-size: 13px; font-weight: 600; }
+.st-m { font-size: 12px; }
+.st-s { font-size: 11px; fill: #5a5a5a; }
+.st-l { font-size: 11px; fill: #3a3a3a; }
+.st-w { fill: #ffffff; }
+.n-ai  { fill: #e4ecf4; stroke: #33506f; stroke-width: 1.4; }
+.n-det { fill: #f1e3e6; stroke: #6d3140; stroke-width: 1.4; }
+.n-st  { fill: #ebebeb; stroke: #797979; stroke-width: 1.4; }
+.n-ext { fill: #ffffff; stroke: #444444; stroke-width: 1.4; }
+.n-pr  { fill: #f6f6f6; stroke: #565656; stroke-width: 1.4; }
+.n-dk  { fill: #33506f; stroke: #22384f; stroke-width: 1.4; }
+.n-dkr { fill: #6d3140; stroke: #4e232e; stroke-width: 1.4; }
+.edge  { stroke: #555; stroke-width: 1.3; fill: none; }
+.edge-d { stroke: #555; stroke-width: 1.3; fill: none; stroke-dasharray: 4 3; }
+
+/* ============ MISC ============ */
+.small { font-size: 9pt; color: #444; }
+.tag { display: inline-block; font-size: 8pt; letter-spacing: 1px; text-transform: uppercase; color: #555; border: 1px solid #999; padding: 1px 6px; border-radius: 2px; margin-right: 4px; }
+.sec-intro { font-style: italic; color: #444; margin-bottom: 10px; }
+hr.soft { border: 0; border-top: 1px solid #ccc; margin: 16px 0; }
+</style>
+</head>
+<body>
+
+<!-- ============================= TITLE PAGE ============================= -->
+<div class="title-page">
+  <hr class="title-rule">
+  <div class="doc-kicker">Product Requirements Document</div>
+  <div class="product">TrackfundAI Dashboard</div>
+  <div class="subtitle">A single-source, deterministic pipeline from raw fund files to a governed dashboard</div>
+  <hr class="title-rule-thin">
+  <table class="meta-table">
+    <tr><td class="k">Document</td><td>Product Requirements Document (PRD)</td></tr>
+    <tr><td class="k">Product</td><td>TrackfundAI Dashboard — pre-ingestion layer &amp; dashboard, as one product</td></tr>
+    <tr><td class="k">Version</td><td>1.0</td></tr>
+    <tr><td class="k">Date</td><td>29 August 2026</td></tr>
+    <tr><td class="k">Status</td><td>For review by business partner</td></tr>
+    <tr><td class="k">Audience</td><td>Business partner; technical and non-technical stakeholders</td></tr>
+  </table>
+  <div class="confbox">
+    <b>Confidential.</b><br>
+    This document is provided in confidence for the purpose of evaluating the TrackfundAI Dashboard.
+    It describes the product at a conceptual level. It intentionally omits implementation detail,
+    internal component design, and third-party technologies. It may not be reproduced, distributed,
+    or disclosed to any party outside the intended recipient organisation without prior written consent.
+  </div>
+</div>
+
+<!-- ============================= TABLE OF CONTENTS ============================= -->
+<nav class="toc">
+  <h2>Table of Contents</h2>
+  <ol>
+    <li><span class="num">1</span> Introduction &amp; Product Overview
+      <ol>
+        <li><span class="num">1.1</span> Purpose of this document</li>
+        <li><span class="num">1.2</span> What the product is, in one paragraph</li>
+        <li><span class="num">1.3</span> Problem statement</li>
+        <li><span class="num">1.4</span> Goals</li>
+        <li><span class="num">1.5</span> Non-goals</li>
+      </ol>
+    </li>
+    <li><span class="num">2</span> Users &amp; Journeys
+      <ol>
+        <li><span class="num">2.1</span> Personas</li>
+        <li><span class="num">2.2</span> Primary journey: from files to a trusted dashboard</li>
+        <li><span class="num">2.3</span> The review journey: resolving what cannot be proven</li>
+      </ol>
+    </li>
+    <li><span class="num">3</span> The End-to-End System
+      <ol>
+        <li><span class="num">3.1</span> Layered architecture</li>
+        <li><span class="num">3.2</span> Context view (Level 0 data-flow)</li>
+        <li><span class="num">3.3</span> Level 1 data-flow</li>
+        <li><span class="num">3.4</span> The pipeline, stage by stage</li>
+        <li><span class="num">3.5</span> The consolidated master sheet</li>
+        <li><span class="num">3.6</span> The life of a file</li>
+      </ol>
+    </li>
+    <li><span class="num">4</span> Design Principles &amp; Core Mechanisms
+      <ol>
+        <li><span class="num">4.1</span> Design principles</li>
+        <li><span class="num">4.2</span> Identify vs. extract: the determinism split</li>
+        <li><span class="num">4.3</span> Breaking a document into analysable units</li>
+        <li><span class="num">4.4</span> Three-level file identity</li>
+        <li><span class="num">4.5</span> Period Algebra</li>
+        <li><span class="num">4.6</span> Validation, reconciliation &amp; fail-closed handling</li>
+        <li><span class="num">4.7</span> Caching</li>
+      </ol>
+    </li>
+    <li><span class="num">5</span> The Dashboard &amp; Its Outputs
+      <ol>
+        <li><span class="num">5.1</span> From master sheet to views</li>
+        <li><span class="num">5.2</span> The dashboard views</li>
+        <li><span class="num">5.3</span> Outputs, exports &amp; auditability</li>
+        <li><span class="num">5.4</span> Data integrity</li>
+      </ol>
+    </li>
+    <li><span class="num">6</span> Assumptions, Dependencies &amp; Security
+      <ol>
+        <li><span class="num">6.1</span> Assumptions</li>
+        <li><span class="num">6.2</span> Dependencies</li>
+        <li><span class="num">6.3</span> Security &amp; access posture</li>
+      </ol>
+    </li>
+    <li><span class="num">7</span> Risks, Metrics &amp; Roadmap
+      <ol>
+        <li><span class="num">7.1</span> Risks &amp; mitigations</li>
+        <li><span class="num">7.2</span> Success metrics</li>
+        <li><span class="num">7.3</span> Phased roadmap</li>
+      </ol>
+    </li>
+    <li><span class="num">8</span> Glossary</li>
+  </ol>
+  <div class="fig-list">
+    <strong class="sans" style="font-size:10pt;">List of Figures</strong>
+    <ol style="list-style:none; padding-left:0; margin:6px 0 0; font-size:9.4pt; color:#333;">
+      <li><span class="num">Fig 1</span> Layered architecture of the TrackfundAI Dashboard</li>
+      <li><span class="num">Fig 2</span> Context view (Level 0 data-flow diagram)</li>
+      <li><span class="num">Fig 3</span> Level 1 data-flow diagram</li>
+      <li><span class="num">Fig 4</span> End-to-end pipeline flowchart</li>
+      <li><span class="num">Fig 5</span> Structure of the consolidated master sheet</li>
+      <li><span class="num">Fig 6</span> Life-cycle of a single file</li>
+      <li><span class="num">Fig 7</span> Identify-vs-extract determinism split</li>
+      <li><span class="num">Fig 8</span> Breaking a document into analysable units</li>
+      <li><span class="num">Fig 9</span> Three-level file identity</li>
+      <li><span class="num">Fig 10</span> Period Algebra as a total function</li>
+      <li><span class="num">Fig 11</span> Emit-or-hold decision flow</li>
+      <li><span class="num">Fig 12</span> Master sheet to dashboard mapping</li>
+    </ol>
+  </div>
+</nav>
+
+<!-- ============================= 1. INTRODUCTION ============================= -->
+<section>
+<h1>TrackfundAI Dashboard</h1>
+<p class="small" style="margin-top:2px;">Product Requirements Document · Version 1.0 · 29 August 2026 · Confidential</p>
+
+<h2 id="s1">1. Introduction &amp; Product Overview</h2>
+
+<h3>1.1 Purpose of this document</h3>
+<p>This document describes what the TrackfundAI Dashboard does and why it is designed the way it is.
+It is written for a business partner and is meant to be read end to end by both technical and
+non-technical stakeholders. It explains the product at a conceptual level: the behaviour a user can
+rely on, the guarantees the system makes, and the reasoning behind the design. It deliberately does
+not describe how the system is built at the level of code, components, or third-party technology.</p>
+
+<h3>1.2 What the product is, in one paragraph</h3>
+<p>A fund manager receives financial data from many sources — portfolio schedules, capital accounts,
+valuation statements, distribution notices — as a large number of separate Excel files, each in its
+own layout. The TrackfundAI Dashboard turns that scattered, inconsistent pile of files into a single,
+governed picture of the fund. It does this in two connected stages that together form one product.
+First, a <strong>pre-ingestion layer</strong> reads every file, locates the figures that matter,
+verifies them, and consolidates them into one authoritative workbook — the <strong>master sheet</strong>.
+Second, a <strong>dashboard</strong> reads that single master sheet and presents it as clear,
+navigable views for managers and stakeholders. The defining promise across both stages is trust:
+the same files always produce the same numbers, and no number reaches the dashboard unless it can be
+traced back to the exact place it came from.</p>
+
+<h3>1.3 Problem statement</h3>
+<p>Fund reporting data is authoritative but disorderly. The same concept — say, the fair value of a
+holding, or the net asset value of the fund — appears in different files under different labels, in
+different positions, in different templates, expressed in different units and currencies, and covering
+different reporting periods. Today this reconciliation is done by hand. That is slow, expensive, and
+error-prone, and every re-run risks producing slightly different answers. The core difficulty is not
+that any single file is hard to read; it is that the <em>collection</em> is heterogeneous and keeps
+changing shape, while the answer must be exact, repeatable, and defensible.</p>
+<p>The product exists to remove that manual reconciliation without lowering the accuracy bar. It must
+handle files it has never seen, from clients not yet onboarded, in templates not yet designed — and it
+must never quietly emit a number it cannot justify.</p>
+
+<h3>1.4 Goals</h3>
+<div class="deflist">
+<dl>
+  <dt>Single source of truth</dt><dd>Consolidate a fund's many files into one master sheet that the dashboard and every downstream report read from.</dd>
+  <dt>Determinism</dt><dd>The same input always produces the same output, to the number. Re-running an unchanged set of files changes nothing.</dd>
+  <dt>Universality</dt><dd>Work on new files and new templates without being re-tuned for each one.</dd>
+  <dt>Provable accuracy</dt><dd>Every emitted number is traceable to its source location; anything that cannot be proven is withheld and flagged, never guessed.</dd>
+  <dt>Speed and predictability</dt><dd>Process a full fund's file set within predictable time bounds, so users get results on a reliable schedule.</dd>
+  <dt>Clarity for non-specialists</dt><dd>Present the consolidated result in a dashboard that a business stakeholder can read without training.</dd>
+</dl>
+</div>
+
+<h3>1.5 Non-goals</h3>
+<ul>
+  <li><strong>Not an accounting book of record.</strong> The system consolidates and presents reported figures; it does not replace the fund's official ledgers or audit.</li>
+  <li><strong>Not a data-invention engine.</strong> It never manufactures a value that is absent from the source files. Missing data is disclosed as missing.</li>
+  <li><strong>Not a manual spreadsheet tool.</strong> It is not a replacement for hand-editing spreadsheets cell by cell; its value is in automated, repeatable consolidation.</li>
+  <li><strong>Not a trading or execution system.</strong> It reports on a fund; it does not transact.</li>
+</ul>
+</section>
+
+<!-- ============================= 2. USERS ============================= -->
+<section>
+<h2 id="s2">2. Users &amp; Journeys</h2>
+
+<h3>2.1 Personas</h3>
+<table class="data">
+  <caption>Table 1 — Primary personas</caption>
+  <thead><tr><th style="width:22%">Persona</th><th style="width:30%">Goal</th><th>What they need from the product</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Fund manager (General Partner)</strong></td><td>Understand the fund's true position quickly and correctly.</td><td>A trustworthy consolidated view, produced from the files they upload, with confidence that the numbers are exact and repeatable.</td></tr>
+    <tr><td><strong>Finance / operations analyst</strong></td><td>Turn raw client files into a clean, reconciled dataset.</td><td>An automated pipeline that does the reconciliation, and a clear queue of the few items that genuinely need a human decision.</td></tr>
+    <tr><td><strong>Business stakeholder / partner</strong></td><td>Read the fund's performance and composition.</td><td>Plain, navigable dashboard views and exports, without needing to understand the underlying files.</td></tr>
+    <tr><td><strong>Compliance / oversight reviewer</strong></td><td>Confirm figures are defensible and auditable.</td><td>Traceability from every displayed number back to its exact source, and a record of what was withheld and why.</td></tr>
+  </tbody>
+</table>
+
+<h3>2.2 Primary journey: from files to a trusted dashboard</h3>
+<p>The fund manager or analyst uploads the fund's files as they arrive — often dozens at once, in mixed
+templates. The system identifies each file, locates the figures inside it, extracts and verifies them,
+and consolidates everything into the master sheet. Within a predictable time, the dashboard reflects
+the fund's position. The user did not have to describe the files, map columns, or reconcile anything by
+hand. The vast majority of figures flow straight through; only genuine ambiguities are surfaced for a
+decision.</p>
+
+<h3>2.3 The review journey: resolving what cannot be proven</h3>
+<p>When the system cannot prove a figure to its own standard — an unrecognised label, a period that could
+mean two things, an unfamiliar currency — it does not guess. It <strong>holds</strong> that item and
+places it in a short review queue with the exact context needed to resolve it. A user makes the call
+once; the system records that decision and re-runs, and from then on the same situation is handled
+automatically for that client. This "hold, resolve once, remember" loop is how the product improves
+coverage over time without ever compromising on accuracy.</p>
+</section>
+
+<!-- ============================= 3. END-TO-END SYSTEM ============================= -->
+<section class="newpage">
+<h2 id="s3">3. The End-to-End System</h2>
+<p class="sec-intro">This section walks the whole product from the outside in: first the layers, then the
+data flows, then the pipeline stages, the master sheet, and finally the life-cycle of a single file.</p>
+
+<h3>3.1 Layered architecture</h3>
+
+<figure>
+<svg viewBox="0 0 840 452" role="img" aria-label="Layered architecture block diagram">
+  <defs><marker id="a1" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker></defs>
+  <!-- Layer 1 inputs -->
+  <rect class="n-ext" x="60" y="16" width="720" height="52" rx="6"/>
+  <text class="st-t" x="420" y="38" text-anchor="middle">Client Inputs</text>
+  <text class="st-s" x="420" y="56" text-anchor="middle">Many heterogeneous Excel files for one fund — mixed templates, units, currencies and periods</text>
+  <!-- arrow -->
+  <path class="edge" d="M420,68 L420,92" marker-end="url(#a1)"/>
+  <!-- Layer 2 pre-ingestion -->
+  <rect class="n-pr" x="60" y="94" width="720" height="118" rx="6"/>
+  <text class="st-t" x="420" y="116" text-anchor="middle">Pre-Ingestion Layer</text>
+  <text class="st-s" x="420" y="133" text-anchor="middle">Reads, understands, verifies and consolidates every file — the accuracy engine of the product</text>
+  <rect class="n-ai"  x="86"  y="150" width="150" height="46" rx="5"/><text class="st-m" x="161" y="170" text-anchor="middle">Identify</text><text class="st-s" x="161" y="186" text-anchor="middle">locate structure</text>
+  <rect class="n-det" x="256" y="150" width="150" height="46" rx="5"/><text class="st-m" x="331" y="170" text-anchor="middle">Extract</text><text class="st-s" x="331" y="186" text-anchor="middle">read the numbers</text>
+  <rect class="n-det" x="426" y="150" width="150" height="46" rx="5"/><text class="st-m" x="501" y="170" text-anchor="middle">Validate</text><text class="st-s" x="501" y="186" text-anchor="middle">verify &amp; reconcile</text>
+  <rect class="n-st"  x="596" y="150" width="158" height="46" rx="5"/><text class="st-m" x="675" y="170" text-anchor="middle">Consolidate</text><text class="st-s" x="675" y="186" text-anchor="middle">into master sheet</text>
+  <path class="edge" d="M420,212 L420,236" marker-end="url(#a1)"/>
+  <!-- Layer 3 master sheet -->
+  <rect class="n-st" x="60" y="238" width="720" height="52" rx="6"/>
+  <text class="st-t" x="420" y="260" text-anchor="middle">Consolidated Master Sheet</text>
+  <text class="st-s" x="420" y="278" text-anchor="middle">One authoritative workbook — the single source of truth every downstream view reads from</text>
+  <path class="edge" d="M420,290 L420,314" marker-end="url(#a1)"/>
+  <!-- Layer 4 dashboard -->
+  <rect class="n-ai" x="60" y="316" width="720" height="52" rx="6"/>
+  <text class="st-t" x="420" y="338" text-anchor="middle">Dashboard (Post-Ingestion Layer)</text>
+  <text class="st-s" x="420" y="356" text-anchor="middle">Portfolio, investors, accounting and compliance views · analytics · exports</text>
+  <path class="edge" d="M420,368 L420,392" marker-end="url(#a1)"/>
+  <!-- Layer 5 users -->
+  <rect class="n-ext" x="60" y="394" width="720" height="46" rx="6"/>
+  <text class="st-t" x="420" y="421" text-anchor="middle">Users — fund managers &amp; business stakeholders</text>
+</svg>
+<figcaption><span class="fno">Figure 1.</span> <span class="cap">Layered architecture of the TrackfundAI Dashboard.</span>
+Files enter at the top; each layer hands a more trustworthy, more consolidated result to the next, ending in views for users. The pre-ingestion layer is where raw variety is turned into one verified dataset.</figcaption>
+<div class="svg-legend">Legend — steel blue: identification / AI-assisted stages · burgundy: deterministic extraction &amp; verification · grey: storage and the master sheet · white: people and source files. This colour coding is used in all diagrams.</div>
+</figure>
+
+<p>The product is best understood as five layers stacked between the client's files and the people who
+read the result. Everything above the master sheet exists to <em>earn</em> the master sheet's
+trustworthiness; everything below it exists to <em>present</em> that trust usefully. The master sheet
+is the seam between the two halves of the product and the single point every downstream number passes
+through.</p>
+
+<h3>3.2 Context view (Level 0 data-flow)</h3>
+
+<figure>
+<svg viewBox="0 0 840 360" role="img" aria-label="Context data flow diagram">
+  <defs><marker id="a2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker></defs>
+  <!-- central system -->
+  <rect class="n-dk" x="300" y="140" width="240" height="80" rx="10"/>
+  <text class="st-t st-w" x="420" y="172" text-anchor="middle">TrackfundAI Dashboard</text>
+  <text class="st-s st-w" x="420" y="192" text-anchor="middle" style="fill:#dfe6ef;">the system</text>
+  <!-- external: source files (left top) -->
+  <rect class="n-ext" x="40" y="40" width="200" height="60" rx="6"/>
+  <text class="st-m" x="140" y="66" text-anchor="middle">Client Source Files</text>
+  <text class="st-s" x="140" y="84" text-anchor="middle">many fund Excel files</text>
+  <!-- external: GP user (left bottom) -->
+  <rect class="n-ext" x="40" y="258" width="200" height="60" rx="6"/>
+  <text class="st-m" x="140" y="284" text-anchor="middle">Fund Manager / Analyst</text>
+  <text class="st-s" x="140" y="302" text-anchor="middle">uploads &amp; resolves holds</text>
+  <!-- external: stakeholder (right top) -->
+  <rect class="n-ext" x="600" y="40" width="200" height="60" rx="6"/>
+  <text class="st-m" x="700" y="66" text-anchor="middle">Business Stakeholder</text>
+  <text class="st-s" x="700" y="84" text-anchor="middle">reads dashboard</text>
+  <!-- external: compliance (right bottom) -->
+  <rect class="n-ext" x="600" y="258" width="200" height="60" rx="6"/>
+  <text class="st-m" x="700" y="284" text-anchor="middle">Oversight / Compliance</text>
+  <text class="st-s" x="700" y="302" text-anchor="middle">audits traceability</text>
+  <!-- flows -->
+  <path class="edge" d="M240,74 C300,90 300,120 320,142" marker-end="url(#a2)"/>
+  <text class="st-l" x="250" y="112">files</text>
+  <path class="edge" d="M240,288 C300,270 300,236 322,220" marker-end="url(#a2)"/>
+  <text class="st-l" x="232" y="250">uploads</text>
+  <path class="edge" d="M322,206 C300,246 268,262 240,278" marker-end="url(#a2)"/>
+  <text class="st-l" x="250" y="228">review items</text>
+  <path class="edge" d="M540,168 C580,120 590,96 600,80" marker-end="url(#a2)"/>
+  <text class="st-l" x="556" y="128">views &amp; exports</text>
+  <path class="edge" d="M540,196 C580,236 590,262 600,278" marker-end="url(#a2)"/>
+  <text class="st-l" x="556" y="240">audit trail</text>
+</svg>
+<figcaption><span class="fno">Figure 2.</span> <span class="cap">Context view (Level 0 data-flow diagram).</span>
+The whole system as a single box, showing who and what it exchanges data with. Files and uploads come in from the left; views, exports and an audit trail go out to the right.</figcaption>
+</figure>
+
+<p>At the highest level the system has four counterparties: the source files it reads, the manager who
+uploads them and resolves the occasional held item, the stakeholder who reads the resulting views, and
+the oversight function that relies on full traceability. Nothing else crosses the boundary.</p>
+
+<h3>3.3 Level 1 data-flow</h3>
+
+<figure>
+<svg viewBox="0 0 840 380" role="img" aria-label="Level 1 data flow diagram">
+  <defs><marker id="a3" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker></defs>
+  <!-- source -->
+  <rect class="n-ext" x="24" y="150" width="120" height="60" rx="6"/><text class="st-s" x="84" y="176" text-anchor="middle">Source</text><text class="st-s" x="84" y="192" text-anchor="middle">files</text>
+  <!-- P1 identify -->
+  <rect class="n-ai" x="176" y="40" width="150" height="60" rx="8"/><text class="st-m" x="251" y="66" text-anchor="middle">1 · Identify</text><text class="st-s" x="251" y="84" text-anchor="middle">fingerprint &amp; locate</text>
+  <!-- P2 extract -->
+  <rect class="n-det" x="176" y="150" width="150" height="60" rx="8"/><text class="st-m" x="251" y="176" text-anchor="middle">2 · Extract</text><text class="st-s" x="251" y="194" text-anchor="middle">read figures</text>
+  <!-- P3 validate -->
+  <rect class="n-det" x="176" y="260" width="150" height="60" rx="8"/><text class="st-m" x="251" y="286" text-anchor="middle">3 · Validate</text><text class="st-s" x="251" y="304" text-anchor="middle">verify &amp; reconcile</text>
+  <!-- P4 consolidate -->
+  <rect class="n-st" x="380" y="150" width="150" height="60" rx="8"/><text class="st-m" x="455" y="176" text-anchor="middle">4 · Consolidate</text><text class="st-s" x="455" y="194" text-anchor="middle">build master sheet</text>
+  <!-- P5 serve -->
+  <rect class="n-ai" x="584" y="150" width="150" height="60" rx="8"/><text class="st-m" x="659" y="176" text-anchor="middle">5 · Serve</text><text class="st-s" x="659" y="194" text-anchor="middle">dashboard views</text>
+  <!-- stores -->
+  <rect class="n-st" x="380" y="40" width="150" height="46" rx="4"/><text class="st-s" x="455" y="60" text-anchor="middle">Identity &amp; alias</text><text class="st-s" x="455" y="76" text-anchor="middle">memory</text>
+  <rect class="n-st" x="380" y="286" width="150" height="46" rx="4"/><text class="st-s" x="455" y="306" text-anchor="middle">Cache</text><text class="st-s" x="455" y="322" text-anchor="middle">(prior results)</text>
+  <!-- consumer -->
+  <rect class="n-ext" x="760" y="150" width="60" height="60" rx="6"/><text class="st-s" x="790" y="184" text-anchor="middle">Users</text>
+  <!-- flows -->
+  <path class="edge" d="M144,168 C158,120 160,95 176,80" marker-end="url(#a3)"/>
+  <path class="edge" d="M144,182 L176,182" marker-end="url(#a3)"/>
+  <path class="edge" d="M251,100 L251,150" marker-end="url(#a3)"/>
+  <path class="edge" d="M251,210 L251,260" marker-end="url(#a3)"/>
+  <path class="edge" d="M326,180 L380,180" marker-end="url(#a3)"/>
+  <path class="edge" d="M326,285 C350,250 356,220 380,200" marker-end="url(#a3)"/>
+  <path class="edge" d="M530,180 L584,180" marker-end="url(#a3)"/>
+  <path class="edge" d="M734,180 L760,180" marker-end="url(#a3)"/>
+  <path class="edge-d" d="M326,70 L380,66" marker-end="url(#a3)"/>
+  <path class="edge-d" d="M455,86 L455,150" marker-end="url(#a3)"/>
+  <path class="edge-d" d="M455,286 L455,210" marker-end="url(#a3)"/>
+</svg>
+<figcaption><span class="fno">Figure 3.</span> <span class="cap">Level 1 data-flow diagram.</span>
+The five processes inside the system and the two memories they use. Solid arrows carry data forward; dashed arrows read from or write to the identity memory and the cache.</figcaption>
+</figure>
+
+<p>Opening the box reveals five processes in sequence — identify, extract, validate, consolidate, serve —
+and two supporting memories: an <em>identity and alias memory</em> that remembers files and the
+decisions made about them, and a <em>cache</em> that remembers prior results so unchanged work is never
+repeated. The dashboard (process 5) only ever reads the consolidated master sheet; it never touches raw
+files.</p>
+
+<h3>3.4 The pipeline, stage by stage</h3>
+
+<figure>
+<svg viewBox="0 0 840 430" role="img" aria-label="End to end pipeline flowchart">
+  <defs><marker id="a4" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker></defs>
+  <!-- top row -->
+  <rect class="n-ext" x="24" y="30" width="130" height="54" rx="6"/><text class="st-m" x="89" y="55" text-anchor="middle">Raw files</text><text class="st-s" x="89" y="72" text-anchor="middle">uploaded</text>
+  <rect class="n-ai" x="184" y="30" width="130" height="54" rx="6"/><text class="st-m" x="249" y="55" text-anchor="middle">Identify</text><text class="st-s" x="249" y="72" text-anchor="middle">fingerprints</text>
+  <rect class="n-st" x="344" y="30" width="150" height="54" rx="6"/><text class="st-m" x="419" y="55" text-anchor="middle">Cache check</text><text class="st-s" x="419" y="72" text-anchor="middle">seen before?</text>
+  <rect class="n-ai" x="524" y="30" width="140" height="54" rx="6"/><text class="st-m" x="594" y="55" text-anchor="middle">Locate</text><text class="st-s" x="594" y="72" text-anchor="middle">structure (AI)</text>
+  <rect class="n-det" x="694" y="30" width="122" height="54" rx="6"/><text class="st-m" x="755" y="55" text-anchor="middle">Extract</text><text class="st-s" x="755" y="72" text-anchor="middle">figures</text>
+  <path class="edge" d="M154,57 L184,57" marker-end="url(#a4)"/>
+  <path class="edge" d="M314,57 L344,57" marker-end="url(#a4)"/>
+  <path class="edge" d="M494,57 L524,57" marker-end="url(#a4)"/>
+  <path class="edge" d="M664,57 L694,57" marker-end="url(#a4)"/>
+  <!-- down from extract -->
+  <path class="edge" d="M755,84 L755,120" marker-end="url(#a4)"/>
+  <!-- reuse arrow from cache to consolidate -->
+  <path class="edge-d" d="M419,84 C419,150 419,300 419,332" marker-end="url(#a4)"/>
+  <text class="st-l" x="425" y="200">reuse if unchanged</text>
+  <!-- second row: validate -->
+  <rect class="n-det" x="640" y="120" width="176" height="58" rx="6"/><text class="st-m" x="728" y="145" text-anchor="middle">Validate &amp; reconcile</text><text class="st-s" x="728" y="163" text-anchor="middle">period · currency · totals</text>
+  <path class="edge" d="M755,84 L755,120" marker-end="url(#a4)"/>
+  <!-- decision -->
+  <path class="edge" d="M640,150 L556,150" marker-end="url(#a4)"/>
+  <polygon class="n-pr" points="470,120 556,150 470,180 384,150"/><text class="st-m" x="470" y="147" text-anchor="middle">Provable?</text><text class="st-s" x="470" y="164" text-anchor="middle">emit or hold</text>
+  <!-- hold branch -->
+  <rect class="n-dkr" x="384" y="222" width="172" height="52" rx="6"/><text class="st-m st-w" x="470" y="246" text-anchor="middle">Hold → Review queue</text><text class="st-s st-w" x="470" y="263" text-anchor="middle" style="fill:#efdfe3;">resolve once, remember</text>
+  <path class="edge" d="M470,180 L470,222" marker-end="url(#a4)"/>
+  <text class="st-l" x="478" y="205">no</text>
+  <!-- resolve loops back -->
+  <path class="edge-d" d="M384,248 C230,248 230,150 384,150" marker-end="url(#a4)"/>
+  <text class="st-l" x="250" y="205">re-run after resolve</text>
+  <!-- emit to consolidate -->
+  <rect class="n-st" x="300" y="332" width="240" height="56" rx="6"/><text class="st-t" x="420" y="357" text-anchor="middle">Consolidate → Master Sheet</text><text class="st-s" x="420" y="375" text-anchor="middle">cited &amp; reconciled</text>
+  <path class="edge" d="M420,180 L420,332" marker-end="url(#a4)"/>
+  <text class="st-l" x="428" y="300">yes · cited</text>
+  <!-- to dashboard -->
+  <rect class="n-ai" x="600" y="332" width="216" height="56" rx="6"/><text class="st-t" x="708" y="357" text-anchor="middle">Dashboard views</text><text class="st-s" x="708" y="375" text-anchor="middle">read from master sheet</text>
+  <path class="edge" d="M540,360 L600,360" marker-end="url(#a4)"/>
+</svg>
+<figcaption><span class="fno">Figure 4.</span> <span class="cap">End-to-end pipeline flowchart.</span>
+The path a file's figures travel: identify, check the cache, locate structure, extract, verify, then either emit (cited) into the master sheet or hold for review. Resolved holds re-run automatically.</figcaption>
+</figure>
+
+<p>The pipeline is a straight line with one branch. A file is identified and checked against the cache; if
+nothing relevant has changed, prior results are reused rather than recomputed. Otherwise the system
+locates the structure inside the file, extracts the figures, and verifies them against period, currency
+and internal totals. Each figure then meets a single gate: if it is provable, it is emitted into the
+master sheet <em>with a citation to its exact source</em>; if it is not, it is held for review. Held
+items are resolved once by a person, and the run repeats — so the master sheet only ever contains figures
+the system could stand behind.</p>
+
+<h3>3.5 The consolidated master sheet</h3>
+<p>The master sheet is the heart of the product: one workbook that consolidates the whole fund. It is
+organised into a set of purpose-built tabs — a portfolio master, domain tabs for investors and capital,
+accounting and net asset value, distributions, and compliance, and a bridge tab that the dashboard reads
+from directly. Every figure it carries is reconciled and carries a reference back to the file and
+location it came from. Because everything downstream reads only this workbook, there is exactly one
+version of the truth, and it is fully self-describing.</p>
+
+<figure>
+<svg viewBox="0 0 840 300" role="img" aria-label="Master sheet structure">
+  <defs><marker id="a5" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker></defs>
+  <!-- workbook frame -->
+  <rect class="n-st" x="40" y="60" width="470" height="200" rx="6"/>
+  <text class="st-t" x="275" y="44" text-anchor="middle">Consolidated Master Sheet (one workbook)</text>
+  <!-- tabs -->
+  <rect class="n-dk" x="60" y="82" width="200" height="34" rx="4"/><text class="st-m st-w" x="160" y="104" text-anchor="middle">PORTFOLIO · master</text>
+  <rect class="n-pr" x="60" y="124" width="200" height="30" rx="4"/><text class="st-s" x="160" y="144" text-anchor="middle">Investors &amp; capital</text>
+  <rect class="n-pr" x="60" y="160" width="200" height="30" rx="4"/><text class="st-s" x="160" y="180" text-anchor="middle">Accounting &amp; NAV</text>
+  <rect class="n-pr" x="60" y="196" width="200" height="30" rx="4"/><text class="st-s" x="160" y="216" text-anchor="middle">Distributions</text>
+  <rect class="n-pr" x="290" y="124" width="200" height="30" rx="4"/><text class="st-s" x="390" y="144" text-anchor="middle">Compliance</text>
+  <rect class="n-pr" x="290" y="160" width="200" height="30" rx="4"/><text class="st-s" x="390" y="180" text-anchor="middle">Valuations &amp; KPIs</text>
+  <rect class="n-dkr" x="290" y="196" width="200" height="30" rx="4"/><text class="st-s st-w" x="390" y="216" text-anchor="middle">DASHBOARD bridge</text>
+  <text class="st-s" x="275" y="248" text-anchor="middle">every cell reconciled · every figure cites its source</text>
+  <!-- arrow to dashboard -->
+  <path class="edge" d="M510,160 L610,160" marker-end="url(#a5)"/>
+  <rect class="n-ai" x="612" y="120" width="196" height="80" rx="8"/><text class="st-t" x="710" y="150" text-anchor="middle">Dashboard</text><text class="st-s" x="710" y="170" text-anchor="middle">reads the bridge tab</text><text class="st-s" x="710" y="188" text-anchor="middle">no access to raw files</text>
+</svg>
+<figcaption><span class="fno">Figure 5.</span> <span class="cap">Structure of the consolidated master sheet.</span>
+One workbook holds a portfolio master, fund-domain tabs, and a dashboard bridge tab. The dashboard reads only the bridge, so the two halves of the product meet at a single, well-defined seam.</figcaption>
+</figure>
+
+<h3>3.6 The life of a file</h3>
+
+<figure>
+<svg viewBox="0 0 840 250" role="img" aria-label="File lifecycle state diagram">
+  <defs><marker id="a6" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker></defs>
+  <rect class="n-ext" x="20" y="100" width="104" height="50" rx="24"/><text class="st-m" x="72" y="130" text-anchor="middle">Received</text>
+  <rect class="n-ai" x="150" y="100" width="104" height="50" rx="10"/><text class="st-m" x="202" y="130" text-anchor="middle">Identified</text>
+  <rect class="n-det" x="280" y="100" width="104" height="50" rx="10"/><text class="st-m" x="332" y="130" text-anchor="middle">Analysed</text>
+  <rect class="n-det" x="410" y="100" width="104" height="50" rx="10"/><text class="st-m" x="462" y="130" text-anchor="middle">Validated</text>
+  <!-- branch emitted / held -->
+  <rect class="n-st" x="560" y="40" width="120" height="50" rx="10"/><text class="st-m" x="620" y="70" text-anchor="middle">Emitted</text>
+  <rect class="n-dkr" x="560" y="160" width="120" height="50" rx="10"/><text class="st-m st-w" x="620" y="190" text-anchor="middle">Held</text>
+  <rect class="n-st" x="716" y="100" width="104" height="50" rx="24"/><text class="st-m" x="768" y="130" text-anchor="middle">In master</text>
+  <!-- edges -->
+  <path class="edge" d="M124,125 L150,125" marker-end="url(#a6)"/>
+  <path class="edge" d="M254,125 L280,125" marker-end="url(#a6)"/>
+  <path class="edge" d="M384,125 L410,125" marker-end="url(#a6)"/>
+  <path class="edge" d="M514,115 C540,95 545,80 560,68" marker-end="url(#a6)"/><text class="st-l" x="512" y="92">provable</text>
+  <path class="edge" d="M514,135 C540,155 545,170 560,182" marker-end="url(#a6)"/><text class="st-l" x="512" y="168">cannot prove</text>
+  <path class="edge" d="M680,65 C708,80 720,95 730,100" marker-end="url(#a6)"/>
+  <!-- held resolve loops back to analysed -->
+  <path class="edge-d" d="M560,185 C420,232 332,200 332,152" marker-end="url(#a6)"/><text class="st-l" x="400" y="228">resolve once → re-analyse</text>
+</svg>
+<figcaption><span class="fno">Figure 6.</span> <span class="cap">Life-cycle of a single file.</span>
+A file moves Received → Identified → Analysed → Validated, then each of its figures is either Emitted into the master sheet or Held. Resolving a hold sends it back to be re-analysed automatically.</figcaption>
+</figure>
+
+<p>The life-cycle makes the fail-closed stance visible: the only way into the master sheet is through
+validation, and anything that cannot pass waits in "Held" until a person resolves it, after which it
+re-enters the pipeline. A file is never partially trusted — each of its figures is individually proven
+or individually withheld.</p>
+</section>
+
+<!-- ============================= 4. DESIGN PRINCIPLES ============================= -->
+<section class="newpage">
+<h2 id="s4">4. Design Principles &amp; Core Mechanisms</h2>
+
+<h3>4.1 Design principles</h3>
+<p>Four principles govern every design decision in the product. They are what make the accuracy promise
+credible rather than aspirational.</p>
+<div class="deflist">
+<dl>
+  <dt>1 · Determinism before everything</dt><dd>The same inputs must always produce the same outputs, to the number. Nothing in the design is allowed to introduce variability into a result.</dd>
+  <dt>2 · Fail closed</dt><dd>When the system cannot prove a figure, it withholds and flags it rather than guessing. Silence is safer than a wrong number.</dd>
+  <dt>3 · Universality, not tuning</dt><dd>Mechanisms must generalise to files and templates never seen before, rather than being hand-fitted to the examples in front of us.</dd>
+  <dt>4 · Provenance for everything</dt><dd>Every emitted figure carries a reference back to the exact place it came from, so any number can be checked at any time.</dd>
+</dl>
+</div>
+
+<p>The third principle deserves a sharp statement, because it is the one most often compromised in systems
+of this kind. The temptation is always to make something work for the file on the desk today. This
+product rejects that:</p>
+
+<div class="pullquote">
+  &ldquo;A mechanism is universal if it works on a file nobody has seen, sent by a client who does not exist yet, in a template that has not been designed yet. That rules out an entire family of tempting solutions.&rdquo;
+  <span class="after">— Governing design principle for the pre-ingestion layer</span>
+</div>
+
+<p>In practice this rules out any rule that depends on a specific sheet name, a fixed cell position, a
+particular column order, or a known client's quirks. Such shortcuts pass today's test and fail the next
+client's file. The mechanisms described below are chosen precisely because they hold for inputs that do
+not yet exist.</p>
+
+<h3>4.2 Identify vs. extract: the determinism split</h3>
+<p>The single most important design decision in the product is the division of labour between the AI layer
+and deterministic code. It is deliberately strict.</p>
+<ul>
+  <li><strong>The AI layer only identifies and locates structure.</strong> Its entire job is to answer
+  questions of the form &ldquo;which row or column holds EBITDA?&rdquo;, &ldquo;where is revenue?&rdquo;,
+  &ldquo;where are the IRR fields?&rdquo; — that is, to point at <em>where</em> a figure lives in an
+  unfamiliar layout.</li>
+  <li><strong>Deterministic code performs the actual numeric extraction.</strong> Once the location is
+  known, ordinary, repeatable code reads the value, applies units and currency, and records it. The AI
+  layer never produces, computes, adjusts, or invents a number.</li>
+</ul>
+<p>This split exists for one reason: <strong>to guarantee determinism and repeatability.</strong> Because
+the numbers are always read by deterministic code, the same file always yields the same numbers.
+Judgement about <em>where</em> to look is separated from the reading itself, so the part of the system
+that could vary is never the part that produces a value.</p>
+
+<figure>
+<svg viewBox="0 0 840 288" role="img" aria-label="Identify versus extract split">
+  <defs><marker id="a7" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker></defs>
+  <!-- lanes -->
+  <rect x="24" y="30" width="792" height="104" rx="6" fill="#f2f6fa" stroke="#33506f" stroke-width="1"/>
+  <rect x="24" y="150" width="792" height="104" rx="6" fill="#f7eef0" stroke="#6d3140" stroke-width="1"/>
+  <text class="st-s" x="40" y="50" style="fill:#33506f;">AI LAYER — locates structure only</text>
+  <text class="st-s" x="40" y="170" style="fill:#6d3140;">DETERMINISTIC CODE — reads the numbers</text>
+  <!-- ai boxes -->
+  <rect class="n-ai" x="60" y="62" width="150" height="56" rx="6"/><text class="st-s" x="135" y="86" text-anchor="middle">Unfamiliar file</text><text class="st-s" x="135" y="103" text-anchor="middle">any layout</text>
+  <rect class="n-ai" x="250" y="62" width="180" height="56" rx="6"/><text class="st-s" x="340" y="86" text-anchor="middle">&ldquo;Where is EBITDA,</text><text class="st-s" x="340" y="103" text-anchor="middle">revenue, IRR?&rdquo;</text>
+  <rect class="n-ai" x="470" y="62" width="180" height="56" rx="6"/><text class="st-s" x="560" y="86" text-anchor="middle">Location map</text><text class="st-s" x="560" y="103" text-anchor="middle">row / column pointers</text>
+  <path class="edge" d="M210,90 L250,90" marker-end="url(#a7)"/>
+  <path class="edge" d="M430,90 L470,90" marker-end="url(#a7)"/>
+  <!-- hand off -->
+  <path class="edge" d="M560,118 L560,150" marker-end="url(#a7)"/><text class="st-l" x="566" y="140">pointers only</text>
+  <!-- det boxes -->
+  <rect class="n-det" x="470" y="182" width="180" height="56" rx="6"/><text class="st-s" x="560" y="206" text-anchor="middle">Read value at location</text><text class="st-s" x="560" y="223" text-anchor="middle">apply units &amp; currency</text>
+  <rect class="n-det" x="250" y="182" width="180" height="56" rx="6"/><text class="st-s" x="340" y="206" text-anchor="middle">Verify &amp; record</text><text class="st-s" x="340" y="223" text-anchor="middle">with citation</text>
+  <rect class="n-st" x="60" y="182" width="150" height="56" rx="6"/><text class="st-s" x="135" y="206" text-anchor="middle">Same file →</text><text class="st-s" x="135" y="223" text-anchor="middle">same number</text>
+  <path class="edge" d="M470,210 L430,210" marker-end="url(#a7)"/>
+  <path class="edge" d="M250,210 L210,210" marker-end="url(#a7)"/>
+</svg>
+<figcaption><span class="fno">Figure 7.</span> <span class="cap">Identify-vs-extract determinism split.</span>
+The AI layer (upper lane) only points to where figures live; deterministic code (lower lane) does all reading. Because reading is deterministic, the same file always yields the same number.</figcaption>
+</figure>
+
+<h3>4.3 Breaking a document into analysable units</h3>
+<p>A fund file is not analysed as one undifferentiated blob. Each workbook is broken down into a small
+hierarchy of self-contained <strong>analysable units</strong>, and the shape of that breakdown is chosen
+so that every unit can be understood and verified on its own.</p>
+<ul>
+  <li><strong>The workbook</strong> is the outer unit — one file for one purpose.</li>
+  <li><strong>The sheet</strong> is the primary working unit. Each sheet is treated as self-contained, so a
+  figure never depends on hidden context from elsewhere in the file.</li>
+  <li><strong>The domain section</strong> — a contiguous, labelled block such as a portfolio schedule or a
+  capital account — is the unit the system reasons about when locating figures.</li>
+  <li><strong>The individual figure</strong> is the smallest unit: a single value tied to its label,
+  period, currency and exact location. This is the unit that is cited, verified, and either emitted or
+  held.</li>
+</ul>
+<p>The rationale for this shape is verifiability. By decomposing to the level of a single cited figure,
+the system can prove or withhold each value independently, and it can process a large file as a set of
+small, self-describing pieces rather than one intractable whole. Importantly, values are treated at face
+value within their unit — the system never stitches a number together from scattered fragments in a way
+that could hide an error.</p>
+
+<figure>
+<svg viewBox="0 0 840 250" role="img" aria-label="Document decomposition into analysable units">
+  <defs><marker id="a8" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker></defs>
+  <rect class="n-ext" x="24" y="90" width="150" height="64" rx="6"/><text class="st-m" x="99" y="118" text-anchor="middle">Workbook</text><text class="st-s" x="99" y="136" text-anchor="middle">one file</text>
+  <rect class="n-pr" x="214" y="90" width="150" height="64" rx="6"/><text class="st-m" x="289" y="118" text-anchor="middle">Sheet</text><text class="st-s" x="289" y="136" text-anchor="middle">self-contained</text>
+  <rect class="n-pr" x="404" y="90" width="150" height="64" rx="6"/><text class="st-m" x="479" y="118" text-anchor="middle">Domain section</text><text class="st-s" x="479" y="136" text-anchor="middle">labelled block</text>
+  <rect class="n-det" x="594" y="90" width="220" height="64" rx="6"/><text class="st-m" x="704" y="118" text-anchor="middle">Cited figure</text><text class="st-s" x="704" y="136" text-anchor="middle">value · label · period · currency · source</text>
+  <path class="edge" d="M174,122 L214,122" marker-end="url(#a8)"/><text class="st-l" x="176" y="112">many</text>
+  <path class="edge" d="M364,122 L404,122" marker-end="url(#a8)"/><text class="st-l" x="366" y="112">many</text>
+  <path class="edge" d="M554,122 L594,122" marker-end="url(#a8)"/><text class="st-l" x="556" y="112">many</text>
+  <text class="st-s" x="420" y="196" text-anchor="middle">Each level nests inside the one to its left; the cited figure is the unit that is proven, emitted, or held.</text>
+</svg>
+<figcaption><span class="fno">Figure 8.</span> <span class="cap">Breaking a document into analysable units.</span>
+A workbook is decomposed into sheets, then labelled domain sections, then individual cited figures. Verification and the emit-or-hold decision happen at the finest level, one figure at a time.</figcaption>
+</figure>
+
+<h3>4.4 Three-level file identity</h3>
+<p>Every file is identified at three levels, each answering a different question. Three levels are needed
+because &ldquo;is this the same file?&rdquo; has three genuinely different meanings, and the system must
+be able to tell them apart.</p>
+<div class="deflist">
+<dl>
+  <dt>Byte fingerprint — &ldquo;is it literally the identical file?&rdquo;</dt>
+  <dd>Distinguishes files by their exact raw contents. If two uploads share a byte fingerprint they are
+  the very same file, and all prior work can be reused without a second look.</dd>
+  <dt>Content fingerprint — &ldquo;are the values the same?&rdquo;</dt>
+  <dd>Distinguishes files by the data they carry, ignoring cosmetic differences such as formatting or
+  re-saving. If the content fingerprint is unchanged, the numbers are unchanged, so verified results
+  still stand even though the file is not byte-for-byte identical.</dd>
+  <dt>Layout fingerprint — &ldquo;is it the same shape?&rdquo;</dt>
+  <dd>Distinguishes files by their structure, setting the actual values aside. If a familiar layout
+  reappears carrying new figures, the system recognises the template and knows how to read it, while
+  still treating the new numbers as new.</dd>
+</dl>
+</div>
+<p>Together these let the system make the right economy at each level: reuse everything when a file is
+identical, reuse verified numbers when only the presentation changed, and reuse structural understanding
+when a known template returns with fresh data — never confusing one situation for another.</p>
+
+<figure>
+<svg viewBox="0 0 840 250" role="img" aria-label="Three level file identity">
+  <defs><marker id="a9" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker></defs>
+  <rect class="n-st" x="40" y="30" width="230" height="66" rx="6"/><text class="st-m" x="155" y="56" text-anchor="middle">Byte fingerprint</text><text class="st-s" x="155" y="76" text-anchor="middle">exact same file?</text>
+  <rect class="n-st" x="40" y="112" width="230" height="66" rx="6"/><text class="st-m" x="155" y="138" text-anchor="middle">Content fingerprint</text><text class="st-s" x="155" y="158" text-anchor="middle">same values?</text>
+  <rect class="n-st" x="40" y="194" width="230" height="46" rx="6"/><text class="st-m" x="155" y="222" text-anchor="middle">Layout fingerprint — same shape?</text>
+  <!-- outcomes -->
+  <rect class="n-det" x="470" y="30" width="330" height="66" rx="6"/><text class="st-s" x="635" y="56" text-anchor="middle">Reuse everything already computed</text><text class="st-s" x="635" y="76" text-anchor="middle">nothing to re-read</text>
+  <rect class="n-det" x="470" y="112" width="330" height="66" rx="6"/><text class="st-s" x="635" y="138" text-anchor="middle">Reuse verified numbers</text><text class="st-s" x="635" y="158" text-anchor="middle">presentation changed only</text>
+  <rect class="n-det" x="470" y="194" width="330" height="46" rx="6"/><text class="st-s" x="635" y="222" text-anchor="middle">Reuse structural understanding · read new figures</text>
+  <path class="edge" d="M270,63 L470,63" marker-end="url(#a9)"/>
+  <path class="edge" d="M270,145 L470,145" marker-end="url(#a9)"/>
+  <path class="edge" d="M270,217 L470,217" marker-end="url(#a9)"/>
+</svg>
+<figcaption><span class="fno">Figure 9.</span> <span class="cap">Three-level file identity.</span>
+Each fingerprint answers a distinct question and unlocks a distinct, safe economy — from reusing everything, to reusing only verified numbers, to reusing only the understanding of a familiar template.</figcaption>
+</figure>
+
+<h3>4.5 Period Algebra</h3>
+<p>Reporting periods are one of the most common sources of silent error in fund data, because the same
+period is written a dozen ways across files: &ldquo;Q1&rdquo;, &ldquo;quarter ended 30 June&rdquo;,
+&ldquo;three months to Jun-26&rdquo;, a bare date, a fiscal-year label. The product handles this with
+<strong>Period Algebra</strong>.</p>
+<p>In Period Algebra a reporting period is a <strong>typed object</strong> — a first-class thing the system
+reasons about, not a piece of free text — and normalisation is a <strong>total function</strong>: every
+input period resolves to exactly one canonical period, with no undefined cases. There is no input for
+which the system simply does not know what to do; an expression it cannot resolve confidently is routed
+to review rather than silently assumed.</p>
+<div class="callout">
+  <div class="lead">Business consequence</div>
+  <strong>Periods never silently mismatch across files, clients, or templates.</strong> Two figures are
+  combined only when their periods provably refer to the same span. A figure for one quarter can never be
+  quietly added to, or compared against, a figure for another — the class of error where numbers look
+  consistent but describe different time spans is eliminated by construction.
+</div>
+
+<figure>
+<svg viewBox="0 0 840 250" role="img" aria-label="Period Algebra total function">
+  <defs><marker id="a10" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker></defs>
+  <!-- inputs -->
+  <rect class="n-ext" x="24" y="24" width="220" height="30" rx="4"/><text class="st-s" x="134" y="44" text-anchor="middle">&ldquo;Q1&rdquo;</text>
+  <rect class="n-ext" x="24" y="62" width="220" height="30" rx="4"/><text class="st-s" x="134" y="82" text-anchor="middle">&ldquo;quarter ended 30 June&rdquo;</text>
+  <rect class="n-ext" x="24" y="100" width="220" height="30" rx="4"/><text class="st-s" x="134" y="120" text-anchor="middle">&ldquo;3M to Jun-26&rdquo;</text>
+  <rect class="n-ext" x="24" y="138" width="220" height="30" rx="4"/><text class="st-s" x="134" y="158" text-anchor="middle">&ldquo;30-06-2026&rdquo;</text>
+  <rect class="n-ext" x="24" y="176" width="220" height="30" rx="4"/><text class="st-s" x="134" y="196" text-anchor="middle">unrecognised expression</text>
+  <!-- function -->
+  <rect class="n-dk" x="330" y="70" width="180" height="110" rx="8"/><text class="st-m st-w" x="420" y="118" text-anchor="middle">Period Algebra</text><text class="st-s st-w" x="420" y="138" text-anchor="middle" style="fill:#dfe6ef;">total normalisation</text>
+  <!-- outputs -->
+  <rect class="n-det" x="590" y="70" width="226" height="46" rx="6"/><text class="st-s" x="703" y="90" text-anchor="middle">One canonical period</text><text class="st-s" x="703" y="107" text-anchor="middle">Q2 FY2026 · 01 Apr–30 Jun</text>
+  <rect class="n-dkr" x="590" y="140" width="226" height="46" rx="6"/><text class="st-s st-w" x="703" y="160" text-anchor="middle">Held for review</text><text class="st-s st-w" x="703" y="177" text-anchor="middle" style="fill:#efdfe3;">never silently assumed</text>
+  <!-- arrows -->
+  <path class="edge" d="M244,39 C300,60 300,90 330,100" marker-end="url(#a10)"/>
+  <path class="edge" d="M244,77 L330,100" marker-end="url(#a10)"/>
+  <path class="edge" d="M244,115 L330,120" marker-end="url(#a10)"/>
+  <path class="edge" d="M244,153 C300,150 300,140 330,135" marker-end="url(#a10)"/>
+  <path class="edge" d="M244,191 C300,175 300,160 330,150" marker-end="url(#a10)"/>
+  <path class="edge" d="M510,110 L590,98" marker-end="url(#a10)"/>
+  <path class="edge" d="M510,150 L590,160" marker-end="url(#a10)"/>
+</svg>
+<figcaption><span class="fno">Figure 10.</span> <span class="cap">Period Algebra as a total function.</span>
+Every way of writing a period maps to exactly one canonical period; the one thing that never happens is a quiet, wrong guess — an unresolvable expression is held for review instead.</figcaption>
+</figure>
+
+<h3>4.6 Validation, reconciliation &amp; fail-closed handling</h3>
+<p>Before any figure is emitted it must pass a set of checks: that it was located confidently, that it
+reconciles with related totals, that its period is unambiguous, and that its currency is known. These
+checks are combined into a single gate with a strict rule — <strong>emit only if everything is
+provable; otherwise hold.</strong> There is no middle setting that lets a doubtful figure through.</p>
+
+<figure>
+<svg viewBox="0 0 840 300" role="img" aria-label="Emit or hold decision flowchart">
+  <defs><marker id="a11" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker></defs>
+  <rect class="n-det" x="24" y="120" width="120" height="56" rx="6"/><text class="st-s" x="84" y="145" text-anchor="middle">Candidate</text><text class="st-s" x="84" y="162" text-anchor="middle">figure</text>
+  <!-- diamonds -->
+  <polygon class="n-pr" points="230,148 300,120 370,148 300,176"/><text class="st-s" x="300" y="145" text-anchor="middle">Located</text><text class="st-s" x="300" y="160" text-anchor="middle">confidently?</text>
+  <polygon class="n-pr" points="400,148 470,120 540,148 470,176"/><text class="st-s" x="470" y="145" text-anchor="middle">Reconciles?</text>
+  <polygon class="n-pr" points="570,148 640,120 710,148 640,176"/><text class="st-s" x="640" y="145" text-anchor="middle">Period &amp;</text><text class="st-s" x="640" y="160" text-anchor="middle">currency clear?</text>
+  <!-- emit -->
+  <rect class="n-st" x="748" y="120" width="80" height="56" rx="6"/><text class="st-s" x="788" y="152" text-anchor="middle">EMIT</text>
+  <!-- hold -->
+  <rect class="n-dkr" x="380" y="238" width="180" height="46" rx="6"/><text class="st-m st-w" x="470" y="266" text-anchor="middle">HOLD → review</text>
+  <!-- edges yes -->
+  <path class="edge" d="M144,148 L230,148" marker-end="url(#a11)"/>
+  <path class="edge" d="M370,148 L400,148" marker-end="url(#a11)"/><text class="st-l" x="376" y="140">yes</text>
+  <path class="edge" d="M540,148 L570,148" marker-end="url(#a11)"/><text class="st-l" x="546" y="140">yes</text>
+  <path class="edge" d="M710,148 L748,148" marker-end="url(#a11)"/><text class="st-l" x="716" y="140">yes</text>
+  <!-- edges no -->
+  <path class="edge" d="M300,176 C300,238 380,258 380,260" marker-end="url(#a11)"/><text class="st-l" x="286" y="210">no</text>
+  <path class="edge" d="M470,176 L470,238" marker-end="url(#a11)"/><text class="st-l" x="476" y="210">no</text>
+  <path class="edge" d="M640,176 C640,238 560,260 560,262" marker-end="url(#a11)"/><text class="st-l" x="646" y="210">no</text>
+</svg>
+<figcaption><span class="fno">Figure 11.</span> <span class="cap">Emit-or-hold decision flow.</span>
+A figure is emitted only if it clears every check; a single failure routes it to review. This fail-closed rule is why the master sheet contains no unverifiable numbers.</figcaption>
+</figure>
+
+<p>This is the mechanism behind the &ldquo;never a wrong number&rdquo; promise. The cost of the strict gate
+is that a small number of items need a human decision; the benefit is that everything on the dashboard is
+defensible. Every such check is itself tested to confirm it actually blocks the error it targets, so the
+gate cannot quietly weaken over time.</p>
+
+<h3>4.7 Caching</h3>
+<p>A caching layer sits behind the pipeline so that work is never repeated unnecessarily. When a file — or
+the structure of a file — has been seen before, the system reuses the results it already proved instead
+of recomputing them. For the user this buys three things: <strong>speed</strong>, because unchanged files
+return almost immediately; <strong>cost control</strong>, because the expensive understanding step is done
+once and remembered; and <strong>consistency</strong>, because reusing a proven result guarantees the same
+answer as before. The cache is always subordinate to correctness: it is organised around the three-level
+identity above, so a reused result is only ever served when the identity guarantees it is still valid, and
+any change that could affect a figure retires the stale result automatically.</p>
+</section>
+
+<!-- ============================= 5. DASHBOARD ============================= -->
+<section class="newpage">
+<h2 id="s5">5. The Dashboard &amp; Its Outputs</h2>
+
+<h3>5.1 From master sheet to views</h3>
+<p>The dashboard is the already-built half of the product. It does not read raw files or re-derive anything;
+it reads the consolidated master sheet and maps it into views. Because the master sheet is a single,
+reconciled, self-describing workbook, the dashboard's job is presentation, not reconciliation — which is
+exactly what keeps the two halves cleanly separated and independently trustworthy.</p>
+
+<figure>
+<svg viewBox="0 0 840 270" role="img" aria-label="Master sheet to dashboard mapping">
+  <defs><marker id="a12" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker></defs>
+  <rect class="n-st" x="40" y="70" width="200" height="130" rx="6"/><text class="st-m" x="140" y="58" text-anchor="middle">Master sheet</text>
+  <rect class="n-pr" x="58" y="84" width="164" height="24" rx="3"/><text class="st-s" x="140" y="101" text-anchor="middle">Portfolio · Valuations</text>
+  <rect class="n-pr" x="58" y="114" width="164" height="24" rx="3"/><text class="st-s" x="140" y="131" text-anchor="middle">Investors · Capital</text>
+  <rect class="n-pr" x="58" y="144" width="164" height="24" rx="3"/><text class="st-s" x="140" y="161" text-anchor="middle">Accounting · NAV</text>
+  <rect class="n-pr" x="58" y="174" width="164" height="20" rx="3"/><text class="st-s" x="140" y="189" text-anchor="middle">Compliance</text>
+  <!-- views -->
+  <rect class="n-ai" x="600" y="24" width="216" height="40" rx="6"/><text class="st-s" x="708" y="49" text-anchor="middle">Portfolio &amp; performance view</text>
+  <rect class="n-ai" x="600" y="76" width="216" height="40" rx="6"/><text class="st-s" x="708" y="101" text-anchor="middle">Investors &amp; commitments view</text>
+  <rect class="n-ai" x="600" y="128" width="216" height="40" rx="6"/><text class="st-s" x="708" y="153" text-anchor="middle">Accounting &amp; NAV view</text>
+  <rect class="n-ai" x="600" y="180" width="216" height="40" rx="6"/><text class="st-s" x="708" y="205" text-anchor="middle">Compliance view</text>
+  <!-- bridge -->
+  <rect class="n-dk" x="330" y="104" width="160" height="60" rx="8"/><text class="st-m st-w" x="410" y="130" text-anchor="middle">Dashboard bridge</text><text class="st-s st-w" x="410" y="148" text-anchor="middle" style="fill:#dfe6ef;">single read point</text>
+  <path class="edge" d="M240,135 L330,135" marker-end="url(#a12)"/>
+  <path class="edge" d="M490,120 L600,45" marker-end="url(#a12)"/>
+  <path class="edge" d="M490,128 L600,96" marker-end="url(#a12)"/>
+  <path class="edge" d="M490,140 L600,148" marker-end="url(#a12)"/>
+  <path class="edge" d="M490,150 L600,200" marker-end="url(#a12)"/>
+</svg>
+<figcaption><span class="fno">Figure 12.</span> <span class="cap">Master sheet to dashboard mapping.</span>
+The master sheet feeds a single bridge, which fans out into the dashboard's views. Every view traces back through the bridge to reconciled, cited figures.</figcaption>
+</figure>
+
+<h3>5.2 The dashboard views</h3>
+<table class="data">
+  <caption>Table 2 — Dashboard views and what they present</caption>
+  <thead><tr><th style="width:26%">View</th><th>What it shows</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Portfolio &amp; performance</strong></td><td>The fund's holdings, their valuations, and headline performance measures such as multiple on invested capital and rate of return, drawn straight from the reconciled figures.</td></tr>
+    <tr><td><strong>Investors &amp; commitments</strong></td><td>Who has committed capital, how much has been called and distributed, and each investor's capital position.</td></tr>
+    <tr><td><strong>Accounting &amp; NAV</strong></td><td>Net asset value, the distribution of returns between parties, fees, and the accounting backbone of the fund.</td></tr>
+    <tr><td><strong>Compliance</strong></td><td>Regulatory-facing status and the checks relevant to an Indian alternative investment fund, surfaced as clear pass / attention items.</td></tr>
+  </tbody>
+</table>
+<p class="small">Terms such as &ldquo;multiple on invested capital&rdquo;, &ldquo;rate of return&rdquo;, &ldquo;net
+asset value&rdquo; and &ldquo;alternative investment fund&rdquo; are defined in the glossary (Section 8).</p>
+
+<h3>5.3 Outputs, exports &amp; auditability</h3>
+<p>Beyond the on-screen views, the product produces two durable outputs. The first is the
+<strong>consolidated master workbook</strong> itself, which can be downloaded and used as the single
+reconciled dataset for the fund. The second is an <strong>audit trail</strong>: for every figure, a
+reference to the exact file and location it came from, and for every held item, a record of what could not
+be proven and how it was resolved. Together these mean any number on the dashboard can be traced to its
+origin, and any decision the system made can be reviewed after the fact.</p>
+
+<h3>5.4 Data integrity</h3>
+<p>Integrity rests on three properties established earlier and simply carried through to the dashboard:
+determinism (the same files always produce the same views), provenance (every figure is traceable), and
+fail-closed handling (nothing unverifiable is ever shown). Re-importing an unchanged set of files leaves
+the dashboard identical; importing corrected files updates exactly the affected figures and nothing else.</p>
+</section>
+
+<!-- ============================= 6. ASSUMPTIONS ============================= -->
+<section>
+<h2 id="s6">6. Assumptions, Dependencies &amp; Security</h2>
+
+<h3>6.1 Assumptions</h3>
+<ul>
+  <li>Source files are genuine fund reporting spreadsheets; the values in them are authoritative even when their layout is inconsistent.</li>
+  <li>Each fund's files are uploaded by an authorised user for that fund; the product organises and consolidates them, but does not judge their business correctness beyond internal reconciliation.</li>
+  <li>Where the source data is genuinely absent, the correct outcome is disclosure of the gap, not estimation.</li>
+  <li>A small, steady volume of held items requiring human resolution is expected and acceptable, and decreases over time as decisions are remembered.</li>
+</ul>
+
+<h3>6.2 Dependencies</h3>
+<ul>
+  <li><strong>An AI layer</strong> used solely to identify and locate structure within files. Its role is bounded by the determinism split in Section 4.2; it never produces numbers.</li>
+  <li><strong>The consolidated master sheet</strong> as the contract between the two halves of the product. The dashboard depends on its structure, not on any raw file.</li>
+  <li><strong>Per-client memory</strong> of resolved decisions and file identities, which is what lets coverage improve without re-tuning.</li>
+</ul>
+<p class="small">Specific technologies, vendors, and internal components are intentionally out of scope for this document.</p>
+
+<h3>6.3 Security &amp; access posture</h3>
+<p>At the policy level, the product is designed around strict separation of each client's data. Fund data is
+scoped to its owning organisation, so one client's files, master sheet, and dashboard are never visible to
+another. Access to the dashboard and to uploads is authenticated, and actions that change data are
+attributable to a user. Because every figure is traceable to its source and every held decision is
+recorded, the system is auditable by design. Data is retained as the reconciled master sheet plus its audit
+trail; source files are retained as needed to support that trace.</p>
+</section>
+
+<!-- ============================= 7. RISKS / METRICS / ROADMAP ============================= -->
+<section class="newpage">
+<h2 id="s7">7. Risks, Metrics &amp; Roadmap</h2>
+
+<h3>7.1 Risks &amp; mitigations</h3>
+<table class="data">
+  <caption>Table 3 — Key risks and how the design mitigates them</caption>
+  <thead><tr><th style="width:30%">Risk</th><th>Mitigation built into the design</th></tr></thead>
+  <tbody>
+    <tr><td>A wrong number reaches the dashboard.</td><td>Fail-closed gate: figures are emitted only when provable; everything else is held. Each check is tested to confirm it actually blocks its target error.</td></tr>
+    <tr><td>Two runs of the same files disagree.</td><td>Determinism split: all numbers are read by deterministic code, and identical inputs are proven to produce byte-identical output.</td></tr>
+    <tr><td>A new client or template breaks the system.</td><td>Universality principle: no mechanism depends on a known sheet, column, or client. Unfamiliar structure is located generically or held, never mis-read.</td></tr>
+    <tr><td>Periods or currencies are silently mismatched.</td><td>Period Algebra resolves every period to one canonical form or holds it; unknown currencies are disclosed rather than assumed.</td></tr>
+    <tr><td>Growth in file volume slows delivery.</td><td>The pipeline is engineered to process a full fund's file set within predictable time bounds, and caching removes repeated work.</td></tr>
+    <tr><td>Held items overwhelm users.</td><td>&ldquo;Resolve once, remember&rdquo;: each decision is recorded per client, so the review queue shrinks over time.</td></tr>
+  </tbody>
+</table>
+
+<h3>7.2 Success metrics</h3>
+<table class="data">
+  <caption>Table 4 — Success metrics</caption>
+  <thead><tr><th style="width:34%">Metric</th><th style="width:30%">Target</th><th>Why it matters</th></tr></thead>
+  <tbody>
+    <tr><td>Determinism</td><td>Identical inputs → identical outputs, every time</td><td>The foundation of trust in every displayed number.</td></tr>
+    <tr><td>Emitted-figure accuracy</td><td>Zero unverifiable figures on the dashboard</td><td>Direct measure of the core product promise.</td></tr>
+    <tr><td>Coverage of available data</td><td>All data that provably exists is captured; the rest is disclosed as absent</td><td>Completeness without invention.</td></tr>
+    <tr><td>Processing time at scale</td><td>A full fund's file set within predictable, published bounds</td><td>Users receive results on a reliable schedule.</td></tr>
+    <tr><td>Review-queue burden</td><td>Small and declining per client over time</td><td>Confirms the &ldquo;remember decisions&rdquo; loop is working.</td></tr>
+    <tr><td>Auditability</td><td>Every figure traceable to its source; every hold recorded</td><td>Makes the output defensible to oversight.</td></tr>
+  </tbody>
+</table>
+
+<h3>7.3 Phased roadmap</h3>
+<table class="data">
+  <caption>Table 5 — Phased roadmap (indicative)</caption>
+  <thead><tr><th style="width:20%">Phase</th><th style="width:26%">Theme</th><th>Focus</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Delivered</strong></td><td>Dashboard &amp; master-sheet contract</td><td>The dashboard and its views, reading from the consolidated master sheet, are built and in use.</td></tr>
+    <tr><td><strong>Current</strong></td><td>Pre-ingestion accuracy core</td><td>Determinism split, three-level identity, Period Algebra, fail-closed validation, and the caching layer — the accuracy engine that fills the master sheet.</td></tr>
+    <tr><td><strong>Current</strong></td><td>Scale &amp; performance</td><td>Processing a full fund's file set within predictable time bounds, verified against realistic file volumes rather than projections.</td></tr>
+    <tr><td><strong>Next</strong></td><td>Concept &amp; naming layer</td><td>Strengthening how the system recognises the same financial concept across differently-worded files — a prerequisite before widening the AI layer's role.</td></tr>
+    <tr><td><strong>Later</strong></td><td>Broadened identification</td><td>Extending automatic coverage so fewer items ever need review, always behind the same accuracy guarantees.</td></tr>
+  </tbody>
+</table>
+<p class="small">Phase ordering is deliberate: accuracy foundations precede any expansion of automation, so
+new capability is only ever added on top of guarantees that already hold.</p>
+</section>
+
+<!-- ============================= 8. GLOSSARY ============================= -->
+<section>
+<h2 id="s8">8. Glossary</h2>
+<div class="deflist">
+<dl>
+  <dt>AI layer / identification model</dt><dd>The part of the system that locates structure — which row or column holds a given figure. It never produces or alters numbers.</dd>
+  <dt>Alternative Investment Fund (AIF)</dt><dd>A privately pooled investment vehicle regulated in India; the fund type this product serves.</dd>
+  <dt>Analysable unit</dt><dd>A self-contained piece of a document the system reasons about — a sheet, a labelled section within it, or a single figure.</dd>
+  <dt>Byte fingerprint</dt><dd>An identity check answering &ldquo;is this the exact same file?&rdquo; based on its raw contents.</dd>
+  <dt>Content fingerprint</dt><dd>An identity check answering &ldquo;are the values the same?&rdquo;, ignoring cosmetic differences.</dd>
+  <dt>Layout fingerprint</dt><dd>An identity check answering &ldquo;is this the same shape/template?&rdquo;, ignoring the actual values.</dd>
+  <dt>Caching layer</dt><dd>A memory of prior results that lets unchanged work be reused, for speed, cost control, and consistency.</dd>
+  <dt>Consolidated master sheet</dt><dd>The single reconciled workbook that all downstream views and reports read from; the fund's one source of truth.</dd>
+  <dt>Determinism</dt><dd>The property that the same inputs always produce the same outputs, exactly.</dd>
+  <dt>Distribution</dt><dd>Cash returned by the fund to its investors.</dd>
+  <dt>Fail closed</dt><dd>The stance of withholding and flagging anything that cannot be proven, rather than guessing.</dd>
+  <dt>General Partner (GP)</dt><dd>The fund manager. Limited Partners (LPs) are the investors.</dd>
+  <dt>Hold</dt><dd>The state of a figure that could not be proven and is routed to review instead of being emitted.</dd>
+  <dt>Multiple on Invested Capital (MOIC)</dt><dd>How many times the invested capital is currently worth; a headline performance measure.</dd>
+  <dt>Net Asset Value (NAV)</dt><dd>The fund's total value less its liabilities.</dd>
+  <dt>Period Algebra</dt><dd>Treating a reporting period as a typed object and normalising every period expression to exactly one canonical period, or holding it — so periods never silently mismatch.</dd>
+  <dt>Provenance / citation</dt><dd>The reference stored with every emitted figure pointing to the exact file and location it came from.</dd>
+  <dt>Rate of return (IRR)</dt><dd>A time-sensitive measure of the fund's return to investors.</dd>
+  <dt>Review queue</dt><dd>The short list of held items awaiting a human decision; decisions are remembered per client.</dd>
+  <dt>Total function (in Period Algebra)</dt><dd>A mapping defined for every possible input — there is no period expression the system leaves undefined.</dd>
+</dl>
+</div>
+
+<hr class="soft">
+<p class="small" style="text-align:center; color:#666;">End of document · TrackfundAI Dashboard — Product Requirements Document · Version 1.0 · Confidential</p>
+</section>
+
+</body>
+</html>

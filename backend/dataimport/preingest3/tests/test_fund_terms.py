@@ -264,6 +264,22 @@ def test_fund_terms_sheet_renders_bundle_with_source_cell():
     assert any(r and r[0] == 'waterfall' and r[1] == 'European whole fund' for r in rows)
 
 
+def test_read_fund_identity_unwraps_value_format_tuples_REDDENING():
+    # the REAL grid shape from _value_format_grid: every cell is (value, number_format)
+    from backend.dataimport.preingest3 import fund_terms as ft
+    grid = [[('Fund name', 'General'), (None, 'General'), ('Acme Fund I', 'General')],
+            [('Legal structure', 'General'), ('SEBI Cat II AIF (Trust)', 'General')],
+            [('Vintage yr', 'General'), (2021, 'General')]]
+    out = ft._read_fund_identity(grid)
+    assert out.get('fund_name') == 'Acme Fund I'
+    assert out.get('legal_structure') == 'SEBI Cat II AIF (Trust)'
+    assert out.get('vintage_year') == '2021'
+    # REDDENING: cells are (value, fmt) TUPLES — the pre-fix code ran isinstance(v, str) on the
+    # tuple and matched nothing. Prove the un-unwrapped scan finds no label (the exact bug).
+    naive = next((v for row in grid for v in row if isinstance(v, str) and str(v).strip()), None)
+    assert naive is None, 'negative control void: raw (value,fmt) tuples must not match isinstance(str)'
+
+
 def test_mis_only_workbook_has_no_fund_terms_sheet():
     from backend.dataimport.preingest3.cir import Figure
     mis = CIR(as_of='2026-02-28', rate_card_id='rc')

@@ -184,6 +184,28 @@ def test_wrong_magnitude_anchor_still_holds_the_block():
     assert lr.held is True
 
 
+_FOREIGN_TOKEN_CALLS = [['Capital call ledger (USD Cr)'],      # foreign token + a scale unit
+                        ['Call no', 'date', 'amount'],
+                        ['C1', 'a', 150], ['C2', 'b', 150], ['C3', 'c', 150], ['C4', 'd', 150],
+                        ['Total called', '', 600]]
+
+
+def test_foreign_token_vs_inr_anchor_is_a_conflict_and_holds():
+    """Reddening control for the anchor→INR fix: the anchor's INR is POSITIVE currency
+    evidence, but it must NEVER blindly override a declared FOREIGN token. A USD-tokened
+    block tied to a ₹Cr control is a real currency conflict → HELD (on currency, not
+    scale: the block even declares 'Cr'). This reddens the instant the anchor is made to
+    force INR over a statement token, or the symmetric conflict-hold is removed."""
+    lr = ledger.extract_from_sheet(_FOREIGN_TOKEN_CALLS, 'S1', CAPITAL_CALLS, anchor_cr=D('600'),
+                                   label='t', content_fp='fp', rate_card=RC)
+    assert lr.held is True
+    # held on CURRENCY, not scale: the reason names BOTH sides of the mismatch (USD token vs
+    # INR anchor) — a scale hold would never name two currencies. (The literal word 'conflict'
+    # is past the 90-char hold_reason cap; USD/INR survive and are conflict-specific.)
+    reasons = [f.hold_reason or '' for rec in lr.records for f in rec.figures()]
+    assert any('USD' in r and 'INR' in r for r in reasons)
+
+
 # ── FEES part-year reconciliation (named/cited, not a plug) ────────────────────
 def _fees_rows(partyear_fee, itd_total):
     return [['Management & performance fees', '(Rs Cr)'],

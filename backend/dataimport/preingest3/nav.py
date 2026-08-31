@@ -152,8 +152,7 @@ def _as_of_date(as_of: str) -> Optional[_dt.date]:
 
 
 # ── per-file NAV signals ─────────────────────────────────────────────────────
-_EXCEL_ERRORS = {'#DIV/0!', '#REF!', '#N/A', '#VALUE!', '#NAME?', '#NULL!', '#NUM!',
-                 '#ERROR!', '#SPILL!', '#CALC!'}
+from .quantity import EXCEL_ERRORS as _EXCEL_ERRORS   # canonical set (was a local duplicate)
 
 
 @dataclass

@@ -1,9 +1,12 @@
 """Permanent regression fixture for the geography-gated monetary frame.
 
-Currency and scale are one 'frame', resolved once per statement. The key danger
-the fixture guards: an INR mention ANYWHERE in a workbook must never flip a
-known-foreign entity's statement to INR (a Malaysian company's MYR sheet is not
-rupees because some FX note names them). Geography gates the INR fallback.
+Currency and scale are one 'frame', resolved once per statement. Currency is CONFIRMED
+only by POSITIVE, NON-CONFLICTING evidence (a statement token, or a known domicile);
+absent or conflicting evidence is AMBIGUOUS ⇒ hold, never INR-by-default. The key dangers
+guarded: (1) an INR mention ANYWHERE must never flip a known-foreign entity to INR; (2) the
+UNTOKENED-FOREIGN hole — a foreign figure with no marker and unknown domicile must HOLD, never
+silently ship as INR (a 15-20× error); (3) any statement-token-vs-domicile conflict holds in
+BOTH directions (INR-stmt-vs-foreign AND foreign-stmt-vs-INR), never auto-applied.
 """
 from backend.dataimport.preingest3 import units
 
@@ -20,21 +23,57 @@ def test_inr_mention_never_overrides_foreign_domicile():
     assert 'inr_mention_ignored_foreign_domicile' in flags
 
 
-def test_inr_fallback_only_when_domicile_unknown():
-    ccy, esc, _, _ = units.resolve_currency(stmt_currency=None, geo_currency=None, inr_mentioned=True)
+# ── REDDENING CONTROLS: each fail-OPEN branch must be DEAD. Every assertion proves BOTH the new
+# fail-closed behaviour AND the death of the old INR-emit path (ccy is None, not 'INR'; the old flag
+# absent). These are the real guarantee — they redden the instant anyone reintroduces fail-open, and
+# they can't be bent the way a flipped positive assertion can. ──────────────────────────────────────
+
+def test_untokened_foreign_with_inr_mention_now_HOLDS_not_inr():
+    # untokened-foreign hole: no token, domicile UNKNOWN, only a workbook-wide INR mention. USED to emit
+    # INR ('currency_inr_by_mention') → a foreign file's FX note names rupees too (15-20× error).
+    ccy, esc, _, flags = units.resolve_currency(stmt_currency=None, geo_currency=None, inr_mentioned=True)
+    assert esc and ccy is None                                   # new: held
+    assert ccy != 'INR' and 'currency_inr_by_mention' not in flags   # negative control: old path dead
+    assert 'currency_ambiguous_no_evidence' in flags
+
+
+def test_no_evidence_at_all_HOLDS_not_default_inr():
+    # no token, no domicile, no mention. USED to emit INR ('currency_assumed_inr').
+    ccy, esc, _, flags = units.resolve_currency(stmt_currency=None, geo_currency=None, inr_mentioned=False)
+    assert esc and ccy is None
+    assert ccy != 'INR' and 'currency_assumed_inr' not in flags       # negative control: old path dead
+    assert 'currency_ambiguous_no_evidence' in flags
+
+
+def test_indian_no_label_still_emits_inr_rule_ii_load_bearing():
+    # ADJUDICATED (branch 3): a KNOWN India domicile with no token is POSITIVE evidence → INR emits
+    # (rule ii). This is unchanged and LOAD-BEARING — Hubler/Clientell/InstaAstro/Aliste/CPC all resolve
+    # their currency this way. It is NOT the untokened-foreign hole (that is geo=None).
+    ccy, esc, _, _ = units.resolve_currency(stmt_currency=None, geo_currency='INR', inr_mentioned=False)
     assert ccy == 'INR' and not esc
 
 
 def test_statement_inr_vs_foreign_domicile_is_held():
-    # a Singapore entity 'reporting' INR in-sheet is a mislabel → escalate, never apply
+    # symmetric conflict, direction A (already held pre-fix): a Singapore entity 'reporting' INR is a
+    # mislabel → hold, never apply.
     ccy, esc, reason, flags = units.resolve_currency(stmt_currency='INR', geo_currency='SGD', inr_mentioned=False)
-    assert esc and ccy is None
-    assert 'currency_inr_vs_foreign_domicile' in flags
+    assert esc and ccy is None and any('currency_conflict' in f for f in flags)
 
 
-def test_default_inr_when_no_evidence():
-    ccy, esc, _, flags = units.resolve_currency(stmt_currency=None, geo_currency=None, inr_mentioned=False)
-    assert ccy == 'INR' and not esc and 'currency_assumed_inr' in flags
+def test_foreign_token_vs_indian_domicile_is_held_the_direction_that_used_to_emit():
+    # symmetric conflict, direction B (the newly-closed asymmetry): domicile India but the statement
+    # carries a foreign token. USED to trust the token and EMIT MYR (escalate=False) — now HELD.
+    ccy, esc, _, flags = units.resolve_currency(stmt_currency='MYR', geo_currency='INR', inr_mentioned=False)
+    assert esc and ccy is None                                   # new: held
+    assert ccy != 'MYR'                                          # negative control: old emit path dead
+    assert any('currency_conflict' in f for f in flags)
+
+
+def test_foreign_no_label_known_domicile_resolves_foreign_then_rate_gated():
+    # foreign-no-label with a KNOWN foreign domicile → the foreign currency (rule ii); it then holds
+    # downstream for want of a rate, never silently INR. (The geo=None variant holds at currency above.)
+    ccy, esc, _, flags = units.resolve_currency(stmt_currency=None, geo_currency='MYR', inr_mentioned=True)
+    assert ccy == 'MYR' and not esc and 'inr_mention_ignored_foreign_domicile' in flags
 
 
 def test_frame_holds_all_when_scale_unresolved():

@@ -31,10 +31,19 @@ _WS = re.compile(r"\s+")
 
 def normalise_label(text) -> str:
     """Lower-case, drop bracketed notes like '(loss)'/'(₹cr)', strip punctuation
-    and collapse whitespace — so 'Total Revenue (₹ Cr)' and 'total revenue' meet."""
+    and collapse whitespace — so 'Total Revenue (₹ Cr)' and 'total revenue' meet.
+
+    The '%' sign is PRESERVED as a 'pct' token before punctuation is stripped: it is
+    the only signal distinguishing a percentage column from its bare noun ('Holding %'
+    the ownership stake vs 'FV of holding' the fair value; 'Equity %' the stake vs a
+    bare 'Equity' balance-sheet line). Without this, every '%'-bearing synonym silently
+    collapses to its noun and whole-word-matches unrelated columns. Applies to BOTH the
+    label and the synonym (they pass through the same function), so a '%' synonym only
+    ever matches a '%' header — universal across every concept, not just ownership."""
     if text is None:
         return ''
     s = str(text).lower()
+    s = s.replace('%', ' pct ')           # preserve percent as a token (it is the signal)
     s = re.sub(r'\([^)]*\)', ' ', s)      # remove parenthetical notes
     s = _PUNCT.sub(' ', s)
     return _WS.sub(' ', s).strip()
@@ -48,6 +57,16 @@ def _load_learned() -> dict:
         except Exception:
             return {}
     return {}
+
+
+def learned_lexicon() -> dict:
+    """The runtime-GROWN synonym map (reviewer-approved labels), as currently persisted.
+
+    Read by contract.contract_signature() so a lexicon that grew since a cached extraction
+    re-keys the contract (U8/D8): the seed CONCEPT_LEXICON lives in .py source and is caught
+    by net_logic_version, but this learned JSON is NOT source — without it, a reviewer approval
+    silently changes extraction behaviour while every cache-key dimension stays constant."""
+    return _load_learned()
 
 
 def synonyms(concept: str) -> list:

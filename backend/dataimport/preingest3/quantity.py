@@ -35,6 +35,15 @@ FLOW = 'flow'     # accrues over a period (revenue, EBITDA, capital called)
 STOCK = 'stock'   # a balance at an instant (cash, NAV, headcount)
 _NATURES = {FLOW, STOCK}
 
+# ── spreadsheet error tokens ─────────────────────────────────────────────
+# The canonical set of Excel error strings a cell may carry when a formula
+# breaks (#REF! after a deleted range, #DIV/0!, a broken external link, …).
+# Such a cell holds NO extractable figure. Centralised here (a leaf both the
+# extractor and the NAV builder import) so the definition never drifts across
+# call sites — a scattered copy is how a solved bug re-arms.
+EXCEL_ERRORS = frozenset({'#DIV/0!', '#REF!', '#N/A', '#VALUE!', '#NAME?', '#NULL!',
+                          '#NUM!', '#ERROR!', '#SPILL!', '#CALC!'})
+
 # ── unit scale → multiplier to ABSOLUTE native-currency units ────────────
 # Universal Indian + international scale words. NEVER inferred from magnitude;
 # only set from a declared unit on the sheet (the locator reports declared_unit).

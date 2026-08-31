@@ -24,6 +24,7 @@ from __future__ import annotations
 import datetime as _dt
 import hashlib
 import os
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -42,6 +43,52 @@ import openpyxl
 # under-inclusion (a stale-logic hole). Also covers the use_model=True model path (locator/llm/
 # namematch/templates) that a deterministic trace can't see but the cache serves under one key.
 _LOGIC_VERSION: Optional[str] = None
+
+# byte_fp → (content_fp, layout_fp). compute_identity is a PURE function of file bytes but was
+# called 5-7× per file per run (canonical-order sort + per-file loops + per-extract), each time
+# re-parsing the whole workbook with openpyxl (~6s/file) — the dominant cost of a model-OFF run.
+# Memoising by byte_fp (the exact-bytes hash) skips the re-parse on every repeat while staying
+# provably safe: any edit changes the bytes → new byte_fp → miss → recompute (the edit-retest
+# invariant). Content-derived, so label/path (call-specific) are NOT part of the key.
+# BOUNDED (LRU): a plain dict would grow without limit in a long-lived client process (a slow
+# memory leak — invisible in the 15-file dev suite, real in production). The cap turns it into an
+# LRU: past _IDENTITY_CACHE_MAX distinct files the least-recently-used entry is evicted. Eviction
+# is VALUE-NEUTRAL — an evicted file simply misses and recomputes the identical (pure) fingerprints,
+# never a stale/wrong number. Entries are tiny (three hex strings), so the cap is generous.
+_IDENTITY_CACHE_MAX = 1024
+_IDENTITY_CACHE: "OrderedDict[str, tuple]" = OrderedDict()
+
+
+def clear_identity_cache() -> None:
+    """Drop the in-process identity memo (for tests/long-lived processes; not needed for
+    correctness — the cache is byte-keyed and pure)."""
+    _IDENTITY_CACHE.clear()
+
+
+def _cache_put(byte_fp: str, content_fp: str, layout_fp: str) -> None:
+    """Insert/refresh an identity entry and evict the least-recently-used beyond the cap, so the
+    memo cannot grow without bound in a long-lived process. Value-neutral: an evicted file just
+    misses next time and recomputes the identical (pure) fingerprints — never a stale/wrong one."""
+    _IDENTITY_CACHE[byte_fp] = (content_fp, layout_fp)
+    _IDENTITY_CACHE.move_to_end(byte_fp)
+    while len(_IDENTITY_CACHE) > _IDENTITY_CACHE_MAX:
+        _IDENTITY_CACHE.popitem(last=False)
+
+
+# PARSE-ONCE: the per-run cache of the single unified workbook parse (fingerprints + grid), keyed by
+# (path, mtime, size) like the profiler cache. compute_identity AND profiler.profile_file both read it,
+# so a workbook is opened ONCE per run instead of twice (the identity fingerprint pass and the profiler
+# grid pass used to be separate openpyxl loads — the dominant sequential cost at scale). It holds grids,
+# so it is CLEARED at each pipeline.run start (clear_parse_cache); the tiny fingerprint cache above
+# persists across runs (its entries are immutable strings).
+_PARSE_CACHE: dict = {}
+
+
+def clear_parse_cache() -> None:
+    """Drop the per-run unified-parse cache (grids). Called at each pipeline.run start so a run reuses
+    each file's single parse but no run holds another run's grids. Memory-bounding + cross-run
+    freshness; correctness-neutral (a re-parse yields an identical result)."""
+    _PARSE_CACHE.clear()
 
 
 @dataclass(frozen=True)
@@ -73,45 +120,86 @@ def _is_volatile_value(v) -> bool:
     return isinstance(v, (int, float, _dt.datetime, _dt.date, _dt.time))
 
 
-def compute_identity(label: str, path: str) -> FileIdentity:
-    """Compute all three fingerprints in a single read-only pass (data_only so
-    cached computed values are read, never formulas — build rule from the
-    preingest layer: ALWAYS data_only=True, NEVER eval a formula)."""
+def _parse_workbook(path: str):
+    """The SINGLE openpyxl pass that feeds BOTH file identity and the profiler grid. In one
+    read-only, data_only iteration it accumulates the content/layout fingerprint parts (identical,
+    line-for-line, to the historical compute_identity loop) AND the per-sheet value grid (identical
+    to the historical profiler._read_grid: [[cell.value ...] ...]) — so unifying the two parses
+    cannot change either output. Returns (byte_fp, content_fp, layout_fp, grid, error)."""
     with open(path, 'rb') as fh:
         byte_fp = hashlib.sha256(fh.read()).hexdigest()
-
     content_parts: List[str] = []
     layout_parts: List[str] = []
+    grid: dict = {}
     try:
         wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    except Exception:
-        # Non-workbook or unreadable → identity still defined by bytes; content
-        # and layout fall back to the byte hash so it is treated as unique.
-        return FileIdentity(label, path, byte_fp, byte_fp, byte_fp, ())
+    except Exception as e:
+        # Non-workbook or unreadable → identity still defined by bytes; the profiler re-raises
+        # this to reproduce its exact error-profile. content/layout fall back to the byte hash.
+        return (byte_fp, byte_fp, byte_fp, {}, e)
 
     for sn in wb.sheetnames:                       # sheetnames order is canonical
         ws = wb[sn]
         content_parts.append(f'#SHEET#{sn}')
         layout_parts.append(f'#SHEET#{sn}')
+        rows_out: list = []
         for row in ws.iter_rows():
+            vals = []
             for cell in row:
                 v = cell.value
+                vals.append(v)                      # grid keeps EVERY cell, positionally (profiler parity)
                 if v is None or v == '':
                     continue
                 coord = cell.coordinate
                 content_parts.append(f'{coord}={v!r}')
                 if not _is_volatile_value(v):       # text = structure; values stripped
                     layout_parts.append(f'{coord}={str(v).strip().lower()!r}')
+            rows_out.append(vals)
+        grid[sn] = rows_out
     try:
         wb.close()
     except Exception:
         pass
 
-    return FileIdentity(
-        label=label, path=path, byte_fp=byte_fp,
-        content_fp=_sha(content_parts) if content_parts else byte_fp,
-        layout_fp=_sha(layout_parts) if layout_parts else byte_fp,
-    )
+    content_fp = _sha(content_parts) if content_parts else byte_fp
+    layout_fp = _sha(layout_parts) if layout_parts else byte_fp
+    return (byte_fp, content_fp, layout_fp, grid, None)
+
+
+def _parse_workbook_cached(path: str):
+    """Per-run memo of _parse_workbook, keyed by (path, mtime, size) like the profiler — one parse
+    per file per run, shared by identity + profiling. Cleared each run by clear_parse_cache."""
+    try:
+        st = os.stat(path)
+        key = (path, st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = (path, None, None)
+    hit = _PARSE_CACHE.get(key)
+    if hit is not None:
+        return hit
+    r = _parse_workbook(path)
+    _PARSE_CACHE[key] = r
+    return r
+
+
+def compute_identity(label: str, path: str) -> FileIdentity:
+    """Compute all three fingerprints from the single unified parse (data_only so cached computed
+    values are read, never formulas — ALWAYS data_only=True, NEVER eval a formula). The same parse
+    also yields the profiler grid, cached per-run so profile_file reuses this exact open (parse-once)."""
+    with open(path, 'rb') as fh:
+        byte_fp = hashlib.sha256(fh.read()).hexdigest()
+
+    cached = _IDENTITY_CACHE.get(byte_fp)          # pure, byte-keyed → any edit misses, never stale
+    if cached is not None:
+        _IDENTITY_CACHE.move_to_end(byte_fp)       # most-recently-used (LRU bookkeeping)
+        return FileIdentity(label, path, byte_fp, cached[0], cached[1])
+
+    _bfp, content_fp, layout_fp, _grid, err = _parse_workbook_cached(path)
+    _cache_put(byte_fp, content_fp, layout_fp)
+    if err is not None:                            # non-workbook/unreadable → identity by bytes
+        return FileIdentity(label, path, byte_fp, byte_fp, byte_fp, ())
+    return FileIdentity(label=label, path=path, byte_fp=byte_fp,
+                        content_fp=content_fp, layout_fp=layout_fp)
 
 
 def canonical_sort(identities: List[FileIdentity]) -> List[FileIdentity]:
@@ -155,7 +243,8 @@ def net_logic_version() -> str:
 
 
 def extraction_cache_key(content_fp: str, *, as_of, rate_card_id, anchor_cr,
-                         domicile, use_model, logic_version: str = None) -> str:
+                         domicile, use_model, logic_version: str = None,
+                         contract_sig: str = None) -> str:
     """The PROVABLY-COMPLETE key for the per-file extraction/reuse cache: content_fp PLUS
     every run input that can change the extracted CIR. content_fp ALONE is a config-staleness
     bug — a file's INR-config record served under a new rate card / as_of / anchor / domicile
@@ -163,7 +252,13 @@ def extraction_cache_key(content_fp: str, *, as_of, rate_card_id, anchor_cr,
     pure attribution (0 value-diffs when it alone changes), so keying on it would only cause
     false cache misses. `as_of` is kept explicit even though today it reaches extraction only
     via rate_card_id — future-proofing as_of-dependent period selection. logic_version defaults
-    to the structural net-module hash; a caller may inject one (tests / a pinned prod version)."""
+    to the structural net-module hash; a caller may inject one (tests / a pinned prod version).
+    contract_sig (schema + SEED-and-LEARNED lexicon + identities + checks + tolerances) closes
+    D8: net_logic_version hashes preingest3 .py source only, so it misses the out-of-package
+    OUTPUT SCHEMA and the runtime-grown learned-synonym JSON — both of which change the CIR."""
     lv = logic_version if logic_version is not None else net_logic_version()
+    if contract_sig is None:
+        from .contract import contract_signature      # deferred: identity is foundational
+        contract_sig = contract_signature()
     return _sha([content_fp, str(as_of), str(rate_card_id),
-                 str(anchor_cr), str(domicile), '1' if use_model else '0', lv])
+                 str(anchor_cr), str(domicile), '1' if use_model else '0', lv, contract_sig])

@@ -75,9 +75,63 @@ def test_cache_key_includes_every_value_affecting_input():
     assert extraction_cache_key('CFP', **{**base, 'domicile': 'SG'}) != k0
     assert extraction_cache_key('CFP', **{**base, 'use_model': True}) != k0
     assert extraction_cache_key('CFP', **base, logic_version='lv_ZZZ') != k0  # code version
+    assert extraction_cache_key('CFP', **base, contract_sig='ct_ZZZ') != k0   # B4: contract
     assert extraction_cache_key('CFP', **base) == k0                       # deterministic
     # entity is NOT a parameter — excluded by construction (proven pure attribution), so it
     # can never cause a false cache miss.
+
+
+# ── B4: the contract (schema + seed-AND-learned lexicon + identities/checks/tolerances) is
+#    in the key, and — the live hole — a LEARNED-lexicon change re-keys it. net_logic_version
+#    hashes preingest3 .py source only, so it misses (a) the out-of-package OUTPUT SCHEMA and
+#    (b) the runtime-grown learned-synonym JSON; contract_signature carries both. ───────────
+def test_learned_lexicon_growth_rekeys_extraction_cache_REDDENING(monkeypatch):
+    from backend.dataimport.preingest3 import contract, lexicon
+
+    base = dict(as_of='2026-02-28', rate_card_id='rc_A', anchor_cr='100',
+                domicile='IN', use_model=False)
+
+    # empty learned lexicon → baseline contract signature and baseline extraction key
+    monkeypatch.setattr(lexicon, '_load_learned', lambda: {})
+    sig_empty = contract.contract_signature()
+    k_empty = extraction_cache_key('CFP', **base)
+
+    # a reviewer approves a NEW synonym → the learned lexicon grows (exactly what learn() does)
+    monkeypatch.setattr(lexicon, '_load_learned', lambda: {'revenue': ['gross billings topline']})
+    sig_grown = contract.contract_signature()
+    k_grown = extraction_cache_key('CFP', **base)
+
+    assert sig_grown != sig_empty, \
+        'reviewer-approved (learned) synonym did NOT re-key the contract — live D8 staleness hole'
+    assert k_grown != k_empty, \
+        'learned-lexicon growth did not reach the extraction cache key — stale extraction served'
+
+    # NEGATIVE CONTROL: a SEED-ONLY signature (the pre-fix behaviour) is BLIND to learned growth
+    # — proving it is specifically the learned-lexicon dimension that closes the hole, not luck.
+    import hashlib
+    import json as _json
+
+    def _seed_only_sig():
+        blob = _json.dumps({'lexicon': {k: sorted(v)
+                                        for k, v in contract.CONCEPT_LEXICON.items()}},
+                           sort_keys=True)
+        return hashlib.sha256(blob.encode()).hexdigest()
+
+    s0 = _seed_only_sig()
+    monkeypatch.setattr(lexicon, '_load_learned', lambda: {'revenue': ['another fresh label']})
+    assert _seed_only_sig() == s0, \
+        'seed-only signature reacted to learned growth — negative control is not isolating the bug'
+
+
+def test_contract_dimension_is_load_bearing_not_decorative():
+    # The pre-fix key formula EXCLUDED the contract entirely; this pins that the dimension we
+    # added is the thing doing the work — two different contracts must diverge, same must agree.
+    base = dict(as_of='2026-02-28', rate_card_id='rc_A', anchor_cr='100',
+                domicile='IN', use_model=False)
+    a = extraction_cache_key('CFP', **base, contract_sig='ct_A')
+    b = extraction_cache_key('CFP', **base, contract_sig='ct_B')
+    assert a != b, 'distinct contracts collapsed to one key — contract dimension is not wired'
+    assert a == extraction_cache_key('CFP', **base, contract_sig='ct_A')  # deterministic
 
 
 # ── the adversarial config case: no stale-config serve (the assertion that catches the bug) ──

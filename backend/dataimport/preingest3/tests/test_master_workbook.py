@@ -279,3 +279,27 @@ def test_format_pct_canonical_with_negative_controls():
     unrounded = format(Decimal(70) / Decimal(600) * 100, 'f')
     assert unrounded.startswith('11.6666'), 'negative control void: unrounded should be a long tail'
     assert format_pct(Decimal(70) / Decimal(600)) != unrounded + '%'
+
+
+# 10 ── RECONCILIATION: a PASSING soft check is published (U7), not dropped ───
+def test_reconciliation_publishes_passing_soft_check_REDDENING():
+    cir = _base_cir()
+    cir.checks.append({'id': 'portfolio_revenue_vs_fund', 'class': 'soft', 'status': 'pass',
+                       'lhs': '100', 'rhs': '113', 'detail': '13% variance within tolerance — still published'})
+    cir.checks.append({'id': 'tranches_sum_to_cost', 'class': 'hard', 'status': 'pass',
+                       'lhs': '448', 'rhs': '448', 'detail': 'ties'})
+    rows = _sheet_rows(mw.build_master(cir, files=['x']), 'RECONCILIATION')
+    # REDDENING: a PASSING SOFT check must appear — if the sheet filtered to failures it vanishes
+    soft = _find(rows, 'portfolio_revenue_vs_fund')
+    assert soft is not None and soft[1] == 'soft' and 'PASS' in soft
+    assert _find(rows, 'tranches_sum_to_cost') is not None      # hard pass also published
+    assert any('TOTALS' in str(r[0]) for r in rows)
+
+
+# 11 ── DASHBOARD_BRIDGE is a widget→source map (not the flat dump) ───────────
+def test_dashboard_bridge_is_widget_map_with_granular_drilldown():
+    rows = _sheet_rows(mw.build_master(_base_cir(), files=['x']), 'DASHBOARD_BRIDGE')
+    flat = [str(c) for r in rows for c in r]
+    assert any('Widget' in c for c in flat) and any('Calc Logic' in c for c in flat)   # widget-map header
+    assert any(r and r[0] == 'Fund Overview' for r in rows)                            # a curated widget row
+    assert any('GRANULAR PROVENANCE FEED' in c for c in flat)                          # drill-down retained
