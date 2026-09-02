@@ -139,6 +139,42 @@ def test_config_change_misses_even_on_identical_content(tmp_path):
 
 
 # ══════════════════════════════════════════════════════════════════════════════════
+# CROSS-TENANT ISOLATION (load-bearing) — the entry key is org-BLIND (extraction_cache_key excludes
+# org), so two tenants uploading a byte-identical file produce the SAME key. The store must NEVER serve
+# one tenant's finished answer to another: isolation is carried by a per-org namespace in the PATH.
+# ══════════════════════════════════════════════════════════════════════════════════
+def test_org_dir_is_deterministic_distinct_and_traversal_safe(tmp_path):
+    base = str(tmp_path)
+    assert golden_store.org_dir(None, 'o') is None               # no base → inactive (guards like store_dir)
+    assert golden_store.org_dir(base, 'o') == golden_store.org_dir(base, 'o')     # stable across calls
+    assert golden_store.org_dir(base, 'A') != golden_store.org_dir(base, 'B')     # distinct orgs → distinct dirs
+    # a hostile org string is HASHED, never interpolated as a path → it can never escape the base dir
+    evil = golden_store.org_dir(base, '../../etc/../x')
+    assert os.path.commonpath([os.path.normpath(base), evil]) == os.path.normpath(base)
+
+
+def test_identical_file_is_isolated_across_tenants(tmp_path):
+    base = str(tmp_path / 'store')
+    key = _key('SAME_FP')                                        # SAME content+config → SAME ck for both tenants
+    da = golden_store.org_dir(base, 'orgA')
+    db = golden_store.org_dir(base, 'orgB')
+    assert da != db
+    golden_store.put(da, key, _rec('CompanyA'))                 # org A caches its finished answer
+    assert golden_store.get(da, key).entity_id == 'CompanyA'     # org A hits its own entry
+    assert golden_store.get(db, key) is None                     # org B, IDENTICAL key, is served NOTHING (no leak)
+
+
+def test_shared_base_would_leak_proving_namespacing_is_load_bearing(tmp_path):
+    # NEGATIVE CONTROL: without the org namespace (put+get on the SAME base dir), the identical key HITS
+    # across tenants — the exact cross-fund leak the org_dir namespace prevents. Reddens against the bug.
+    base = str(tmp_path / 'store')
+    key = _key('SAME_FP')
+    golden_store.put(base, key, _rec('CompanyA'))               # (the forbidden shared-dir case)
+    assert golden_store.get(base, key) is not None              # a second tenant with the same key WOULD be served this
+    # …whereas org-scoped, the same key is isolated — proven in test_identical_file_is_isolated_across_tenants.
+
+
+# ══════════════════════════════════════════════════════════════════════════════════
 # PIPELINE INTEGRATION — warm run serves from the durable store; edit → fresh recompute
 # ══════════════════════════════════════════════════════════════════════════════════
 @_real
@@ -149,8 +185,8 @@ def test_identity_cache_skips_reparse_but_edit_forces_recompute(tmp_path, monkey
     shutil.copy(os.path.join(IN, _SAMPLE), work)
 
     calls = {'n': 0}
-    real = identity.openpyxl.load_workbook
-    monkeypatch.setattr(identity.openpyxl, 'load_workbook',
+    real = identity._parse_workbook                        # reader-agnostic parse point (calamine or fallback)
+    monkeypatch.setattr(identity, '_parse_workbook',
                         lambda *a, **k: (calls.__setitem__('n', calls['n'] + 1) or real(*a, **k)))
 
     id1 = identity.compute_identity('f', work)
@@ -185,12 +221,52 @@ def test_pipeline_warm_run_serves_from_store_and_edit_forces_recompute(tmp_path,
 
     pipeline.run(files, as_of='2026-06-30', org='t', rate_card=rc, store_dir=store)
     cold = calls['n']
-    assert cold > 0 and len(golden_store.load(store)) > 0     # cold run computed + persisted
+    _od = golden_store.org_dir(store, 't')                    # the pipeline namespaces the base by org
+    assert cold > 0 and len(golden_store.load(_od)) > 0       # cold run computed + persisted UNDER the org namespace
+    assert golden_store.load(store) == {}                    # …and NOTHING at the shared base (proves org-scoping)
 
     calls['n'] = 0
     pipeline.run(files, as_of='2026-06-30', org='t', rate_card=rc, store_dir=store)
     warm = calls['n']
     assert warm < cold                                       # warm run served attributions from the store
+
+
+@_real
+@pytest.mark.slow
+def test_warm_run_output_is_byte_identical_to_cold(tmp_path):
+    """WARM==COLD — the complement to acceptance test 1. Acceptance test 1 proves INVALIDATION (edit →
+    miss → fresh read); this proves a HIT returns the SAME answer, not merely that a miss recomputes. A
+    cold run (empty store) populates it; a warm run (same files, same config, same logic) serves the cached
+    Records; the emitted master workbook must be BYTE-IDENTICAL — the cache changes speed, never numbers.
+    The workbook is a pure function of the CIR, so this closes the loop on the store's core promise. (The
+    currency_report is a separate RunResult field, intentionally observation-order dependent on a warm
+    serve, and not part of the workbook — see pipeline.run's re-observation note — so it is out of scope
+    here by design.)"""
+    from backend.dataimport.preingest3 import pipeline, master_workbook as mw
+    from backend.dataimport.preingest3.ratecard import default_inr_card
+
+    files = [(f, os.path.join(IN, f)) for f in sorted(os.listdir(IN)) if f.endswith('.xlsx')
+             and not f.startswith('~$')]
+    manifest = sorted(f for f, _ in files)
+    store = str(tmp_path / 'store')
+    rc = default_inr_card('2026-06-30')
+
+    def _wb_bytes(res, name):
+        wb = mw.build_master(res.cir, rate_card=rc, files=manifest)
+        p = str(tmp_path / name)
+        mw.save_reproducible(wb, p)                           # byte-stable save (normalises zip timestamps)
+        with open(p, 'rb') as fh:
+            return fh.read()
+
+    cold = pipeline.run(files, as_of='2026-06-30', org='warmcold', rate_card=rc, store_dir=store)
+    assert len(golden_store.load(golden_store.org_dir(store, 'warmcold'))) > 0    # cold populated the store
+    cold_bytes = _wb_bytes(cold, 'cold.xlsx')
+
+    warm = pipeline.run(files, as_of='2026-06-30', org='warmcold', rate_card=rc, store_dir=store)
+    warm_bytes = _wb_bytes(warm, 'warm.xlsx')
+
+    assert warm_bytes == cold_bytes, \
+        'warm run (served from the golden store) differs from cold — a cache HIT changed the answer'
 
 
 # ══════════════════════════════════════════════════════════════════════════════════
@@ -215,8 +291,8 @@ def test_identity_cache_is_lru_bounded_and_eviction_recomputes_correctly(tmp_pat
     assert len(identity._IDENTITY_CACHE) == 2                        # BOUNDED (plain dict would be 3)
 
     calls = {'n': 0}
-    real = identity.openpyxl.load_workbook
-    monkeypatch.setattr(identity.openpyxl, 'load_workbook',
+    real = identity._parse_workbook                        # reader-agnostic parse point (calamine or fallback)
+    monkeypatch.setattr(identity, '_parse_workbook',
                         lambda *a, **k: (calls.__setitem__('n', calls['n'] + 1) or real(*a, **k)))
     identity.clear_parse_cache()                                     # parse-once: a real run starts with a COLD
     # per-run parse cache, so the recompute below is forced by the _IDENTITY_CACHE eviction — not served warm

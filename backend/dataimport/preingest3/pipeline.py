@@ -68,6 +68,21 @@ _FUND_FIGS = ('cost', 'fair_value')
 _MAX_SCHEDULE_COMPANIES = 200
 
 
+class PreingestConservationError(RuntimeError):
+    """Raised (fail-closed) when the file-conservation invariant is violated — an input file produced
+    no terminal record, or produced more than one. A missing file is a HARD ERROR, never a silently
+    smaller output: the run refuses to finish rather than drop a file the user uploaded."""
+
+
+# HELD reason codes — a small CLOSED enum so a hold is auditable, not a free-text black hole. Every
+# non-attributed terminal record carries one; the two-number measurement tallies cold holds by these.
+HELD_PARSE_ERROR = 'parse_error'                  # could not be read/extracted (corrupt / format / timeout)
+HELD_UNRESOLVED_IDENTITY = 'unresolved_identity'  # opened+read but not confidently matched to a company
+HELD_AMBIGUOUS_MATCH = 'ambiguous_match'          # matched >1 company (collision) → held, never guess
+HELD_NO_CONTENT = 'no_extractable_content'        # opened but no time-series statement / usable content
+HELD_MISROUTED = 'misrouted_schedule'             # looked like a schedule but too many companies (misroute)
+
+
 @dataclass
 class FileReport:
     label: str
@@ -76,6 +91,8 @@ class FileReport:
     entity_id: Optional[str] = None
     reason: str = ''
     content_fp: str = ''
+    reason_code: str = ''           # closed-enum HELD_* category when not attributed (auditable hold)
+    path: str = ''                  # the INPUT file path — per-upload instance identity for conservation
 
 
 @dataclass
@@ -256,8 +273,16 @@ def _extract_company_worker(task):
     try:
         rec = extract_company(company, path, rate_card=rate_card, entity=company,
                               domicile=domicile, anchor_cr=anchor_cr, use_model=use_model)
+    except Exception as e:  # noqa: BLE001 — CONSERVATION: a per-file failure (corrupt / password / unknown
+        # format / timeout / OOM-on-that-file) MUST become a HELD record, never crash the run or let a
+        # swallowed worker exception silently lose the file. The emit loop turns this _note into a held
+        # report with reason_code=parse_error, so `in == attributed + held` still balances.
+        rec = Record('mis', entity_id=company,
+                     fields={'company': company, '_note': f'parse_error: {type(e).__name__}: {e}'[:160]})
     finally:
         currency_ledger.set_active(prev)          # restore (matters only for the serial/in-process path)
+        clear_parse_cache()                        # L2: release THIS file's grid so a reused pool worker
+        clear_profile_cache()                      # never hoards every grid it touches across tasks
     return ck, rec, local.observations()
 
 
@@ -277,6 +302,93 @@ def _run_extractions(tasks, *, rate_card, use_model, max_workers):
     else:
         results = [_extract_company_worker(t) for t in full]
     return {ck: (rec, obs) for ck, rec, obs in results}
+
+
+@dataclass
+class _Scan:
+    """L2 front-end fact for ONE file, returned in canonical (content_fp) order. An MIS file carries only
+    its resolution `hints` and NO grid — the grid is released inside the worker — so at 100 files the parent
+    holds zero MIS grids. A fund-domain file (few) carries the re-parsed `prof` the fund pipeline needs.
+    Routing is byte-identical to the serial path; this dataclass only changes WHERE the parse happens."""
+    label: str
+    path: str
+    content_fp: str
+    role: str
+    hints: Optional[list] = None
+    prof: Optional[dict] = None
+    reason: str = ''
+
+
+def _scan_one(label: str, path: str, *, use_model: bool) -> _Scan:
+    """Profile + identity + structural route for ONE file, in-process (the serial/reference front end).
+    Fund-domain keeps its `prof` (the parent needs the grid); MIS keeps only hints and drops the grid."""
+    prof = profile_file(label, path)
+    cfp = compute_identity(label, path).content_fp
+    if prof.get('error'):
+        return _Scan(label, path, cfp, 'error', reason=prof['error'])
+    role = _route_file(prof, label=label, path=path, content_fp=cfp, use_model=use_model)
+    if role == 'mis':
+        return _Scan(label, path, cfp, 'mis', hints=_hints(prof))     # drop the grid — parent never holds it
+    return _Scan(label, path, cfp, role, prof=prof)                   # fund-domain: parent needs the grid
+
+
+def _scan_worker(task):
+    """Parallel front-end unit (ProcessPoolExecutor, spawn). Route ONE file and return a PICKLABLE,
+    GRID-FREE fact — the parsed grid never crosses the process boundary (for a fund-domain file the parent
+    re-parses the few it needs; for MIS only the hints return). The worker releases its grid before
+    returning so a reused pool worker never hoards every grid it touches (the per-worker memory wall).
+    Model-off only: routing here is purely structural (the classifier tail stays in the serial path)."""
+    label, path = task
+    try:
+        prof = profile_file(label, path)
+        cfp = compute_identity(label, path).content_fp
+        if prof.get('error'):
+            return (label, path, cfp, 'error', None, prof['error'])
+        role = _route_file(prof, label=label, path=path, content_fp=cfp, use_model=False)
+        hints = _hints(prof) if role == 'mis' else None
+        return (label, path, cfp, role, hints, '')
+    finally:
+        clear_parse_cache()
+        clear_profile_cache()
+
+
+def _route_all(files: List[Tuple[str, str]], *, use_model: bool, max_workers: int) -> List[_Scan]:
+    """Front end: profile + identity + route every file, returned in canonical (content_fp) order — the
+    single replacement for the old `_canonical_order` + serial routing loop. Serial (mw=1 or model) is the
+    historical path verbatim (the byte-identical reference). Parallel (mw>1, model-off) fans the parse
+    across a process pool and re-parses only the FEW fund-domain files in the parent, so the parent never
+    holds an MIS grid and the read stops being the serial floor. Routing decisions are identical either
+    way (same _route_file over the same prof); only WHERE the parse runs changes."""
+    if max_workers and max_workers > 1 and not use_model and len(files) > 1:
+        with ProcessPoolExecutor(max_workers=min(max_workers, len(files))) as ex:
+            raw = list(ex.map(_scan_worker, list(files)))
+        scans: List[_Scan] = []
+        for label, path, cfp, role, hints, reason in raw:
+            if role in ('mis', 'error'):
+                scans.append(_Scan(label, path, cfp, role, hints=hints, reason=reason))
+            else:                                    # fund-domain → parent re-parses the grid it needs (few)
+                scans.append(_Scan(label, path, cfp, role, prof=profile_file(label, path)))
+    else:
+        scans = [_scan_one(label, path, use_model=use_model) for label, path in files]
+    return sorted(scans, key=lambda s: (s.content_fp, s.label))
+
+
+def _assert_conservation(files: List[Tuple[str, str]], reports: List[FileReport]) -> None:
+    """Fail-closed file-conservation check: every input file INSTANCE must map to EXACTLY ONE terminal
+    report. Keyed on the input PATH (per-upload instance identity), NOT the label — a label-multiset
+    balances falsely when two DISTINCT files share a label and one is double-reported while the other is
+    dropped (that residual belongs to a second guard); keying on path makes 'no uploaded file is ever
+    dropped' airtight on its own. Raises PreingestConservationError (naming the missing/duplicated paths)
+    rather than let a run finish having silently dropped a file the user uploaded. Factored out so the
+    invariant can be red-before/green-after tested directly."""
+    _in = Counter(pth for _lbl, pth in files)
+    _out = Counter(r.path for r in reports)
+    if _in != _out:
+        _missing = _in - _out
+        _dup = _out - _in
+        raise PreingestConservationError(
+            f'file conservation violated: in={sum(_in.values())} != out={sum(_out.values())}; '
+            f'missing={dict(_missing)}; duplicated={dict(_dup)}')
 
 
 def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
@@ -308,46 +420,52 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
             logger.warning('[preingest3] model health-check degraded: %s', health.detail)
     rate_card = rate_card or default_inr_card(as_of)
     store = alias_store if alias_store is not None else AliasLedger(org=org)
+    # Per-TENANT namespace for the durable golden store: the entry key is org-blind (content_fp + config
+    # + logic), so one client's cached answer can NEVER be served to another even on one shared base dir —
+    # the load-bearing multi-tenant isolation. None when store_dir is unset (store inactive → unchanged).
+    _store_dir = golden_store.org_dir(store_dir, org)
     reuse = reuse or {}
     clear_profile_cache()   # reuse each file's grid within THIS run; never across runs
     clear_parse_cache()     # parse-once: reset the unified identity+grid parse cache per run
     _ccy_ledger = currency_ledger.CurrencyLedger()   # U6 Phase 2: capture every currency verdict this run
     currency_ledger.set_active(_ccy_ledger)          # (overwrites any leak from a prior aborted run)
     _p(5, 'Reading & routing files')
-    files = _canonical_order(files)                  # U3.5: process in content-fingerprint order, not upload order
+    # ── L2 front end: profile + identity + route every file, in canonical (content_fp) order. Parallel &
+    # grid-free for the MIS bulk when max_workers>1 (model-off); byte-identical routing to the serial path.
+    # The parent holds NO MIS grid — only the few fund-domain profs the fund pipeline needs. ──
+    scans = _route_all(files, use_model=require_model, max_workers=max_workers)
 
-    # ── Route every file (fund schedule vs company MIS vs unknown) fail-closed ──
     fund_paths: List[str] = []
-    mis: List[Tuple[str, str, object]] = []   # (label, path, profile)
-    fund_fin: List[Tuple[str, str, object]] = []   # (label, path, profile) — Phase-D fund files
+    mis_facts: List[Tuple[str, str, str, list]] = []     # (label, path, content_fp, hints) — NO grid held
+    fund_fin: List[Tuple[str, str, object]] = []         # (label, path, profile) — Phase-D fund files
     schedule_files: List[Tuple[str, str, object]] = []   # (label, path, profile) — 'fund' schedule
     unknown: List[str] = []
     reports: List[FileReport] = []
-    for label, path in files:
-        prof = profile_file(label, path)
-        if prof.get('error'):
-            reports.append(FileReport(label, 'error', 'read_error', reason=prof['error']))
-            continue
-        role = _route_file(prof, label=label, path=path, use_model=require_model)
-        if role == 'fund':
-            n = len(fund_anchor.build_fund_anchors([path]))     # safety net: a real
-            if n > _MAX_SCHEDULE_COMPANIES:                      # schedule is bounded
-                unknown.append((label, f'{n} candidate companies from one file — '
-                                       f'not a real investment schedule (likely a misrouted MIS/ledger)'))
-                reports.append(FileReport(label, 'unknown', 'held',
-                                          reason=f'{n} candidate companies — not a real schedule; held'))
+    for sc in scans:
+        if sc.role == 'error':                       # opened-attempt failed to parse → HELD(parse_error)
+            reports.append(FileReport(sc.label, 'error', 'read_error', reason=sc.reason,
+                                      reason_code=HELD_PARSE_ERROR, path=sc.path))
+        elif sc.role == 'fund':
+            n = len(fund_anchor.build_fund_anchors([sc.path]))   # safety net: a real
+            if n > _MAX_SCHEDULE_COMPANIES:                       # schedule is bounded
+                unknown.append((sc.label, f'{n} candidate companies from one file — '
+                                          f'not a real investment schedule (likely a misrouted MIS/ledger)'))
+                reports.append(FileReport(sc.label, 'unknown', 'held',
+                                          reason=f'{n} candidate companies — not a real schedule; held',
+                                          reason_code=HELD_MISROUTED, path=sc.path))
             else:
-                fund_paths.append(path)
-                schedule_files.append((label, path, prof))   # also a ledger source (e.g. Exits)
-                reports.append(FileReport(label, 'fund', 'ok'))
-        elif role == 'mis':
-            mis.append((label, path, prof))
-        elif role == 'fund_financials':
-            fund_fin.append((label, path, prof))
+                fund_paths.append(sc.path)
+                schedule_files.append((sc.label, sc.path, sc.prof))   # also a ledger source (e.g. Exits)
+                reports.append(FileReport(sc.label, 'fund', 'ok', path=sc.path))
+        elif sc.role == 'mis':
+            mis_facts.append((sc.label, sc.path, sc.content_fp, sc.hints))
+        elif sc.role == 'fund_financials':
+            fund_fin.append((sc.label, sc.path, sc.prof))
         else:
-            unknown.append((label, 'no time-series statement or investment schedule found'))
-            reports.append(FileReport(label, 'unknown', 'held',
-                                      reason='no time-series statement or investment schedule found'))
+            unknown.append((sc.label, 'no time-series statement or investment schedule found'))
+            reports.append(FileReport(sc.label, 'unknown', 'held',
+                                      reason='no time-series statement or investment schedule found',
+                                      reason_code=HELD_NO_CONTENT, path=sc.path))
 
     _p(25, 'Building fund anchors')
     anchors = fund_anchor.build_fund_anchors(fund_paths) if fund_paths else {}
@@ -464,7 +582,7 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
             fa = fund_terms.resolve_actual_annual_fee(label, prof, content_fp=fp)
             if fa[0] is not None:
                 fee_actual = fa
-        reports.append(FileReport(label, 'fund_financials', 'ok', content_fp=fp))
+        reports.append(FileReport(label, 'fund_financials', 'ok', content_fp=fp, path=path))
         if not produced:                           # recognised fund file, no slice concepts yet
             cir.disclose('fund_no_flows', f'{label}: fund file recognised; no capital-account '
                          'flows, LP register, terms or NAV signals found', entity=label)
@@ -658,20 +776,21 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
             cir.disclose(d.get('kind', 'clawback'), d.get('detail', ''), entity='fund')
 
     # ── MIS files → resolve (pass 1) ──
-    _p(45, f'Resolving {len(mis)} company files')
+    _p(45, f'Resolving {len(mis_facts)} company files')
     review: List[ReviewFile] = []
     extraction: Dict[str, Record] = {}
-    resolved = []   # (label, path, prof, fp, entity_key, reason)
-    for label, path, prof in mis:
-        fp = compute_identity(label, path).content_fp
+    resolved = []   # (label, path, fp, entity_key, reason)
+    for label, path, fp, hints in mis_facts:
         # Alias-store keys are the DISTINCTIVE FILENAME ONLY. Content hints help the
         # closed-set MATCH find the company name, but must NEVER be alias keys — a
         # generic hint ('Monthly MIS', a month name) shared by two files would
         # cross-attribute one file's numbers onto another company (the U4 bug).
+        # `fp`/`hints` were computed once in the front-end scan (grid released there) — the
+        # parent never re-opens an MIS file, so no MIS grid is held here (L2 memory contract).
         alias_ids = [label]
-        file_text = label + ' ' + ' '.join(_hints(prof))
+        file_text = label + ' ' + ' '.join(hints)
         entity_key, reason = _resolve_mis(alias_ids, file_text, anchors, store)
-        resolved.append((label, path, prof, fp, entity_key, reason))
+        resolved.append((label, path, fp, entity_key, reason))
 
     # ── BIJECTION HARD-GUARD (U4): each company may be claimed by at most ONE file.
     # If two files resolve to the SAME company this run, that is a resolution error
@@ -687,7 +806,7 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
     # the precomputed results VERBATIM — same CIR/report/disclosure order — so max_workers=1 (default)
     # is byte-identical to the pre-parallel path and max_workers>1 must prove byte-identical to it. ──
     _seen_ck, _tasks = set(), []
-    for _lbl, _pth, _prf, _fp, _ek, _rz in resolved:
+    for _lbl, _pth, _fp, _ek, _rz in resolved:
         if _ek is None or _ek in collided:
             continue
         _ca = anchors.get(_ek)
@@ -696,7 +815,7 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
                                    use_model=require_model)
         if _ck in _seen_ck or reuse.get(_ck) is not None:
             continue
-        if store_dir and golden_store.get(store_dir, _ck) is not None:
+        if _store_dir and golden_store.get(_store_dir, _ck) is not None:
             continue
         _seen_ck.add(_ck)
         _tasks.append((_ck, _ca.company, _pth, _ca.domicile, _ca.anchor_cr, _lbl))
@@ -704,10 +823,11 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
                                     use_model=require_model, max_workers=max_workers)
 
     # ── emit (pass 2) ──
-    _p(60, f'Extracting {len(mis)} company files')
-    for label, path, prof, fp, entity_key, reason in resolved:
+    _p(60, f'Extracting {len(mis_facts)} company files')
+    for label, path, fp, entity_key, reason in resolved:
         if entity_key is None:
-            reports.append(FileReport(label, 'mis', 'held', reason=reason, content_fp=fp))
+            reports.append(FileReport(label, 'mis', 'held', reason=reason, content_fp=fp,
+                                      reason_code=HELD_UNRESOLVED_IDENTITY, path=path))
             review.append(ReviewFile(label, fp, [label], candidates, reason))
             cir.disclose('held_file', f'{label}: {reason}', entity=label)
             continue
@@ -717,7 +837,7 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
             why = (f'resolution collision — {ca.company!r} also claimed by '
                    f'{", ".join(others)}; held to avoid mixing companies')
             reports.append(FileReport(label, 'mis', 'held', entity_id=ca.company,
-                                      reason=why, content_fp=fp))
+                                      reason=why, content_fp=fp, reason_code=HELD_AMBIGUOUS_MATCH, path=path))
             review.append(ReviewFile(label, fp, [label], candidates, why))
             cir.disclose('resolution_collision', f'{label}: {why}', entity=ca.company)
             continue
@@ -732,14 +852,15 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
                                   use_model=require_model)
         currency_ledger.context(entity=ca.company, source_file=label)
         # Phase 2.4: the reuse cache is the in-run/in-memory layer; the durable golden store (opt-in
-        # via store_dir) is the cross-PROCESS layer. Both are keyed by the SAME provably-complete ck,
-        # so a changed value (→ new content_fp → new ck) is a guaranteed miss in BOTH; a logic change
-        # (→ new net_logic_version → new ck) transparently rebuilds both. store_dir=None → default,
-        # behaviour identical to before this phase.
+        # via store_dir, namespaced per-tenant as _store_dir) is the cross-PROCESS layer. Both are keyed
+        # by the SAME provably-complete ck, so a changed value (→ new content_fp → new ck) is a guaranteed
+        # miss in BOTH; a logic change (→ new net_logic_version → new ck) transparently rebuilds both. The
+        # ck is org-blind, so cross-tenant isolation is carried by _store_dir's per-org path, never the key.
+        # store_dir=None → _store_dir is None → default, behaviour identical to before this phase.
         rec = reuse.get(ck)                        # incremental: reuse prior extraction (this session)
         from_store = False
-        if rec is None and store_dir:
-            rec = golden_store.get(store_dir, ck)  # durable: prior process's extraction, same ck
+        if rec is None and _store_dir:
+            rec = golden_store.get(_store_dir, ck)  # durable: prior process's extraction, same ck (this org)
             from_store = rec is not None
         if rec is None:
             # computed by the L1 pre-scan (parallel when max_workers>1); the worker ran it under a
@@ -751,16 +872,23 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
             rec = Record(rec.domain, entity_id=ca.company, fields=dict(rec.fields))
             rec.fields['company'] = ca.company
         extraction[ck] = rec
-        if store_dir and not from_store:          # persist fresh computes (never re-write a disk hit)
-            golden_store.put(store_dir, ck, rec)
-        if '_note' in rec.fields:                 # resolved, but no usable statement
+        if _store_dir and not from_store:         # persist fresh computes (never re-write a disk hit)
+            golden_store.put(_store_dir, ck, rec)
+        if '_note' in rec.fields:                 # resolved, but no usable statement (or a per-file parse failure)
+            _note = str(rec.fields['_note'])
+            _code = HELD_PARSE_ERROR if _note.startswith('parse_error') else HELD_NO_CONTENT
             reports.append(FileReport(label, 'mis', 'held', entity_id=ca.company,
-                                      reason=str(rec.fields['_note']), content_fp=fp))
+                                      reason=_note, content_fp=fp, reason_code=_code, path=path))
             cir.disclose('held_file', f'{label}: {rec.fields["_note"]}', entity=ca.company)
             continue
         cir.add(rec)
         reports.append(FileReport(label, 'mis', 'attributed', entity_id=ca.company,
-                                  reason=reason, content_fp=fp))
+                                  reason=reason, content_fp=fp, path=path))
+
+    # ── FILE-CONSERVATION INVARIANT (fail-closed): every input file → EXACTLY ONE terminal report
+    # (attributed or held(reason)). Runs in production on every run; a per-file parse failure already
+    # became HELD in the worker, so even a corrupt/unreadable file is accounted for here, never dropped. ──
+    _assert_conservation(files, reports)
 
     # reverse coverage — investments with no MIS this run (disclosed gaps)
     attributed = {r.entity_id for r in reports if r.status == 'attributed'}

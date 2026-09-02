@@ -26,8 +26,10 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Dict, List, Optional
 
+from . import concept_nets
 from . import lexicon
 from . import quoted_unquoted
+from .concept_identity import ConceptKey
 from .namematch import similarity
 from .profiler import _cell_type, profile_file
 from .quantity import to_decimal
@@ -209,13 +211,25 @@ def _schedule_rows_from_sheet(rows) -> Optional[List[dict]]:
 def _resolve_ownership(cands: List[tuple]) -> Optional[float]:
     """cands = [(value, from_cost_sheet)]. Agree → use. Disagree → prefer a value stated on a
     schedule that also carries COST (the deployment/Investments schedule is authoritative for the
-    fund's stake), else the deterministic minimum. Order-INDEPENDENT (no first-seen)."""
+    fund's stake), else the deterministic minimum. Order-INDEPENDENT (no first-seen).
+
+    DETECTION (do the stated stakes agree?) is routed through the one mechanism (concept_nets Net 1) so
+    it can't drift from the general net; the prefer-cost-sheet RESOLUTION on a disagreement stays the
+    declared behaviour (spec §0.1). Byte-identical to the prior len(set)==1 check (tol_abs=0 → exact).
+
+    3a note: the ConceptKey stays base-AUTHORITATIVE ('ownership_pct'), NOT decompose(label) — these net
+    sites receive bare numbers grouped by a concept already resolved upstream, so no per-value label reaches
+    here for decompose to read a qualifier from; decompose-at-resolution's danger (gross/net) lives at
+    fund_terms, not here. TRIGGER to revisit: a real cross-sheet qualifier divergence at this merge."""
     if not cands:
         return None
     vals = sorted({v for v, _ in cands})
-    if len(vals) == 1:
+    verdict = concept_nets.net1_collision(
+        [concept_nets.Observation(ConceptKey('ownership_pct'), value=Decimal(str(v))) for v in vals],
+        tol_abs=Decimal('0'))
+    if verdict.outcome != concept_nets.COLLIDE:          # one stated stake (or all equal) → use it
         return vals[0]
-    from_cost = sorted({v for v, c in cands if c})
+    from_cost = sorted({v for v, c in cands if c})       # declared resolution: prefer the cost-bearing schedule
     return (from_cost or vals)[0]
 
 
@@ -232,6 +246,30 @@ def _resolve_domicile(doms: List[str]) -> tuple:
     if len(ccys) > 1:                      # currencies genuinely differ → currency ambiguous → hold
         return None, True
     return distinct[0], False              # one currency (or all unmappable) → deterministic, no conflict
+
+
+def _resolve_numeric_collision(base: str, vals: List[Decimal]) -> Optional[Decimal]:
+    """Merge multiple per-sheet numeric values for a company anchor attribute (cost / fair_value). DETECTION
+    is routed through the one mechanism (concept_nets Net 1) so the net SEES every fund_anchor merge and
+    fires COLLIDE on a real cross-sheet disagreement (measured: 3 on the fund corpus) — not silently
+    swallowed. RESOLUTION stays the DECLARED per-base policy (spec §0.1 detection-universal / resolution-
+    declared): cost/FV declare 'max' (a total restated in a second sheet — 'cost for ref' on the valuation
+    schedule — never double-counts the tranche sum). Byte-identical: max(vals) is the value on both the
+    agree and collide paths (equal values → max == the agreed value). Fail-closed (like require_basis): a
+    collision whose declared resolution is not 'max' HOLDS by raising — never a guessed aggregation.
+
+    3a note: the ConceptKey stays base-AUTHORITATIVE (the passed `base`, which IS the resolution-policy
+    key), NOT decompose(base) — re-deriving it via decompose would risk the policy lookup drifting to None
+    (→ a spurious hold_both raise on a real cost/FV collision). No per-value qualifier label reaches this
+    merge, so decompose adds nothing here; its danger lives at fund_terms. Grounded no-op, base-safe."""
+    if not vals:
+        return None
+    verdict = concept_nets.net1_collision(
+        [concept_nets.Observation(ConceptKey(base), value=v) for v in vals], tol_abs=Decimal('0'))
+    if verdict.outcome == concept_nets.COLLIDE and verdict.resolution != 'max':
+        raise ValueError(f"fund_anchor: '{base}' cross-sheet collision resolution is "
+                         f"{verdict.resolution!r}, not the declared 'max' — refusing to guess")
+    return max(vals)
 
 
 def build_fund_anchors(paths: List[str]) -> Dict[str, CompanyAnchor]:
@@ -291,8 +329,8 @@ def build_fund_anchors(paths: List[str]) -> Dict[str, CompanyAnchor]:
     merged: Dict[str, CompanyAnchor] = {}
     for key, a in acc.items():
         ca = CompanyAnchor(company=a['company'])
-        ca.cost_cr = max(a['cost']) if a['cost'] else None
-        ca.fair_value_cr = max(a['fair_value']) if a['fair_value'] else None
+        ca.cost_cr = _resolve_numeric_collision('cost', a['cost'])
+        ca.fair_value_cr = _resolve_numeric_collision('fair_value', a['fair_value'])
         ca.ownership_frac = _resolve_ownership(a['own'])
         ca.domicile, ca.domicile_conflict = _resolve_domicile(a['dom'])
         ca.irr_gross = sorted(set(a['irr']))[0] if a['irr'] else None   # deterministic if marks disagree

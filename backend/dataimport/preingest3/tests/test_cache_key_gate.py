@@ -123,6 +123,57 @@ def test_learned_lexicon_growth_rekeys_extraction_cache_REDDENING(monkeypatch):
         'seed-only signature reacted to learned growth — negative control is not isolating the bug'
 
 
+# ── the learned-lexicon hot-path memo: engages (one read, not millions) AND invalidates on growth
+#    (no stale synonyms). The memo removed a per-call disk-read+JSON-parse that dominated extraction of
+#    multi-sheet workbooks (2.29M file opens for one 67-sheet file). It must NOT trade that speed for a
+#    stale-serve: a reviewer-approved synonym has to be visible on the very next call. ─────────────────
+def test_learned_lexicon_read_is_memoised_not_per_call(monkeypatch, tmp_path):
+    import json as _json
+
+    from backend.dataimport.preingest3 import lexicon
+
+    p = tmp_path / 'lex.json'
+    p.write_text(_json.dumps({'revenue': ['gross billings topline']}))
+    monkeypatch.setattr(lexicon, '_LEARNED_PATH', str(p))
+    lexicon._learned_cache['key'] = None
+    lexicon._learned_cache['data'] = {}
+    lexicon._syn_cache.clear()
+
+    calls = {'n': 0}
+    real = lexicon._read_learned_file
+    monkeypatch.setattr(lexicon, '_read_learned_file',
+                        lambda: (calls.__setitem__('n', calls['n'] + 1) or real()))
+
+    for _ in range(200):
+        for c in ('revenue', 'ebitda', 'closing_cash'):
+            lexicon.synonyms(c)          # 600 hot-path calls
+
+    # pre-fix this was 600 disk reads (one per call); memoised it is a single read for the whole run.
+    assert calls['n'] <= 1, f'learned file read {calls["n"]}x across 600 synonyms() calls — memo not engaged'
+
+
+def test_learned_lexicon_cache_invalidates_when_lexicon_grows(monkeypatch, tmp_path):
+    # NEGATIVE CONTROL for the memo: a naive once-loaded cache would REDDEN here — it would keep serving
+    # the pre-approval synonym set. Keying both caches on the file's (mtime_ns, size) makes learn()'s
+    # atomic os.replace bump the key and refill, so the approved label is visible immediately.
+    from backend.dataimport.preingest3 import lexicon
+
+    p = tmp_path / 'lex.json'
+    monkeypatch.setattr(lexicon, '_LEARNED_PATH', str(p))
+    lexicon._learned_cache['key'] = None
+    lexicon._learned_cache['data'] = {}
+    lexicon._syn_cache.clear()
+
+    label = 'zzz sentinel topline receipts'          # not in the seed lexicon
+    norm = lexicon.normalise_label(label)
+    assert norm not in lexicon.synonyms('revenue'), 'sentinel must be absent before approval'
+
+    lexicon.learn('revenue', label)                  # reviewer approves → learned file grows
+
+    assert norm in lexicon.synonyms('revenue'), \
+        'grown learned lexicon NOT reflected — cache served STALE synonyms (the bug this guards)'
+
+
 def test_contract_dimension_is_load_bearing_not_decorative():
     # The pre-fix key formula EXCLUDED the contract entirely; this pins that the dimension we
     # added is the thing doing the work — two different contracts must diverge, same must agree.

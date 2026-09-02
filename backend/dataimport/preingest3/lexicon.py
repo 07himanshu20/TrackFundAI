@@ -18,13 +18,23 @@ import os
 import re
 import threading
 
-from .contract import CONCEPT_LEXICON
+from .contract import CONCEPT_LEXICON, CI_QUALIFIER_DIMENSIONS
 
 _LEARNED_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     'media', 'preingest3_lexicon.json',
 )
 _lock = threading.Lock()
+# Hot-path memoisation of two run-invariants. synonyms() (and through it _load_learned) is called once per
+# candidate-row × concept across every sheet — millions of times for a 60+-sheet workbook — yet the learned
+# lexicon changes ONLY when a reviewer approves a label (learn(), an atomic os.replace that bumps the file's
+# mtime/size). Both caches are keyed on that file identity: one disk read and one seed-synonym normalisation
+# per run, and the instant the lexicon grows the key changes and BOTH caches refill — so contract_signature()
+# / U8-D8 still observe the growth and no reviewer approval is EVER served stale. Pure memo: identical return
+# values for every concept and every file — universal, no behavioural change, only redundant recompute removed.
+_cache_lock = threading.Lock()
+_learned_cache = {'key': None, 'data': {}}      # file (mtime_ns, size) -> parsed learned JSON
+_syn_cache: dict = {}                            # concept -> (learned_key, normalised synonym list)
 _PUNCT = re.compile(r"[^a-z0-9 ]+")
 _WS = re.compile(r"\s+")
 
@@ -49,7 +59,9 @@ def normalise_label(text) -> str:
     return _WS.sub(' ', s).strip()
 
 
-def _load_learned() -> dict:
+def _read_learned_file() -> dict:
+    """Uncached raw read. Used ONLY by the writer (learn), which mutates the dict it reads and therefore
+    must never be handed the shared cached object."""
     if os.path.exists(_LEARNED_PATH):
         try:
             with open(_LEARNED_PATH) as fh:
@@ -57,6 +69,30 @@ def _load_learned() -> dict:
         except Exception:
             return {}
     return {}
+
+
+def _learned_key():
+    try:
+        st = os.stat(_LEARNED_PATH)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _load_learned() -> dict:
+    """The learned synonym map, cached by file identity so the label-match hot loop pays ONE disk read per
+    run instead of one per call. Reloads automatically the moment learn() grows the file (mtime/size change).
+    Returns the SHARED cached dict — callers treat it as read-only (learn() uses _read_learned_file())."""
+    key = _learned_key()
+    with _cache_lock:
+        if _learned_cache['key'] == key:
+            return _learned_cache['data']
+    data = _read_learned_file() if key is not None else {}
+    if _learned_key() == key:                    # file stable across the read -> safe to memoise
+        with _cache_lock:
+            _learned_cache['key'] = key
+            _learned_cache['data'] = data
+    return data
 
 
 def learned_lexicon() -> dict:
@@ -70,18 +106,45 @@ def learned_lexicon() -> dict:
 
 
 def synonyms(concept: str) -> list:
-    """Seed synonyms ∪ learned synonyms for a concept (normalised)."""
+    """Seed synonyms ∪ learned synonyms for a concept (normalised), memoised per concept and invalidated
+    the instant the learned lexicon grows. The seed-list normalisation is a run-invariant that was being
+    rebuilt on every one of millions of label-score calls."""
     concept = (concept or '').strip().lower()
+    learned = _load_learned()
+    key = _learned_cache['key']
+    with _cache_lock:
+        hit = _syn_cache.get(concept)
+        if hit is not None and hit[0] == key:
+            return hit[1]
     base = [normalise_label(s) for s in CONCEPT_LEXICON.get(concept, [])]
-    learned = [normalise_label(s) for s in _load_learned().get(concept, [])]
+    learned_syn = [normalise_label(s) for s in learned.get(concept, [])]
     # concept key itself is a valid synonym (e.g. 'revenue')
-    return sorted(set(base + learned + [normalise_label(concept.replace('_', ' '))]))
+    result = sorted(set(base + learned_syn + [normalise_label(concept.replace('_', ' '))]))
+    with _cache_lock:
+        _syn_cache[concept] = (key, result)
+    return result
 
 
 # a concept token immediately negated by one of these is NOT that concept —
 # 'Non-operating income' is not operating income, 'excluding tax' is not tax.
 # Linguistic structure (universal), NOT a per-file blocklist of business terms.
-_NEGATORS = {'non', 'excl', 'excluding', 'ex', 'less', 'before'}
+#
+# SINGLE-SOURCED (INC3a subsumption) from the concept-identity taxonomy — the negator vocabulary and the
+# `inclusion` qualifier dimension can never drift apart: one brain (contract.CI_QUALIFIER_DIMENSIONS
+# ['inclusion']), two consumers (this negation rule + concept_identity._detect_qualifiers). The direction
+# is set by the import graph — concept_identity imports lexicon, not the reverse — so the shared source is
+# the contract, which both import. Only the negating VALUES ('excluding'/'less_of'; 'including' is additive,
+# never a negator) and only their single-token phrases can precede-and-negate a concept token.
+_NEGATING_INCLUSION_VALUES = ('excluding', 'less_of')
+
+
+def _derive_negators() -> frozenset:
+    inc = CI_QUALIFIER_DIMENSIONS.get('inclusion', {})
+    return frozenset(ph for val in _NEGATING_INCLUSION_VALUES
+                     for ph in inc.get(val, ()) if len(ph.split()) == 1)
+
+
+_NEGATORS = _derive_negators()
 # ...but these concept synonyms legitimately CONTAIN a negator as their own first
 # word (EBITDA = earnings BEFORE interest…), so negation is not applied when the
 # matched synonym itself begins with the negator.
@@ -225,7 +288,7 @@ def learn(concept: str, label) -> None:
     if not concept or not norm:
         return
     with _lock:
-        data = _load_learned()
+        data = _read_learned_file()
         vals = data.setdefault(concept, [])
         if norm not in [normalise_label(v) for v in vals]:
             vals.append(str(label).strip())

@@ -21,6 +21,7 @@ the exact bug the design forbids (safety rule #1).
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import pickle
 from typing import Dict, Optional
@@ -32,6 +33,20 @@ _EXT = '.rec'
 
 def _path(store_dir: str, key: str) -> str:
     return os.path.join(store_dir, key + _EXT)
+
+
+def org_dir(store_dir: Optional[str], org: str) -> Optional[str]:
+    """Per-TENANT namespace under `store_dir` — the load-bearing isolation for a multi-tenant value cache.
+    The entry key (identity.extraction_cache_key = content_fp + config + logic) is org-BLIND by design, so
+    two tenants uploading a byte-identical file produce the SAME key; without this namespace the second
+    tenant would be served the first's finished Record — a cross-fund WRONG NUMBER and a data leak. The
+    org is HASHED (never sanitised, never interpolated raw), so no two distinct orgs can collide onto one
+    directory and no org value can traverse outside the base dir. Returns None when no base store_dir is
+    configured (store inactive → behaviour unchanged), so a caller can guard on it exactly like store_dir."""
+    if not store_dir:
+        return None
+    tag = hashlib.sha256((org or '').encode('utf-8')).hexdigest()[:24]
+    return os.path.join(store_dir, f'org-{tag}')
 
 
 def get(store_dir: Optional[str], key: str) -> Optional[Record]:

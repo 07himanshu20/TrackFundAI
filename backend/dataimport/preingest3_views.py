@@ -41,6 +41,23 @@ _ENGINE = 'preingest3'
 _MIS_DOMAINS = ('portfolio_investments', 'company', 'mis')
 _CR = 'value_cr'
 
+_GOLDEN_UNSET = object()
+
+
+def _golden_store_base():
+    """The durable, writable BASE directory for the preingest3 golden-record (value) cache — ACTIVATED in
+    production so a repeat run, or a re-run after editing one file, reuses the unchanged files' finished
+    extractions across processes instead of recomputing the whole fund. Defaults to a durable path under
+    MEDIA_ROOT (the same writable volume the output workbook is saved to just below), so activation is real
+    without any extra config; a deployment may override the location or DISABLE the cache entirely via
+    settings.PREINGEST3_GOLDEN_STORE_DIR (set it to None/'' to turn the store off). The pipeline namespaces
+    this base by org, so cross-tenant isolation holds even on one shared base dir — never key a number by
+    anything less than the full content fingerprint, and never share a tenant's answers with another."""
+    base = getattr(settings, 'PREINGEST3_GOLDEN_STORE_DIR', _GOLDEN_UNSET)
+    if base is _GOLDEN_UNSET:
+        base = os.path.join(settings.MEDIA_ROOT, 'preingest3', 'golden')
+    return base or None
+
 
 # ── CIR → review JSON (the stable contract the UI binds to) ──────────────────
 def _fig_json(f):
@@ -202,7 +219,8 @@ def _run_job(job_id):
                 progress_pct=int(pct), progress_message=str(msg)[:500])
 
         result = pipeline.run(files, as_of=as_of, org=str(job.organization_id),
-                              rate_card=rc, alias_store=store, progress=_progress)
+                              rate_card=rc, alias_store=store, store_dir=_golden_store_base(),
+                              progress=_progress)
 
         wb = assemble.build(result.cir, rate_card=rc)
         rel = preingest_output_path(job, job.output_name or 'TFAI.xlsx')

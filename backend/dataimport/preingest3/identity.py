@@ -24,11 +24,14 @@ from __future__ import annotations
 import datetime as _dt
 import hashlib
 import os
+import xml.etree.ElementTree as _ET
+import zipfile
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import List, Optional
 
 import openpyxl
+from openpyxl.utils import get_column_letter as _col_letter
 
 # The cache logic-version is a hash of the library's source, so ANY change to value logic
 # auto-invalidates cached results (Inc-5). Preferred to a manually-bumped version string
@@ -87,8 +90,10 @@ _PARSE_CACHE: dict = {}
 def clear_parse_cache() -> None:
     """Drop the per-run unified-parse cache (grids). Called at each pipeline.run start so a run reuses
     each file's single parse but no run holds another run's grids. Memory-bounding + cross-run
-    freshness; correctness-neutral (a re-parse yields an identical result)."""
+    freshness; correctness-neutral (a re-parse yields an identical result). Also resets the per-run
+    calamine→openpyxl fallback log so each run reports its own fallback rate (G-FALLBACK)."""
     _PARSE_CACHE.clear()
+    _FALLBACK_LOG.clear()
 
 
 @dataclass(frozen=True)
@@ -120,12 +125,13 @@ def _is_volatile_value(v) -> bool:
     return isinstance(v, (int, float, _dt.datetime, _dt.date, _dt.time))
 
 
-def _parse_workbook(path: str):
-    """The SINGLE openpyxl pass that feeds BOTH file identity and the profiler grid. In one
-    read-only, data_only iteration it accumulates the content/layout fingerprint parts (identical,
-    line-for-line, to the historical compute_identity loop) AND the per-sheet value grid (identical
-    to the historical profiler._read_grid: [[cell.value ...] ...]) — so unifying the two parses
-    cannot change either output. Returns (byte_fp, content_fp, layout_fp, grid, error)."""
+def _parse_workbook_openpyxl(path: str):
+    """The openpyxl read-only, data_only pass — the BYTE-EXACT REFERENCE reader and the whole-file
+    fallback for calamine (see _parse_workbook). In one iteration it accumulates the content/layout
+    fingerprint parts (identical, line-for-line, to the historical compute_identity loop) AND the
+    per-sheet value grid (identical to the historical profiler._read_grid: [[cell.value ...] ...]) —
+    so unifying the two parses cannot change either output. Returns (byte_fp, content_fp, layout_fp,
+    grid, error)."""
     with open(path, 'rb') as fh:
         byte_fp = hashlib.sha256(fh.read()).hexdigest()
     content_parts: List[str] = []
@@ -164,6 +170,215 @@ def _parse_workbook(path: str):
     content_fp = _sha(content_parts) if content_parts else byte_fp
     layout_fp = _sha(layout_parts) if layout_parts else byte_fp
     return (byte_fp, content_fp, layout_fp, grid, None)
+
+
+# ── Calamine fast reader (~18× openpyxl) + format-based OOR-date safety guard ────────────────────
+# The single workbook parse dominates a model-off run (~91% of wall time). python-calamine (Rust) reads
+# the same values ~18× faster, so it is the PRIMARY reader; openpyxl above stays the byte-exact reference
+# and whole-file fallback. calamine is value-faithful after four normalizations proven byte-identical on
+# the corpus (see _norm_calamine_value) EXCEPT one class it cannot represent: a date-FORMATTED cell whose
+# serial is out of Excel's date range. openpyxl range-checks these and returns an error; calamine returns
+# the raw serial (a ~2e9 number) which, extracted, would be a WRONG NUMBER (the cardinal sin). calamine
+# cannot expose the number format, and the value alone is indistinguishable from a legitimate large figure
+# (tens of thousands of legit cells exceed the max serial on the corpus). So the guard reads the number
+# formats directly (styles.xml) and, if ANY date-formatted cell holds an out-of-range serial, the WHOLE
+# file falls back to openpyxl — never a wrong number, never two readers mixed in one file. Fail-closed:
+# any calamine/guard error → openpyxl. Every fallback is logged (G-FALLBACK: a high fallback rate would
+# make the speedup illusory and must surface, not degrade silently).
+try:
+    from python_calamine import CalamineWorkbook as _CalamineWorkbook
+    _HAS_CALAMINE = True
+except Exception:                               # dependency missing → openpyxl-only, behaviour unchanged
+    _HAS_CALAMINE = False
+
+_MAX_XL_DATE_SERIAL = 2958465                    # 9999-12-31; openpyxl treats larger serials as errors
+_SML_NS = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+_FALLBACK_LOG: list = []                         # [(path, reason)] this run — G-FALLBACK instrumentation
+
+
+def clear_fallback_log() -> None:
+    _FALLBACK_LOG.clear()
+
+
+def fallback_log() -> list:
+    """Files this run that fell back from calamine to openpyxl, each (path, reason) (G-FALLBACK)."""
+    return list(_FALLBACK_LOG)
+
+
+def _norm_calamine_value(v):
+    """Map a calamine cell value to openpyxl's EXACT representation (each rule proven byte-identical on
+    the corpus): ''→None (empty cell); integral float→int (openpyxl casts int iff the stored number has
+    no decimal point — the corpus has ZERO float-but-integral counterexamples); date→datetime at midnight
+    (openpyxl always returns datetime, never a bare date); and calamine's decoded '\\r' back to openpyxl's
+    un-decoded '_x000D_' literal so multi-line strings hash identically. bool is preserved (never an int).
+    NaN→None. OOR-date serials never reach here — such files fall back whole to openpyxl."""
+    if v == '':
+        return None
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, float):
+        if v != v:                               # NaN → empty (never a value)
+            return None
+        return int(v) if v.is_integer() else v
+    if isinstance(v, _dt.datetime):
+        return v
+    if isinstance(v, _dt.date):
+        return _dt.datetime(v.year, v.month, v.day)
+    if isinstance(v, str):
+        return v.replace('\r', '_x000D_') if '\r' in v else v
+    return v
+
+
+def _date_format_style_ids(zf: zipfile.ZipFile) -> set:
+    """Style indices (cellXfs order) whose number format is a DATE format — via openpyxl's own
+    is_date_format so custom date codes are covered too. Bias to inclusion: a false positive only costs
+    an extra openpyxl fallback (safe/slower); a false negative would let a wrong number through."""
+    from openpyxl.styles.numbers import is_date_format, BUILTIN_FORMATS
+    root = _ET.fromstring(zf.read('xl/styles.xml'))
+    codes = dict(BUILTIN_FORMATS)
+    for nf in root.iter(f'{_SML_NS}numFmt'):
+        codes[int(nf.get('numFmtId'))] = nf.get('formatCode')
+    date_ids = {i for i, c in codes.items() if c and is_date_format(c)}
+    styles = set()
+    cellXfs = root.find(f'{_SML_NS}cellXfs')
+    if cellXfs is not None:
+        for idx, xf in enumerate(cellXfs.findall(f'{_SML_NS}xf')):
+            if int(xf.get('numFmtId', 0)) in date_ids:
+                styles.add(idx)
+    return styles
+
+
+def _coord_to_ri_ci(ref: str) -> tuple:
+    """'E264' → (263, 4): zero-based (row, col) from an A1 coordinate. Dependency-free so it can't drift
+    with openpyxl's util surface."""
+    i = 0
+    while i < len(ref) and ref[i].isalpha():
+        i += 1
+    col = 0
+    for ch in ref[:i]:
+        col = col * 26 + (ord(ch) - 64)
+    return int(ref[i:]) - 1, col - 1
+
+
+def _sheet_order(zf: zipfile.ZipFile):
+    """[(sheet_name, 'xl/worksheets/sheetN.xml'), …] in the workbook-declared order — the SAME order
+    calamine's sheet_names and openpyxl's sheetnames use — so error cells can be overlaid onto calamine's
+    grid by name. Maps each <sheet r:id> through workbook.xml.rels to its worksheet part."""
+    wb = _ET.fromstring(zf.read('xl/workbook.xml'))
+    rels = _ET.fromstring(zf.read('xl/_rels/workbook.xml.rels'))
+    _RNS = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
+    rid_target = {r.get('Id'): r.get('Target') for r in rels}
+    out = []
+    for sh in wb.iter(f'{_SML_NS}sheet'):
+        tgt = rid_target.get(sh.get(f'{_RNS}id'), '')
+        if not tgt:
+            continue
+        tgt = tgt.lstrip('/') if tgt.startswith('/') else ('xl/' + tgt if not tgt.startswith('xl/') else tgt)
+        out.append((sh.get('name'), tgt))
+    return out
+
+
+def _scan_workbook_xml(path: str):
+    """One raw-XML pass over the workbook that returns (has_date_oor, error_map). It serves two safety
+    needs calamine cannot: (1) DATE-OOR detection — a date-FORMATTED cell holding an out-of-range serial,
+    which calamine mis-reads as a number where openpyxl errors → whole-file fallback; (2) ERROR-CELL
+    recovery — calamine collapses every Excel error (#REF!/#VALUE!/…) to empty, losing its PRESENCE, which
+    changes extraction (an error cell in a period column disambiguates plan/actual). The exact error string
+    lives in the cell's <v>, so we harvest {sheet_name: {(ri,ci): '#REF!'}} to overlay back onto the grid,
+    making error files byte-identical to openpyxl too. Raises on any structural problem so _parse_workbook
+    fails closed to openpyxl. Early-exits to fallback the instant a date-OOR cell is seen."""
+    err_map: dict = {}
+    with zipfile.ZipFile(path) as z:
+        date_styles = _date_format_style_ids(z)
+        for name, xmlpath in _sheet_order(z):
+            cells: dict = {}
+            try:
+                fh = z.open(xmlpath)
+            except KeyError:
+                err_map[name] = cells
+                continue
+            with fh:
+                for _ev, el in _ET.iterparse(fh, events=('end',)):
+                    if el.tag != f'{_SML_NS}c':
+                        continue
+                    t = el.get('t')
+                    if t == 'e':
+                        r = el.get('r')
+                        if r:
+                            cells[_coord_to_ri_ci(r)] = el.findtext(f'{_SML_NS}v') or ''
+                    elif date_styles:
+                        s = el.get('s')
+                        if s is not None and int(s) in date_styles and t in (None, 'n'):
+                            vt = el.findtext(f'{_SML_NS}v')
+                            if vt:
+                                try:
+                                    x = float(vt)
+                                except ValueError:
+                                    x = None
+                                if x is not None and (x > _MAX_XL_DATE_SERIAL or x < 0):
+                                    return True, {}          # date-OOR → whole-file openpyxl fallback
+                    el.clear()
+            err_map[name] = cells
+    return False, err_map
+
+
+def _parse_workbook_calamine(path: str, err_map: dict):
+    """calamine parse → normalized value grid (with Excel error cells overlaid back from err_map) +
+    content/layout fingerprints built with the SAME formula as the openpyxl reference (absolute A1-origin
+    coordinate == openpyxl's cell.coordinate; fingerprints iterate the FINAL overlaid grid in row-major
+    order, exactly as openpyxl iterates), so clean AND error files are byte-identical at every level. Rows
+    are padded to the sheet's width so the grid is rectangular like openpyxl's; an error cell beyond
+    calamine's trimmed extent expands the grid so it is never lost. The OOR-date guard already cleared
+    this file (else it fell back)."""
+    with open(path, 'rb') as fh:
+        byte_fp = hashlib.sha256(fh.read()).hexdigest()
+    cwb = _CalamineWorkbook.from_path(path)
+    content_parts: List[str] = []
+    layout_parts: List[str] = []
+    grid: dict = {}
+    for sn in cwb.sheet_names:
+        rows = [[_norm_calamine_value(v) for v in row]
+                for row in cwb.get_sheet_by_name(sn).to_python(skip_empty_area=False)]
+        for (ri, ci), err in err_map.get(sn, {}).items():   # restore error-cell PRESENCE (calamine drops it)
+            while ri >= len(rows):
+                rows.append([])
+            if ci >= len(rows[ri]):
+                rows[ri].extend([None] * (ci + 1 - len(rows[ri])))
+            rows[ri][ci] = err
+        width = max((len(r) for r in rows), default=0)
+        grid[sn] = [r + [None] * (width - len(r)) for r in rows]
+        content_parts.append(f'#SHEET#{sn}')
+        layout_parts.append(f'#SHEET#{sn}')
+        for ri, row in enumerate(grid[sn]):
+            for ci, v in enumerate(row):
+                if v is None or v == '':
+                    continue
+                coord = f'{_col_letter(ci + 1)}{ri + 1}'
+                content_parts.append(f'{coord}={v!r}')
+                if not _is_volatile_value(v):
+                    layout_parts.append(f'{coord}={str(v).strip().lower()!r}')
+    content_fp = _sha(content_parts) if content_parts else byte_fp
+    layout_fp = _sha(layout_parts) if layout_parts else byte_fp
+    return (byte_fp, content_fp, layout_fp, grid, None)
+
+
+def _parse_workbook(path: str):
+    """Single workbook parse feeding BOTH identity and the profiler grid. Primary reader = calamine
+    (fast); a whole-file openpyxl fallback fires when calamine is unavailable, when the date-OOR guard
+    trips, or on ANY calamine/scan error (fail-closed). The scan also harvests Excel error cells so the
+    calamine grid can restore their presence (byte-identical to openpyxl). openpyxl stays the byte-exact
+    reference for fallen-back files. Returns (byte_fp, content_fp, layout_fp, grid, error) like the ref."""
+    if not _HAS_CALAMINE:
+        return _parse_workbook_openpyxl(path)
+    try:
+        oor, err_map = _scan_workbook_xml(path)
+        if oor:
+            _FALLBACK_LOG.append((path, 'date_oor'))
+            return _parse_workbook_openpyxl(path)
+        return _parse_workbook_calamine(path, err_map)
+    except Exception as e:
+        _FALLBACK_LOG.append((path, f'calamine_error:{type(e).__name__}'))
+        return _parse_workbook_openpyxl(path)
 
 
 def _parse_workbook_cached(path: str):

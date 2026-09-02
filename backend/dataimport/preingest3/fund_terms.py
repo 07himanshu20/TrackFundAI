@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import List, Optional, Tuple
 
-from . import lexicon, reconcile
+from . import concept_identity, concept_nets, lexicon, reconcile
 from .cir import Provenance, Record
 from .contract import TOLERANCES
 from .quantity import format_pct, to_decimal
@@ -612,12 +612,32 @@ def reconcile_fund_terms(records, *, base_phase_hint=None, fee_actual=None,
             if not isinstance(ot, FundTerm) or ot.value is None or pt.value is None:
                 continue
             cid = f'term_agrees_{concept}'
-            if abs(pt.value - ot.value) <= _RATE_TOL:
+            # DETECTION via the ONE mechanism (concept_nets Net 1), rate tolerance passed AS DATA
+            # (spec §0.1 detection-universal / resolution-declared). This replaces the hand-rolled
+            # `abs(pt−ot) ≤ _RATE_TOL` so the same agreement logic can never drift from the general
+            # net. The corroborate/hold DISPOSITION below is fund_terms' declared resolution — exactly
+            # the CI_RESOLUTION_POLICY 'corroborate' / 'hold_both' values (asserted in the #10 test).
+            # 3a decompose-at-resolution: the base stays the AUTHORITATIVE catalogue concept — decompose's
+            # base lexicon does not cover fund-term rates (carry/hurdle/fee → base None), so re-deriving it
+            # would null the base and misgroup. decompose contributes only the QUALIFIERS read from each
+            # source's RAW label, so the net can finally tell a gross-basis term from a net-basis one (the
+            # 3a purpose: give the nets qualifiers). On this corpus no term label carries a basis qualifier
+            # → both keys are (concept, ()) → BYTE-IDENTICAL to the prior base-only key. A distinguishing
+            # qualifier makes the two keys DIFFERENT → net1 CLEAN (no same-key overlap) → they are different
+            # concepts, NOT a disagreement → skip (never a false hold, never a wrong merge). Model-off: any
+            # moved number here is unambiguously this wiring.
+            _qp = concept_identity.decompose(pt.provenance.row_label or '').qualifiers
+            _qo = concept_identity.decompose(ot.provenance.row_label or '').qualifiers
+            _verdict = concept_nets.net1_collision(
+                [concept_nets.Observation(concept_identity.ConceptKey(concept, _qp), value=pt.value),
+                 concept_nets.Observation(concept_identity.ConceptKey(concept, _qo), value=ot.value)],
+                tol_abs=_RATE_TOL)
+            if _verdict.outcome == concept_nets.AGREE:
                 pt.qualifiers['corroborated_by'] = f'{ot.provenance.sheet}!{ot.provenance.cell}'
                 checks.append(reconcile._result(cid, reconcile.HARD, reconcile.PASS,
                               lhs=_fmt_pct(pt.value), rhs=_fmt_pct(ot.value),
                               detail=f'{concept} agrees across two sources'))
-            else:
+            elif _verdict.outcome == concept_nets.COLLIDE:
                 pt.verdict = ot.verdict = 'held'
                 why = (f'{concept} disagrees across sources: {_fmt_pct(pt.value)} '
                        f'@{pt.provenance.sheet}!{pt.provenance.cell} vs {_fmt_pct(ot.value)} '
@@ -625,6 +645,11 @@ def reconcile_fund_terms(records, *, base_phase_hint=None, fee_actual=None,
                 pt.hold_reason = ot.hold_reason = why[:90]
                 checks.append(reconcile._result(cid, reconcile.HARD, reconcile.FAIL,
                               lhs=_fmt_pct(pt.value), rhs=_fmt_pct(ot.value), detail=why))
+            # else (net1 CLEAN): the two sources decompose to DIFFERENT ConceptKeys (e.g. gross vs net)
+            # → different concepts, not a cross-source disagreement → leave both as extracted (skip). On
+            # this corpus this branch is never reached (no basis-qualified term labels) — it is the teeth
+            # the planted gross/net fixture proves. Emitting the second (distinct-qualifier) concept as its
+            # own field is deferred to the model increment (out of 3a's byte-identical scope).
 
     if base_phase_hint is not None:
         b, ph, prov = base_phase_hint

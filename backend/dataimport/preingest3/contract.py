@@ -242,6 +242,144 @@ ROUNDING_DP = 4                # one place for rounding (build rule #11)
 CONFIDENCE_TAU = 0.55          # classifier review gate
 
 
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# CONCEPT-IDENTITY TAXONOMY (concept_identity_build_spec v1.1) — VERSIONED DATA read by the
+# concept_identity.py mechanism. Universality invariant (control CI-12): a new dimension / value /
+# conservation law / convention row is a DATA edit HERE (→ contract_signature changes → caches
+# re-validate under U8), NEVER a code change in the mechanism. Authored from the §10 measure-first
+# census + established-danger dimensions (NAV/IRR, corpus-sparse but proved by planted fixtures) +
+# the hand-built guards this layer SUBSUMES (basis←require_basis, inclusion←lexicon._NEGATORS).
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+CI_TAXONOMY_VERSION = 'ci-tax-1.0.0'
+
+# {dimension: {canonical_value: (phrase, ...)}} — closed sets. Phrases match WORD-BOUNDARY over
+# normalise_label tokens (single token → membership; multi-word → consecutive subsequence) so the
+# census's substring noise ('net' inside 'cabinet') cannot recur.
+CI_QUALIFIER_DIMENSIONS = {
+    'basis': {                                    # SUBSUMES formulas.require_basis (gross/net seed)
+        'gross': ('gross',),
+        'net_of_fees': ('net of fees', 'net of management fees'),
+        'net_of_carry': ('net of carry', 'net of carried interest'),
+        'net_of_tax': ('net of tax', 'after tax'),
+        'net': ('net',),
+    },
+    'holder': {
+        'fund': ('fund',),
+        'lp': ('lp', 'limited partner', 'limited partners'),
+        'gp': ('gp', 'general partner'),
+        'spv': ('spv',),
+        'portfolio_company': ('portfolio company', 'portco', 'investee'),
+    },
+    'aggregation': {
+        'total': ('total',),
+        'per_unit': ('per unit',),
+        'per_share': ('per share',),
+        'weighted': ('weighted', 'weighted average'),
+    },
+    'realisation': {
+        'realised': ('realised', 'realized'),
+        'unrealised': ('unrealised', 'unrealized'),
+        'residual': ('residual',),
+    },
+    'lifecycle': {
+        'opening': ('opening', 'beginning'),
+        'closing': ('closing', 'ending'),
+        'period': ('for the period', 'during the period'),
+        'cumulative': ('cumulative', 'ytd', 'year to date', 'inception to date', 'itd'),
+        'terminal': ('terminal', 'winding up', 'wind up', 'final'),
+        'as_of': ('as of', 'as at', 'as on'),
+    },
+    'capital_status': {                           # the LIVE monotone ladder (census: commitment 85/9 files)
+        'committed': ('committed', 'commitment', 'commitments'),
+        'called': ('called', 'capital call', 'drawdown', 'drawn down'),
+        'drawn': ('drawn',),
+        'undrawn': ('undrawn', 'uncalled'),
+        'paid_in': ('paid in', 'contributed', 'contribution', 'contributions'),
+        'distributed': ('distributed', 'distribution', 'distributions'),
+    },
+    'inclusion': {                                # SINGLE SOURCE of the negation vocabulary (INC3a):
+        'including': ('including', 'incl', 'inclusive of'),          # lexicon._NEGATORS derives from the
+        'excluding': ('excluding', 'excl', 'net of', 'before', 'non', 'ex'),  # 'excluding'/'less_of' single-
+        'less_of': ('less',),                                       # token phrases → one brain, cannot drift
+    },
+    # 'sign' — CONTENT DEFERRED (corpus-absent as a distinct concept; its tokens contribution/
+    # distribution are subsumed by capital_status). The mechanism handles it the instant a row is
+    # added here — that is the whole point of data-driven dimensions (control CI-12).
+}
+
+# Established-danger fund-level bases that are NOT source-concept lexicon keys (they are derived/
+# reported metrics — corpus-sparse per §10, but authored because the danger is established and
+# frequency-independent; proved via planted fixtures §7). base is open-ended (spec §1). phrase→base.
+CI_BASE_SYNONYMS = {
+    'nav': ('nav', 'net asset value'),
+    'irr': ('irr', 'internal rate of return'),
+    'moic': ('moic', 'multiple on invested capital'),
+    'tvpi': ('tvpi', 'total value to paid in'),
+    'dpi': ('dpi', 'distributed to paid in'),
+    'rvpi': ('rvpi', 'residual value to paid in'),
+}
+
+# capital_status is ORDERED (the monotone-ladder law): committed ≥ called ≥ drawn/paid_in ≥ distributed.
+CI_CAPITAL_LADDER_ORDER = ['committed', 'called', 'drawn', 'paid_in', 'distributed']
+
+# The capital ladder is written in the corpus as standalone words (Commitment/Drawdown/Distribution).
+# Map each PHRASE → ONE base 'capital' + a capital_status rung so the ladder law compares rungs. This
+# takes precedence over a bare-concept match ('Commitment' is capital[committed], not a lone concept).
+CI_CAPITAL_FAMILY = {
+    'commitment': 'committed', 'commitments': 'committed', 'committed': 'committed',
+    'capital call': 'called', 'called': 'called', 'drawdown': 'called', 'drawn down': 'called',
+    'drawn': 'drawn', 'undrawn': 'undrawn', 'uncalled': 'undrawn',
+    'paid in': 'paid_in', 'contributed': 'paid_in', 'contribution': 'paid_in', 'contributions': 'paid_in',
+    'distribution': 'distributed', 'distributions': 'distributed', 'distributed': 'distributed',
+}
+
+# Per-base identity_class = the conservation law Net 2 applies. Authored from §10 Q6 + established
+# danger. A base NOT listed is 'none' (free flow; Net 2 DECLARED-inactive, never silently absent).
+CI_BASE_IDENTITY_CLASS = {
+    'nav': 'roll_forward',                        # established-danger (corpus-sparse → fixture-proved)
+    'capital': 'monotone_ladder',                 # LIVE ladder
+    'cash': 'flow_balance', 'closing_cash': 'flow_balance', 'opening_cash': 'flow_balance',
+}
+
+# Declared resolution policy per (base|'*', net-event). Each proto-net's CURRENT behaviour becomes a
+# declared value (spec §0.1 detection-universal / resolution-declared): fund_terms→hold_both/corroborate,
+# nav roll-forward→hold, fund_anchor cost/FV→max.
+CI_RESOLUTION_POLICY = {
+    ('*', 'net1_collision'): 'hold_both',
+    ('*', 'net1_corroborate'): 'corroborate',
+    ('*', 'net2_movement'): 'hold',               # fail-closed default: any new identity-bearing base holds
+    ('cost', 'net1_collision'): 'max',
+    ('fair_value', 'net1_collision'): 'max',
+    ('nav', 'net2_movement'): 'hold',
+    ('capital', 'net2_movement'): 'hold',
+    ('cash', 'net2_movement'): 'hold',
+}
+
+# Convention table (three-state silence): SMALL + high-confidence only. Seed = fund_anchor's
+# "company IRR is gross by convention". Weak/ambiguous context → unresolved (doubt), never a guess.
+CI_CONVENTION_TABLE = [
+    {'base': 'irr', 'context': 'company', 'dimension': 'basis',
+     'default': 'gross', 'rule_id': 'conv-irr-gross-v1'},
+]
+
+
+def _ci_taxonomy_blob() -> dict:
+    """Deterministic serialization of the concept-identity taxonomy for the contract signature, so
+    ANY data edit above auto-invalidates cached identities/records (U8) — no manual version bump reliance."""
+    return {
+        'v': CI_TAXONOMY_VERSION,
+        'dims': {d: {val: sorted(toks) for val, toks in vals.items()}
+                 for d, vals in CI_QUALIFIER_DIMENSIONS.items()},
+        'base_syn': {b: sorted(s) for b, s in CI_BASE_SYNONYMS.items()},
+        'ladder': CI_CAPITAL_LADDER_ORDER,
+        'family': dict(sorted(CI_CAPITAL_FAMILY.items())),
+        'idclass': dict(sorted(CI_BASE_IDENTITY_CLASS.items())),
+        'policy': {f'{b}|{e}': p for (b, e), p in sorted(CI_RESOLUTION_POLICY.items())},
+        'convention': sorted((r['rule_id'], r['base'], r['context'], r['dimension'], r['default'])
+                             for r in CI_CONVENTION_TABLE),
+    }
+
+
 def contract_signature() -> str:
     """Part of the run signature / cache key. Any change to schema, lexicon (SEED *or*
     reviewer-LEARNED), identities, checks or tolerances changes this, so records built under
@@ -264,5 +402,6 @@ def contract_signature() -> str:
         'checks': [(c['id'], c['class']) for c in CHECKS],
         'tolerances': {k: str(v) for k, v in TOLERANCES.items()},
         'staleness': STALENESS_MONTHS, 'rounding': ROUNDING_DP,
+        'ci_taxonomy': _ci_taxonomy_blob(),        # concept-identity taxonomy → data edits re-validate caches
     }, sort_keys=True)
     return 'ct_' + hashlib.sha256(blob.encode()).hexdigest()[:12]
