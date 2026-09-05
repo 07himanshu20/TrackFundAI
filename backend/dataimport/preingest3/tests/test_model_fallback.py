@@ -30,7 +30,7 @@ import types
 import openpyxl
 import pytest
 
-from backend.dataimport.preingest3 import extract, gate, llm
+from backend.dataimport.preingest3 import extract, gate, llm, templates
 from backend.dataimport.preingest3.cir import Figure, Provenance
 from backend.dataimport.preingest3.gate import PASS
 from backend.dataimport.preingest3.ratecard import default_inr_card
@@ -85,10 +85,10 @@ def _located(rowmap):
     return provider
 
 
-def _fill(fields, ident, provider=None):
+def _fill(fields, ident, provider=None, prof=None):
     if provider is not None:
         llm.set_model_provider(provider)
-    return extract._model_fill(_prof(), ident, list(extract.MIS_CONCEPTS),
+    return extract._model_fill(prof or _prof(), ident, list(extract.MIS_CONCEPTS),
                                entity='TestCo', domicile=None, anchor_cr=None,
                                rate_card=_RC, fields=fields, source_label='t.xlsx')
 
@@ -136,6 +136,33 @@ def test_emit_path_under_explicit_loosening(monkeypatch):
     assert fields['ebitda'].value_cr == 9 and not fields['ebitda'].held
     assert fields['cash'].value_cr is None
     assert fields['headcount'].value_cr is None
+
+
+def test_locator_only_model_volunteered_number_is_never_emitted(monkeypatch):
+    # PART-1 CONTRACT (locator-only, reddening). The model returns LOCATIONS; if it ALSO volunteers
+    # a number at the CORRECT location ("row 2 ... value=9999999"), that number must be IGNORED and
+    # the CODE-READ cell value emitted instead. locator._parse_located_rows whitelists only
+    # concept/form/row/rows/row_label — there is no field a volunteered number can travel in, and
+    # RowRecord has no value slot — so this locks the invariant end-to-end through the emit path.
+    monkeypatch.setenv('PREINGEST3_EMIT_UNPROVEN', '1')
+    fields = _gap_fields()
+
+    def prov(prompt, **kw):
+        # correct rows, but each also carries a BOGUS volunteered number the code must discard
+        items = ', '.join(
+            f'{{"concept":"{c}","form":"direct","row":{r},"row_label":"{_LABEL.get(c, c)}",'
+            f'"rows":[],"value":9999999,"amount":9999999}}'
+            for c, r in _ROW.items())
+        return types.SimpleNamespace(text='{"located":[' + items + ']}')
+
+    _fill(fields, _ident('cfp-locator-only'), prov)
+    # emitted values are the CODE-READ collapse (revenue Σ=33, ebitda Σ=9), NEVER the model's 9999999
+    assert fields['revenue'].value_cr == 33 and not fields['revenue'].held
+    assert fields['ebitda'].value_cr == 9
+    for c in extract.MIS_CONCEPTS:
+        f = fields.get(c)
+        if isinstance(f, Figure) and f.value_cr is not None:
+            assert f.value_cr != 9999999, f'{c} emitted the model-volunteered number — locator-only broken'
 
 
 def test_REJECTS_wrong_row(monkeypatch):
@@ -315,6 +342,273 @@ def test_cash_inherits_closing_cash_when_target_absent(monkeypatch):
     cash = _diag(diags, 'cash')
     assert cash['row'] == _ROW['cash'], 'cash did not inherit closing_cash row'
     assert cash['native'] is not None and cash.get('recall') is None    # bound & collapsed, not a recall hold
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# U3 — LAYOUT TEMPLATE REGISTRY (cache A, 3b): a known layout reuses the model's proven row LOCATIONS
+# and skips the locate call; every hit re-reads THIS file's cells + re-runs the 3 signals, so a
+# stale/wrong/cross-tenant location can never emit a wrong number. Model-off never touches it.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+def _scaled_prof():
+    """SAME layout as _prof() (revenue row 2, cogs row 3, …) but DIFFERENT numbers; the identities still
+    hold on the sums (63-26=37, 37-22=15) so a hit re-verifies. Proves the registry serves LOCATIONS, not
+    values — run 2 reads ITS OWN numbers off the same rows."""
+    sheet = types.SimpleNamespace(sheet='P&L', currency_hints=['INR'])
+    # PER-COLUMN consistent (the identity signal checks the ref column, not just the sums):
+    #   each month: revenue-cogs=gross_profit AND gross_profit-opex=ebitda.
+    rows = [
+        ['Particulars (INR Cr)', 'Apr-25', 'May-25', 'Jun-25'],
+        ['Revenue', 20, 21, 22],           # Σ=63
+        ['COGS', 8, 9, 10],                # Σ=27
+        ['Gross Profit', 12, 12, 12],      # Σ=36   (20-8, 21-9, 22-10)
+        ['OPEX', 6, 7, 8],                 # Σ=21
+        ['EBITDA', 6, 5, 4],               # Σ=15   (12-6, 12-7, 12-8)
+        ['Cash', 5, 6, 7],
+        ['Headcount', 20, 21, 22],
+    ]
+    return {'sheets': [sheet], 'grid': {'P&L': [list(r) for r in rows]}}
+
+
+def _imperfect_prof():
+    """SAME layout + numbers as _prof() but the cogs row is SOFT-labelled ('Total COGS' → lexicon
+    'contains', not 'exact') — a located-but-IMPERFECT INTERMEDIATE: arithmetically consistent every
+    column (revenue−cogs=gross_profit, gross_profit−opex=ebitda) yet not all-PASS on its own 3 signals.
+    On a MISS it is located, so revenue−cogs=gross_profit FIRES and revenue's identity PASSES → revenue
+    emits. Under put-on-PASS it would NOT be cached (label SOFT), so a HIT that dropped it would silently
+    hold revenue though the miss emitted it — the hit≠miss coverage asymmetry the capstone proves gone."""
+    sheet = types.SimpleNamespace(sheet='P&L', currency_hints=['INR'])
+    rows = [
+        ['Particulars (INR Cr)', 'Apr-25', 'May-25', 'Jun-25'],
+        ['Revenue', 10, 11, 12],           # Σ=33
+        ['Total COGS', 4, 4, 5],           # Σ=13  ← SOFT label (contains) = the imperfect intermediate
+        ['Gross Profit', 6, 7, 7],         # Σ=20  (10-4, 11-4, 12-5)
+        ['OPEX', 3, 4, 4],                 # Σ=11
+        ['EBITDA', 3, 3, 3],               # Σ=9   (6-3, 7-4, 7-4)
+        ['Cash', 5, 6, 7],
+        ['Headcount', 20, 21, 22],
+    ]
+    return {'sheets': [sheet], 'grid': {'P&L': [list(r) for r in rows]}}
+
+
+def _emitted_cir(fields):
+    """The observable emit outcome per MIS target: (value_cr, held). hit==miss means this is identical."""
+    return {c: (fields[c].value_cr, bool(fields[c].held)) for c in extract.MIS_CONCEPTS}
+
+
+def _cached_concepts(layout_fp):
+    import json
+    with open(templates._STORE) as fh:
+        data = json.load(fh)
+    tpl = data.get('layouts', {}).get(layout_fp, {})
+    return {r['concept'] for recs in tpl.get('statements', {}).values() for r in recs}
+
+
+def _corrupt_cached_row(layout_fp, concept, to_row0):
+    import json
+    with open(templates._STORE) as fh:
+        data = json.load(fh)
+    for recs in data['layouts'][layout_fp]['statements'].values():
+        for r in recs:
+            if r['concept'] == concept:
+                r['row'] = to_row0                          # point it at a DIFFERENT concept's row
+    with open(templates._STORE, 'w') as fh:
+        json.dump(data, fh)
+
+
+# ── ACCEPTANCE TEST 3 + happy 2: a known layout SKIPS the locate call, and re-reads THIS file's numbers ──
+def test_templates_hit_skips_locate_and_reads_this_files_numbers(monkeypatch):
+    monkeypatch.setenv('PREINGEST3_EMIT_UNPROVEN', '1')       # emit ON, so a re-verified hit emits
+    ident = _ident('cfp-tmpl')
+    _fill(_gap_fields(), ident, _located(_ROW))              # run 1 (MISS) → put-on-PASS freezes the rows
+    assert templates.has_layout(ident.layout_fp)             # layout learned
+
+    def _boom(prompt, **kw):
+        raise AssertionError('registry HIT expected — the model must NOT be called')
+
+    llm.new_metrics()
+    f2 = _gap_fields()
+    _fill(f2, ident, _boom, prof=_scaled_prof())            # run 2 (HIT), different numbers, same layout
+    assert llm.current_metrics().calls == 0                  # SKIPS locate — the SLA lever (cost per layout, not file)
+    assert f2['revenue'].value_cr == 63 and not f2['revenue'].held   # THIS file's numbers, re-read off the cached rows
+    assert f2['ebitda'].value_cr == 15
+
+
+# ── ACCEPTANCE TEST 2 (REDDENING — the load-bearing safety proof): a WRONG cached location is caught by
+#    the re-read + re-verify and HELD, never emitted. This is what makes the non-org-scoped, cross-tenant-
+#    shared registry safe: it serves a location, and the location is re-proven against THIS file every hit. ──
+def test_templates_wrong_cached_location_is_caught_and_held(monkeypatch):
+    monkeypatch.setenv('PREINGEST3_EMIT_UNPROVEN', '1')       # emit ON, so a CORRECT hit WOULD emit
+    ident = _ident('cfp-wrongloc')
+    _fill(_gap_fields(), ident, _located(_ROW))              # run 1 → correct rows cached
+    _corrupt_cached_row(ident.layout_fp, 'revenue', _ROW['ebitda'] - 1)   # revenue → the EBITDA row (0-based)
+
+    def _boom(prompt, **kw):
+        raise AssertionError('registry HIT expected — the model must NOT be called')
+
+    llm.new_metrics()
+    f2 = _gap_fields()
+    _fill(f2, ident, _boom)                                  # run 2 → hit the CORRUPTED location
+    assert llm.current_metrics().calls == 0                  # served from the (corrupted) registry, no model call
+    # THE SAFETY PROOF: the re-read label ('EBITDA' ≠ revenue) + broken identity dissent → revenue is NOT
+    # emitted — value_cr stays None, NEVER the EBITDA number the corrupted location points at. A shared /
+    # stale / cross-tenant location can never ship a wrong figure because the re-verify runs every hit.
+    assert f2['revenue'].value_cr is None                    # wrong location caught → NOT emitted (no wrong number)
+    assert f2['ebitda'].value_cr == 9                        # a CORRECT cached row still emits — only the bad one is caught
+
+
+# ── CAPSTONE (before 3d): a cache HIT must emit the IDENTICAL CIR to a MISS — same figures emitted, same
+#    held — NOT merely "reads correct values". The load-bearing case is a located-but-imperfect INTERMEDIATE
+#    (SOFT-labelled cogs): on a miss it is present so revenue−cogs=gross_profit fires and revenue emits; a hit
+#    that dropped it (put-on-PASS caches only all-PASS rows) would silently HOLD revenue — fail-closed, but
+#    hit≠miss. Equality here proves the registry is a TRANSPARENT SUBSTITUTE for locate_rows, not just safe. ──
+def test_templates_hit_equals_miss_including_imperfect_intermediate(monkeypatch):
+    monkeypatch.setenv('PREINGEST3_EMIT_UNPROVEN', '1')      # emit ON so equality is observable on the emits
+    prof = _imperfect_prof()
+
+    f_miss = _gap_fields()
+    _fill(f_miss, _ident('cfp-hiteqmiss'), _located(_ROW), prof=prof)   # MISS → locates the FULL chain, populates
+    miss_cir = _emitted_cir(f_miss)
+    assert miss_cir['revenue'] == (33, False)               # precondition: the miss DID emit revenue VIA the intermediate
+    assert miss_cir['ebitda'] == (9, False)
+
+    def _boom(prompt, **kw):
+        raise AssertionError('registry HIT expected — the model must NOT be called')
+
+    llm.new_metrics()
+    f_hit = _gap_fields()
+    _fill(f_hit, _ident('cfp-hiteqmiss'), _boom, prof=prof)  # HIT → SAME file, served from the registry
+    assert llm.current_metrics().calls == 0                  # genuinely a hit (locate skipped)
+    assert _emitted_cir(f_hit) == miss_cir                   # HIT == MISS, EXACTLY — revenue included, not just held-safe
+
+
+# ── put-on-PASS is REPLACED by cache-the-full-located-set (§ hit==miss): the registry mirrors what
+#    locate_rows returned, and re-verify-on-hit is the SOLE safety layer. A wrong-row locate is therefore
+#    cached but can never EMIT — it is re-read + re-triangulated on the hit and HELD (proven by
+#    test_cached_wrong_row_still_fails_closed / D2). This test pins the new put contract: the full located
+#    chain is frozen so a hit re-verifies it whole; safety is the re-verify, not a put-time filter. ──
+def test_templates_put_caches_full_located_chain_for_reverify(monkeypatch):
+    monkeypatch.setenv('PREINGEST3_EMIT_UNPROVEN', '1')
+    ident = _ident('cfp-putfull')
+    _fill(_gap_fields(), ident, _located(_ROW), prof=_imperfect_prof())   # cogs is SOFT-labelled (not all-PASS)
+    cached = _cached_concepts(ident.layout_fp)
+    assert 'cogs' in cached                                  # the imperfect intermediate IS cached (so a hit re-verifies the whole chain)
+    assert {'revenue', 'gross_profit', 'opex', 'ebitda'} <= cached   # the full located chain is frozen, not just all-PASS rows
+
+
+# ── self-erasing: a logic-version change invalidates the whole store (never freezes yesterday's locate) ──
+def test_templates_store_self_erases_on_logic_version(monkeypatch):
+    from backend.dataimport.preingest3.statements import Statement
+    st = Statement('P&L', 1, 7, header_row=0, label_col=0)
+    rr = types.SimpleNamespace(concept='revenue', form='direct', row=1, operand_rows=[], row_label='Revenue')
+    templates.put_statement_rows('lfp-x', st, [rr])
+    assert templates.get_statement_rows('lfp-x', st) is not None       # present under the current logic version
+    monkeypatch.setattr(templates, 'net_logic_version', lambda: 'lv_DIFFERENT')   # the name templates binds
+    assert templates.get_statement_rows('lfp-x', st) is None           # version skew → whole store treated empty
+    assert templates.has_layout('lfp-x') is False
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# PROBE ORDER (3d efficiency): the model path visits the deterministic BEST MIS statement sheet FIRST,
+# then every other sheet in profile order. REORDER, never RESTRICT — the fallback stays intact so a gap
+# off the best sheet is still found. Cuts the cold model-call WASTE of probing decoy tabs before the real
+# statement (a monthly report can carry 50+ statement-shaped tabs); zero coverage change.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+def _sh(n):
+    return types.SimpleNamespace(sheet=n, currency_hints=['INR'])
+
+
+_DECOY = [['Item', 'Apr-25', 'May-25', 'Jun-25'], ['Widgets', 1, 2, 3], ['Gadgets', 4, 5, 6], ['Gizmos', 7, 8, 9]]
+
+
+def _multi_sheet_prof():
+    """3 sheets in profile order [D1, D2, PL] — PL (the real P&L) is LAST; the decoys carry a time axis but
+    NO MIS concepts, so _best_sheet ranks PL the best. Profile-order probing would hit D1, D2 before PL."""
+    return {'sheets': [_sh('D1'), _sh('D2'), _sh('PL')],
+            'grid': {'D1': [list(r) for r in _DECOY], 'D2': [list(r) for r in _DECOY],
+                     'PL': [list(r) for r in ROWS]}}
+
+
+def test_model_probe_order_is_best_sheet_first_reorder_not_restrict():
+    order = [s.sheet for s in extract._model_probe_order(_multi_sheet_prof())]
+    assert order[0] == 'PL'                     # deterministic best sheet FIRST (profile order puts PL last)
+    assert order == ['PL', 'D1', 'D2']          # REORDER not RESTRICT: every sheet present, the rest keep profile order
+
+
+def test_model_probe_order_no_best_sheet_keeps_profile_order():
+    # a workbook with NO MIS statement (all decoys) → no deterministic best → probe in profile order (unchanged).
+    prof = {'sheets': [_sh('D1'), _sh('D2')], 'grid': {'D1': [list(r) for r in _DECOY], 'D2': [list(r) for r in _DECOY]}}
+    assert [s.sheet for s in extract._model_probe_order(prof)] == ['D1', 'D2']
+
+
+def test_model_fill_probes_best_sheet_first_and_early_breaks(monkeypatch):
+    # The payoff: with the best sheet FIRST, gaps that resolve there resolve on probe #1 → early break →
+    # the decoy tabs are NEVER probed (profile order would have spent a model call on D1 and D2 first).
+    monkeypatch.setenv('PREINGEST3_EMIT_UNPROVEN', '1')
+    from backend.dataimport.preingest3 import locator
+    seen = []
+    real = locator.locate_rows
+
+    def spy(stmt, grid, concepts, **kw):
+        seen.append(stmt.sheet)
+        if stmt.sheet == 'PL':
+            return real(stmt, grid, concepts, **kw)          # the real locate on the good sheet (via the provider)
+        return {'records': [], 'missing': list(concepts), 'error': None}   # decoys locate nothing
+    monkeypatch.setattr(locator, 'locate_rows', spy)
+    llm.set_model_provider(_located(_ROW)); llm.new_metrics()
+
+    fields = _gap_fields()
+    extract._model_fill(_multi_sheet_prof(), _ident('cfp-probe'), ['revenue', 'ebitda'],
+                        entity='T', domicile=None, anchor_cr=None, rate_card=_RC,
+                        fields=fields, source_label='t.xlsx')
+    assert seen == ['PL']                        # best sheet first → both gaps resolve → early break; decoys NEVER probed
+    assert fields['revenue'].value_cr == 33 and not fields['revenue'].held    # coverage preserved (resolved on probe #1)
+    assert fields['ebitda'].value_cr == 9 and not fields['ebitda'].held
+
+
+def test_model_fill_falls_back_to_other_sheets_for_gaps_off_the_best_sheet(monkeypatch):
+    # REORDER not RESTRICT (the load-bearing coverage invariant): a gap that lives OFF the best sheet is STILL
+    # reached and LOCATED. Best sheet 'PL' resolves revenue; 'cash' lives only on a later 'BS' tab → the
+    # fallback must reach 'BS' and locate cash there. Starting at the best sheet must never orphan an off-sheet
+    # gap. (cash has no identity here so it won't EMIT — the invariant under test is that the fallback REACHES
+    # and LOCATES it, i.e. coverage is not narrowed by the reorder.)
+    monkeypatch.setenv('PREINGEST3_EMIT_UNPROVEN', '1')
+    from backend.dataimport.preingest3 import locator
+    bs = [['Particulars (INR Cr)', 'Apr-25', 'May-25', 'Jun-25'],
+          ['Trade Receivables', 30, 33, 36], ['Inventory', 20, 22, 24], ['Cash', 5, 6, 7]]
+    prof = {'sheets': [_sh('PL'), _sh('BS')],
+            'grid': {'PL': [list(r) for r in ROWS], 'BS': [list(r) for r in bs]}}
+    seen = []
+
+    def spy(stmt, grid, concepts, **kw):
+        seen.append(stmt.sheet)
+        if stmt.sheet == 'PL':
+            return {'records': [locator.RowRecord(concept='revenue', form='direct', row=1, operand_rows=[], row_label='Revenue')],
+                    'missing': [c for c in concepts if c != 'revenue'], 'error': None}
+        if stmt.sheet == 'BS':
+            return {'records': [locator.RowRecord(concept='cash', form='direct', row=3, operand_rows=[], row_label='Cash')],
+                    'missing': [c for c in concepts if c != 'cash'], 'error': None}
+        return {'records': [], 'missing': list(concepts), 'error': None}
+    monkeypatch.setattr(locator, 'locate_rows', spy)
+    llm.set_model_provider(lambda *a, **k: types.SimpleNamespace(text='{"located":[]}')); llm.new_metrics()
+
+    fields = _gap_fields()
+    diags = extract._model_fill(prof, _ident('cfp-fallback'), ['revenue', 'cash'],
+                                entity='T', domicile=None, anchor_cr=None, rate_card=_RC,
+                                fields=fields, source_label='t.xlsx')
+    assert seen == ['PL', 'BS']                   # best sheet first, THEN the fallback reached the off-best sheet
+    assert next(d for d in diags if d['concept'] == 'revenue')['sheet'] == 'PL'   # best-sheet gap located on probe #1
+    assert next(d for d in diags if d['concept'] == 'cash')['sheet'] == 'BS'      # off-best gap LOCATED by the fallback — coverage preserved
+
+
+# ── validation: a stored row outside the statement's row range is rejected (never trusted blindly) ──
+def test_templates_get_rejects_out_of_range_row():
+    from backend.dataimport.preingest3.statements import Statement
+    st = Statement('P&L', 1, 7, header_row=0, label_col=0)
+    good = types.SimpleNamespace(concept='revenue', form='direct', row=2, operand_rows=[], row_label='Revenue')
+    bad = types.SimpleNamespace(concept='ebitda', form='direct', row=99, operand_rows=[], row_label='EBITDA')
+    templates.put_statement_rows('lfp-oor', st, [good, bad])
+    got = templates.get_statement_rows('lfp-oor', st)
+    assert {r['concept'] for r in got} == {'revenue'}                  # the out-of-range ebitda row is dropped
 
 
 if __name__ == '__main__':

@@ -258,6 +258,267 @@ def locate_rows(st: Statement, grid: Dict[str, List[List[Any]]], target_concepts
     return {'records': records, 'absent': sorted(absent), 'missing': still_missing}
 
 
+def _finder_concepts(target_concepts: List[str]) -> List[str]:
+    """The whole-file finder requests the TARGET concepts ONLY — NOT the over-location anchors.
+    request_concepts adds identity anchors (period_total, assets, liabilities, …) that are bounded
+    and useful within ONE statement, but across an 80-sheet workbook they match dozens of rows each
+    (period_total matches every 'Total …' row) → a combinatorial OUTPUT explosion that blows the
+    call past its timeout and floods the located set with wrong-concept noise. Identity anchors are
+    located PER-STATEMENT downstream (triangulation), where they belong. Sorted → order-invariant."""
+    return sorted({c for c in target_concepts if c})
+
+
+# ── ONE-PASS WHOLE-FILE finder (model phase, Step 4) ─────────────────────────────────────────────
+# The per-statement locate_rows re-discovers each statement one call at a time. The finder asks ONCE
+# over the COMPLETE subsheet inventory and requires EVERY location of each concept across ALL listed
+# statements — never first-match-stop — so the same concept on the balance sheet AND the cash-flow
+# statement both come back and reconcile_locations can cross-check them. Locator-only (rows, never
+# values or columns), same RowRecord contract; code reads + triangulates + reconciles every location.
+_FILE_ROW_PROMPT = """You LOCATE the ROW of each figure across an ENTIRE multi-statement financial workbook for an Indian AIF pipeline.
+Per concept you return EVERY place it appears — as {sheet, row number, row_label} — NEVER a column, NEVER a value. Code picks the reporting-period column, reads the number, and cross-checks your locations against each other.
+
+STRICT RULES (a violation is discarded):
+- EXHAUSTIVE: return EVERY location of each concept across ALL listed statements. Do NOT stop at the first match. The same concept legitimately appears on more than one statement (e.g. cash on the balance sheet AND the cash-flow statement) — list them all, each as its own record.
+- form "direct": one {sheet,row} that holds the figure. PREFER THE TOTAL line (e.g. "Total revenue") over a component or sub-line.
+- form "expression": ONLY when the figure is split across component rows on the SAME sheet that SUM to it. Give "rows"=[row numbers], same sheet, at most 12, ADDITION only, never subtract.
+- form "absent": the concept appears in NONE of the listed statements → return exactly ONE record with form "absent" for it. Do not guess.
+- row_label: the exact text you read on that row. sheet: the exact sheet name as listed.
+
+Return STRICT JSON only:
+{"located":[{"concept":"cash","sheet":"Balance Sheet","form":"direct","row":34,"row_label":"Cash in Bank","rows":[]},
+            {"concept":"cash","sheet":"Cashflow (Indirect)","form":"direct","row":88,"row_label":"Closing cash balance","rows":[]}]}
+
+CONCEPTS TO LOCATE (find EVERY location of each across ALL statements; one "absent" record if a concept is in none):
+{concepts}
+
+STATEMENTS (each: a sheet header, then its row labels as `row_number = label`):
+{statements}
+"""
+
+
+def _file_statements_block(inventory: List[Statement], grid: Dict[str, List[List[Any]]]) -> str:
+    """The complete subsheet inventory rendered for the prompt: every statement window, its sheet
+    name + row range, then its row labels (row_number = label). This is the 'menu' the model MUST
+    cover exhaustively — code supplies it so the model never has to discover which sheets exist."""
+    blocks = []
+    for st in inventory:
+        labels = _row_labels(grid.get(st.sheet) or [], st)
+        title = f' — "{st.title}"' if st.title else ''
+        head = f'=== SHEET "{st.sheet}" (rows {st.start_row + 1}-{st.end_row + 1}){title} ==='
+        blocks.append(head + '\n' + '\n'.join(f'{n} = {t}' for n, t in labels))
+    return '\n\n'.join(blocks)
+
+
+def _parse_located_file(located: Any, valid_by_sheet: Dict[str, set]) -> tuple:
+    """Parse the finder's 'located' array into (records, returned, absent).
+    records = [(sheet, RowRecord)]; a concept may appear MANY times (one per location). `returned`
+    = every requested concept the model gave a determinate answer for (≥1 valid located row, or an
+    explicit "absent"); a concept omitted, or given only out-of-range/unknown-sheet rows, is NOT in
+    `returned` so the caller detects the silent drop and re-requests it (completeness/recall net)."""
+    records, returned, absent = [], set(), set()
+    if not isinstance(located, list):
+        return records, returned, absent
+    for obj in located:
+        if not isinstance(obj, dict):
+            continue
+        concept = str(obj.get('concept') or '').strip().lower()
+        form = str(obj.get('form') or '').strip().lower()
+        sheet = str(obj.get('sheet') or '').strip()
+        label = str(obj.get('row_label') or '').strip()
+        if not concept:
+            continue
+        if form == ls.FORM_ABSENT:
+            returned.add(concept)
+            absent.add(concept)
+            continue
+        valid = valid_by_sheet.get(sheet)
+        if valid is None:                                  # unknown sheet name → discard (never guess a sheet)
+            continue
+        if form == ls.FORM_EXPRESSION:
+            ors = [int(x) - 1 for x in (obj.get('rows') or []) if _is_int(x)]
+            ors = [r for r in ors if r in valid][:ls.MAX_OPERANDS]
+            if not ors:
+                continue
+            returned.add(concept)
+            records.append((sheet, RowRecord(concept, ls.FORM_EXPRESSION, None, ors, label)))
+        else:
+            r = obj.get('row')
+            if not _is_int(r):
+                continue
+            r0 = int(r) - 1
+            if r0 not in valid:
+                continue
+            returned.add(concept)
+            records.append((sheet, RowRecord(concept, ls.FORM_DIRECT, r0, [], label)))
+    return records, returned, absent
+
+
+def _locate_across_file_call(inventory: List[Statement], grid: Dict[str, List[List[Any]]],
+                             concepts: List[str], *, content_fp: str, mode: str) -> dict:
+    """One whole-file model round for an EXACT concept list (no anchor re-expansion on retry).
+    Returns {'records':[(sheet,RowRecord)], 'returned':set, 'absent':set, 'error'?}."""
+    valid_by_sheet: Dict[str, set] = {}          # UNION per sheet: a row-range split can place two
+    for st in inventory:                          # windows of the SAME sheet in one chunk; a plain
+        valid_by_sheet.setdefault(st.sheet, set()).update(st.rows_range)  # dict would drop the first.
+    prompt = (_FILE_ROW_PROMPT
+              .replace('{concepts}', _concepts_block(concepts))
+              .replace('{statements}', _file_statements_block(inventory, grid)))
+    sheets_sig = ','.join(f'{st.sheet}:{st.start_row}-{st.end_row}' for st in inventory)
+    sig = f'{content_fp}|FILE|{sheets_sig}|{mode}|{",".join(concepts)}'
+    res = llm.call_json('locate_file', sig, prompt, read_timeout_s=180.0, stream=False)
+    if res.is_error:
+        return {'error': res.reason, 'records': [], 'returned': set(), 'absent': set()}
+    located = (res.data or {}).get('located') if isinstance(res.data, dict) else None
+    records, returned, absent = _parse_located_file(located, valid_by_sheet)
+    return {'records': records, 'returned': returned, 'absent': absent}
+
+
+def locate_across_file(inventory: List[Statement], grid: Dict[str, List[List[Any]]],
+                       target_concepts: List[str], *, content_fp: str) -> dict:
+    """ONE-PASS finder: ask the model for EVERY location of each TARGET concept (targets only — the
+    over-location anchors are located PER-STATEMENT downstream, not here; see _finder_concepts) across
+    the COMPLETE statement inventory in a single call. ORDER-INVARIANT (_finder_concepts canonicalises)
+    and COMPLETENESS-COMPLETE: a concept the model silently drops is re-requested ONCE
+    in a focused call; any still-undetermined concept is returned in 'missing' — never silently lost.
+    Every row is validated to lie inside its named statement. Returns
+    {'records':[(sheet,RowRecord)], 'absent':[concept], 'missing':[concept], 'error'?}."""
+    if not inventory:
+        return {'records': [], 'absent': [], 'missing': list(_finder_concepts(target_concepts))}
+    concepts = _finder_concepts(target_concepts)
+    first = _locate_across_file_call(inventory, grid, concepts, content_fp=content_fp, mode='file')
+    if first.get('error'):
+        return {'error': first['error'], 'records': [], 'absent': [], 'missing': list(concepts)}
+    records = list(first['records'])
+    returned = set(first['returned'])
+    absent = set(first['absent'])
+    missing = [c for c in concepts if c not in returned]
+    if missing:                                            # completeness net — re-request the silent drops
+        retry = _locate_across_file_call(inventory, grid, missing, content_fp=content_fp, mode='file-retry')
+        if not retry.get('error'):
+            have = {(s, r.concept, r.row, tuple(r.operand_rows)) for s, r in records}
+            for s, r in retry['records']:
+                key = (s, r.concept, r.row, tuple(r.operand_rows))
+                if key not in have:
+                    records.append((s, r))
+                    have.add(key)
+            returned |= retry['returned']
+            absent |= retry['absent']
+    still_missing = [c for c in concepts if c not in returned]
+    return {'records': records, 'absent': sorted(absent), 'missing': still_missing}
+
+
+# ── TOKEN-BUDGETED CHUNKING (Step 4, §3b) — split, never filter-to-fit ────────────────────────────
+# A large workbook can't go in ONE request (it times out), and it must NOT be filtered down to fit
+# (that silently drops real statements — the never-miss violation). The resolution is to SPLIT the
+# inventory into token-budgeted chunks of WHOLE sheets, locate each, and UNION the answers: every sheet
+# is seen, just never all at once. A concept split across chunks unions exactly as one split across
+# sheets, and reconcile_locations judges the union. Chunk boundaries are deterministic (workbook order,
+# packed by budget), so the same file always chunks the same way.
+_CHUNK_TOKEN_BUDGET = 14000   # est. tokens of the statements block per chunk. The 8-sheet CSS chunk
+# (~17k total prompt tokens) answered in 40s, well inside the 120s timeout; a smaller budget keeps every
+# chunk comfortably within it. Tunable: larger = fewer chunks (faster) at more timeout risk.
+
+
+def _estimate_stmt_tokens(st: Statement, grid: Dict[str, List[List[Any]]]) -> int:
+    """Rough token size of ONE statement's labels block (chars/4). Deterministic, no model."""
+    return len(_file_statements_block([st], grid)) // 4
+
+
+def _split_statement_by_budget(st: Statement, grid: Dict[str, List[List[Any]]],
+                               token_budget: int) -> List[Statement]:
+    """Split ONE statement whose labels alone exceed the budget into contiguous row-range windows,
+    each ≤ budget. Every window keeps the SAME sheet name, header_row, label_col and title, so the
+    1-based row numbers (and therefore row validity) are unchanged — a window carries exactly the
+    labels it spans. The finder is locate-by-row-label only, so a concept is found in whichever
+    window holds its row and the union recovers the whole sheet. Splits at label-row boundaries
+    (never mid-row); a single row that alone exceeds the budget becomes its own window (unavoidable —
+    a row can't be halved). Deterministic (workbook row order). Universal: keyed on token size, never
+    on a sheet name or row count."""
+    if _estimate_stmt_tokens(st, grid) <= token_budget:
+        return [st]
+    rows = grid.get(st.sheet) or []
+    labels = _row_labels(rows, st)                       # [(1-based row, label)] — the rendered lines
+    title = f' — "{st.title}"' if st.title else ''
+    head_tok = len(f'=== SHEET "{st.sheet}" (rows {st.start_row + 1}-{st.end_row + 1}){title} ===') // 4 + 1
+    boundaries: List[int] = []                           # 0-based rows where a NEW window begins
+    cur_tok = head_tok
+    for n1, label in labels:
+        line_tok = len(f'{n1} = {label}') // 4 + 1
+        if cur_tok + line_tok > token_budget and cur_tok > head_tok:
+            boundaries.append(n1 - 1)                    # this label overflows → start a window at it
+            cur_tok = head_tok
+        cur_tok += line_tok
+    starts = [st.start_row] + boundaries
+    ends = [b - 1 for b in boundaries] + [st.end_row]
+    return [Statement(st.sheet, s, e, st.header_row, st.label_col, st.title, st.kind)
+            for s, e in zip(starts, ends)]
+
+
+def _chunk_by_budget(inventory: List[Statement], grid: Dict[str, List[List[Any]]],
+                     token_budget: int) -> List[List[Statement]]:
+    """Pack statements (workbook order → deterministic) into chunks until the next would exceed the
+    budget. A single sheet bigger than the budget is first split into row-range windows
+    (_split_statement_by_budget) so no chunk can exceed the budget — every window is ≤ budget and the
+    union of windows covers the whole sheet, so nothing is filtered to fit."""
+    expanded: List[Statement] = []
+    for st in inventory:
+        expanded.extend(_split_statement_by_budget(st, grid, token_budget))
+    chunks: List[List[Statement]] = []
+    cur: List[Statement] = []
+    cur_t = 0
+    for st in expanded:
+        t = _estimate_stmt_tokens(st, grid)
+        if cur and cur_t + t > token_budget:
+            chunks.append(cur)
+            cur, cur_t = [], 0
+        cur.append(st)
+        cur_t += t
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+def locate_across_file_chunked(inventory: List[Statement], grid: Dict[str, List[List[Any]]],
+                               target_concepts: List[str], *, content_fp: str,
+                               token_budget: int = _CHUNK_TOKEN_BUDGET) -> dict:
+    """Chunked one-pass finder: split the inventory into token-budgeted chunks of whole sheets, locate
+    each chunk SEQUENTIALLY (no aggressive parallelism), and UNION the located rows. Every sheet is
+    seen — nothing is filtered to fit. Per-chunk completeness/recall is unchanged (locate_across_file).
+    Cross-chunk status is fail-closed on absence:
+      • located  — found in ≥1 chunk (union, de-duplicated).
+      • absent   — located in NO chunk AND the model said 'absent' in every chunk that ran.
+      • missing  — located in no chunk AND undetermined in ≥1 chunk (a chunk errored, or a silent drop
+                   the per-chunk recall could not recover) → NEVER downgraded to a silent 'absent'.
+    Returns {'records':[(sheet,RowRecord)], 'absent':[...], 'missing':[...], 'chunks':N, 'chunk_error':bool}."""
+    concepts = _finder_concepts(target_concepts)
+    if not inventory:
+        return {'records': [], 'absent': [], 'missing': list(concepts), 'chunks': 0, 'chunk_error': False}
+    chunks = _chunk_by_budget(inventory, grid, token_budget)
+    records, have, located, missing_any = [], set(), set(), set()
+    chunk_error = False
+    for ci, chunk in enumerate(chunks):
+        out = locate_across_file(chunk, grid, target_concepts,
+                                 content_fp=f'{content_fp}|chunk{ci + 1}of{len(chunks)}')
+        if out.get('error'):
+            chunk_error = True
+            missing_any |= set(concepts)              # a failed chunk can't prove absence for its scope
+            continue
+        for s, r in out['records']:
+            key = (s, r.concept, r.row, tuple(r.operand_rows))
+            if key not in have:
+                have.add(key)
+                records.append((s, r))
+                located.add(r.concept)
+        missing_any |= set(out.get('missing', []))
+    absent, missing = [], []
+    for c in concepts:
+        if c in located:
+            continue
+        (missing if c in missing_any else absent).append(c)
+    return {'records': records, 'absent': sorted(absent), 'missing': sorted(missing),
+            'chunks': len(chunks), 'chunk_error': chunk_error}
+
+
 def locate_statement(st: Statement, grid: Dict[str, List[List[Any]]], target_concepts: List[str],
                      *, content_fp: str) -> dict:
     """Locate all requested concepts (+ anchors) in one statement. `grid` is the

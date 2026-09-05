@@ -61,11 +61,18 @@ MIS = [
 # These live in the TEST (the ruler), never in the engine; the extractor still derives each
 # number universally. Adding a value here is a claim "this emit is confirmed correct".
 GT = {
-    ('Hubler', 'revenue'): '4.1837', ('Hubler', 'ebitda'): '-0.4304',
+    ('Hubler', 'revenue'): '4.0477',        # operating revenue: 'Total revenue from operations' row (TTM
+                                            # 40,476,676) — relocated from the 'Total revenue' aggregate
+                                            # (rule #1); = Total revenue − Total other income, verified.
+    ('Hubler', 'ebitda'): '-0.4304',
     ('Hubler', 'headcount'): '13',          # fork-b re-source: KPIs!AZ146 'Total employees', 28-Feb-26
     ('Hubler', 'cash'): '1.0621',           # R4 recovery: P&L!BB98 'Closing balance' latest = 10,620,993
 
-    ('Agnikul', 'revenue'): '5.1460', ('Agnikul', 'cash'): '117.6646',
+    # ('Agnikul', 'revenue') — no GT: revenue HELD (fail-closed). Agnikul's 'Total Income' is
+    #   Interest-on-FDs + Other Income (both non-operating; pre-revenue firm on treasury interest),
+    #   no stated operating-revenue row → Total Income AS revenue is a silent relabel (forbidden),
+    #   and TI − OI is a not-yet-citable subtraction → held. A held slot is SAFE (not an unverified emit).
+    ('Agnikul', 'cash'): '117.6646',
     ('Agnikul', 'headcount'): '299',        # Feb'26 period-end (B29); NOT an average/sum
     ('InstaAstro', 'ebitda'): '-8.8686', ('InstaAstro', 'cash'): '17.7422',
     ('LDC', 'revenue'): '316.4753', ('LDC', 'cash'): '241.9993', ('LDC', 'headcount'): '309',

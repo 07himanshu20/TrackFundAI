@@ -115,8 +115,17 @@ def _year_of(low: str) -> int:
 class PeriodAxis:
     columns: List[PeriodColumn]     # the period columns, left→right
     axis_rows: List[int]            # the header row(s) the axis was read from
-    is_comparison_grid: bool        # period tokens REPEAT (budget-vs-actual, FY-vs-FY)
+    is_comparison_grid: bool        # period tokens REPEAT (budget-vs-actual, FY-vs-FY, div×period)
     is_time_series: bool            # distinct, ordered periods (a real monthly/quarterly series)
+    # ── STRUCTURE (additive; the include/exclude decision above is unchanged) ──────────────────────
+    # A "grid" is not one thing: it can be a multi-division month-run (same months repeated per
+    # division), a current│prior│variance triple, actual│budget scenarios, or FY-vs-FY comparatives.
+    # These fields expose the column STRUCTURE so a selector can pick the right slice (latest actual
+    # period, consolidated scope) instead of excluding the sheet. Empty/1.0 defaults keep every
+    # existing construction site valid and every existing caller byte-identical (they read only the
+    # four fields above).
+    distinct_ratio: float = 1.0                                   # distinct periods / total columns
+    period_groups: Dict[tuple, List[PeriodColumn]] = field(default_factory=dict)   # period order → its columns, left→right
 
 
 def detect_period_axis(rows, r_start: int = 0, r_end: int = None, scan: int = 60) -> PeriodAxis:
@@ -151,7 +160,11 @@ def detect_period_axis(rows, r_start: int = 0, r_end: int = None, scan: int = 60
     distinct = len({(pc.kind, pc.order) for pc in best_cols})
     distinct_ratio = distinct / len(best_cols)
     is_grid = distinct_ratio < 0.6
-    return PeriodAxis(best_cols, [best_row], is_grid, not is_grid)
+    groups: Dict[tuple, List[PeriodColumn]] = {}
+    for pc in best_cols:                              # period order → its columns (left→right), for the selector
+        groups.setdefault((pc.kind, pc.order), []).append(pc)
+    return PeriodAxis(best_cols, [best_row], is_grid, not is_grid,
+                      distinct_ratio=distinct_ratio, period_groups=groups)
 
 
 @dataclass

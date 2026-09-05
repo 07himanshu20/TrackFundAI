@@ -29,7 +29,7 @@ import math
 from decimal import Decimal, ROUND_HALF_UP
 
 from . import family, gate, lexicon, periods, reconcile, tiers, units
-from . import llm, locator, reader, statements, triangulate
+from . import llm, locator, reader, statements, templates, triangulate
 from .cir import Figure, Provenance, Record
 from .contract import CONCEPT_EQUIVALENCE, ROUNDING_DP, concept_measure, concept_nature
 from .gate import AUTO
@@ -884,7 +884,7 @@ def _sheet_corroborated(prof, source_sheet, *, geo_ccy, inr_mentioned, anchor_cr
             v2 = _resource_value_cr(concept, rows2, ax2, lc2, row2, geo_ccy=geo_ccy,
                                     inr_mentioned=inr_mentioned, anchor_cr=anchor_cr, rate_card=rate_card,
                                     as_of=as_of, require_bound=require_bound)
-            if v2 and abs(math.log10(abs(float(v0)) / abs(float(v2)))) <= _AGREE:
+            if v2 and reconcile.agree_within_orders(v0, v2, _AGREE):   # shared orders-band primitive
                 return True
     return False
 
@@ -948,9 +948,199 @@ def _family_resource(prof, concept, primary_sheet, *, ident, label, geo_ccy, inr
     return fig
 
 
+# ── grid-statement fallback (tight KIND-GATE) ────────────────────────────────────────────────────
+# A comparison-GRID that is a self-declared statement (or income-genuine CONFIRMED) is a LEGITIMATE
+# source the `is_time_series` exclusion wrongly dropped from every path (deterministic AND model). The
+# fix is universal-but-TIGHT: eligibility keys on a name-free ACCOUNTING property — statement KIND or the
+# income identity — never on "is it a grid". The blanket flip was measured to expose 63 junk grids vs 6
+# real-statement grids (10:1); the kind-gate excludes junk AT THE DOOR (defense-in-depth, not reliance on
+# downstream guards). Fail-CLOSED on kind RECALL: a statement-SHAPED grid that fails BOTH routes is
+# HELD-and-DISCLOSED (a kind-miss surfaces as a recoverable hold, never a silent skip — otherwise the tight
+# gate just moves the exclusion bug from is_time_series to kind=None, trading a caught over-inclusion for an
+# invisible under-inclusion). ISOLATED: grids only, still-held/gapped concepts only, after fork-b + before
+# the model — so every series emit stays byte-identical.
+_GRID_STMT_KINDS = ('income', 'balance', 'cash_flow')
+
+
+def _is_statement_grid(rows, ax, label_col, sheet) -> bool:
+    """Sheet-level tight gate (concept-agnostic): a GRID is a statement source iff it self-declares a
+    statement KIND, or the income identity is genuinely CONFIRMED on it. Name-free, universal."""
+    if _statement_kind(rows, sheet) in _GRID_STMT_KINDS:
+        return True
+    return _family_verdicts(rows, ax, label_col).get('income_statement') == family.CONFIRMED
+
+
+def _grid_eligible(rows, ax, label_col, sheet, concept) -> Tuple[bool, object]:
+    """Per-concept tight kind-gate for a GRID source. Eligible iff the grid self-declares an ALLOWED
+    statement kind for the concept, OR (income concept) the income identity is CONFIRMED on it.
+    Returns (eligible, kind). ASSUMPTION-PROOF #1: the income-CONFIRMED route reuses the series-path
+    _family_verdicts primitive on GRID shape — verified by test, not assumed to carry over."""
+    kind = _statement_kind(rows, sheet)
+    if kind in _GRID_STMT_KINDS and _concept_allowed_on_kind(concept, kind):
+        return True, kind
+    if (family.CONCEPT_FAMILY.get(concept) == family.INCOME_STATEMENT
+            and _family_verdicts(rows, ax, label_col).get('income_statement') == family.CONFIRMED):
+        return True, kind
+    return False, kind
+
+
+def _grid_resource(prof, concept, primary_sheet, *, ident, label, geo_ccy, inr_mentioned,
+                   anchor_cr, rate_card, as_of=None, require_bound=False):
+    """Deterministic GRID-statement fallback for a still-held/gapped concept. Returns:
+      • a CONFIRMED Figure — the best eligible grid statement collapsed + emitted (disclosed grid source);
+      • a HELD Figure (§4 guard) — a statement-SHAPED grid carries the concept but is NOT kind-eligible
+        (kind-recall miss → recoverable hold, never a silent skip); or the emit-attempt's own hold;
+      • None — no grid carries the concept at all (nothing to surface).
+    Multi-scope / comparative conflicts fail-close INSIDE collapse (→ held). GRIDS ONLY — series sheets
+    are never read here, so every series emit is byte-identical."""
+    candidate_held = None                        # §4: a statement-shaped-but-unconfirmed grid, if any
+    best = None                                  # (dump, -ncols, sheet, rows, ax, lc, row, kind)
+    for s in prof['sheets']:
+        if s.sheet == primary_sheet or s.sheet not in prof['grid']:
+            continue
+        rows = prof['grid'][s.sheet]
+        ax = periods.detect_period_axis(rows)
+        if ax.is_time_series or not ax.columns:      # GRIDS ONLY (series handled upstream)
+            continue
+        lc = _sheet_label_col(rows, ax.axis_rows[0])
+        if lc is None:
+            continue
+        row = _find_concept_row(rows, lc, concept, ax.axis_rows[0] + 1, len(rows), ax.columns)
+        if row is None:
+            continue
+        eligible, kind = _grid_eligible(rows, ax, lc, s.sheet, concept)
+        if not eligible:
+            # §4: a NON-dump grid that carries the concept row is statement-SHAPED → surface a
+            # recoverable hold (a dump is genuinely junk, not a mis-classified statement → no bucket).
+            if candidate_held is None and not tiers.is_dump(rows, ax.axis_rows[0] + 1, lc):
+                prov = Provenance(source_file=label, content_fingerprint=ident.content_fp, sheet=s.sheet,
+                                  cell=_a1(lc, row), row_label=str(rows[row][lc]).strip())
+                candidate_held = Figure(concept, None, None, prov, held=True,
+                    hold_reason=(f'grid statement candidate on {s.sheet!r} not kind-confirmed '
+                                 f'(kind={kind}) — held for review, not skipped')[:90])
+            continue
+        dump = tiers.is_dump(rows, ax.axis_rows[0] + 1, lc)
+        key = (dump, -len(ax.columns), s.sheet)
+        if best is None or key < best[0]:
+            best = (key, s.sheet, rows, ax, lc, row, kind)
+    if best is None:
+        return candidate_held
+    _key, sheet, rows, ax, lc, row, kind = best
+    acts = _actual_columns(rows, ax)
+    found = {c: _find_concept_row(rows, lc, c, ax.axis_rows[0] + 1, len(rows), ax.columns)
+             for c in MIS_CONCEPTS}
+    collapsed = {}
+    for c in MIS_CONCEPTS:
+        r = found.get(c)
+        if r is None:
+            continue
+        vals = {pc.col: rows[r][pc.col] for pc in acts
+                if pc.col < len(rows[r]) and _cell_type(rows[r][pc.col]) == 'num'}
+        if vals:
+            collapsed[c] = periods.collapse(c, concept_nature(c), acts, vals, as_of=as_of,
+                                            require_bound=require_bound)
+    local_ccy, local_unit = _local_currency_unit(rows, ax)
+    money_samples = [cc.value for cn, cc in collapsed.items()
+                     if concept_measure(cn) == 'money' and not cc.escalate and cc.value is not None]
+    frame = units.resolve_monetary_frame(stmt_currency=local_ccy, geo_currency=geo_ccy,
+                inr_mentioned=inr_mentioned, declared_unit=local_unit, sample_values=money_samples,
+                anchor_cr=anchor_cr, ratecard=rate_card)
+    prov = Provenance(source_file=label, content_fingerprint=ident.content_fp, sheet=sheet,
+                      cell=_a1(lc, row), row_label=str(rows[row][lc]).strip())
+    col = collapsed.get(concept)
+    scope = ''
+    if col is not None:
+        _cite_value_cells(prov, col, row, {pc.col: pc for pc in ax.columns})
+        if col.source_cols:                      # disclose the scope banner of the column actually read
+            banner = _col_banner(rows, ax, col.source_cols[-1])
+            scope = f'; scope={banner}' if banner else ''
+    prov.note = (prov.note + '; ' if prov.note else '') + f'grid statement source (kind={kind}{scope})'
+    fig = _emit_from_collapse(concept, col, prov, stmt_kind=kind, frame=frame, rows=rows, ax=ax,
+                              label_col=lc, ebitda_row=found.get('ebitda'), anchor_cr=anchor_cr,
+                              rate_card=rate_card)
+    if isinstance(fig, Figure) and fig.confirmed:
+        return fig
+    # emit attempt held (multi-scope/frame/etc.) — return the more informative of it vs the §4 candidate
+    return fig if isinstance(fig, Figure) else candidate_held
+
+
+# ── operating-revenue disposition (UNIVERSAL, structure-keyed — never a sheet/file name) ─────────────
+# "Total Income" / "Total revenue" is an AGGREGATE that, by the Ind-AS identity, folds Revenue-from-
+# operations TOGETHER WITH non-operating "Other Income"; the reportable figure is OPERATING revenue, so
+# emitting the aggregate AS revenue is a silent relabel and forbidden. Three universal dispositions,
+# keyed only on label semantics + the presence of sibling rows in the section:
+#   • RELOCATE — the aggregate has a directly-stated "Revenue from operations" row in-section → emit that
+#     row (a real cell whose value reconstructs cleanly, Σ cells × scale = value; cite-evidence honest).
+#   • HOLD     — the aggregate has NO stated RfO row but an "Other Income" row IS present in-section →
+#     positive evidence it folds in non-operating income. Operating revenue = Total Income − Other Income
+#     is a SUBTRACTION the additive provenance model cannot yet cite (summing the cited cells gives
+#     TI + OI, not TI − OI), so emitting any number here would break never-a-wrong-number. FAIL-CLOSED:
+#     emit nothing, disclose why. (A signed-expression provenance extension is the committed universal fix
+#     that later recovers the citable derived figure — for the CLASS where RfO exists but only the total is
+#     stated. Companies whose entire "Total Income" is itself non-operating, e.g. a pre-revenue firm living
+#     on treasury interest, have NO operating revenue and stay correctly held even after that lands.)
+#   • KEEP     — not an aggregate ("Gross Revenue", or a Σ of pure operating sub-lines with no Other-Income
+#     sibling) → emit the located row (no evidence of contamination; a known-operating figure).
+_TOTAL_INCOME_RE = re.compile(r'\btotal\s+(income|revenue|revenues)\b', re.I)
+_REV_FROM_OPS_RE = re.compile(r'\brevenue\s+from\s+operation', re.I)
+# 'Other income' is UNAMBIGUOUSLY non-operating in every industry — unlike "interest income", which IS
+# operating revenue for a lender/NBFC — so it is the one safe positive-evidence discriminator here.
+_OTHER_INCOME_RE = re.compile(r'\bother\s+income\b', re.I)
+_REV_AGG_HOLD = ("aggregate 'Total Income' folds in non-operating income (Other Income row present) and no "
+                 "stated Revenue-from-operations row exists — operating revenue = Total Income − Other "
+                 "Income is a subtraction not yet cell-citable → held (fail-closed; not a wrong number)")
+
+
+def _is_total_income_aggregate(rows, label_col, r):
+    """True iff row r is a 'Total Income'/'Total Revenue' AGGREGATE (folds in Other Income by the Ind-AS
+    identity) and is NOT itself an operating-revenue row. Label semantics only — universal."""
+    if not (r is not None and 0 <= r < len(rows) and label_col < len(rows[r])):
+        return False
+    lab = str(rows[r][label_col] or '')
+    return bool(_TOTAL_INCOME_RE.search(lab)) and not _REV_FROM_OPS_RE.search(lab)
+
+
+def _operating_revenue_row(rows, label_col, rev_row):
+    """If the located revenue row is a TOTAL-INCOME aggregate and a directly-stated 'Revenue from
+    operations' row exists in the same section above it, return that row (the clean, citable operating
+    figure); else None. Universal — label semantics only, no sheet/file assumptions."""
+    if not _is_total_income_aggregate(rows, label_col, rev_row):
+        return None
+    for r in range(rev_row - 1, max(-1, rev_row - 20), -1):         # scan up, within the section
+        lab = str(rows[r][label_col] or '') if label_col < len(rows[r]) else ''
+        if _REV_FROM_OPS_RE.search(lab):
+            return r
+    return None
+
+
+def _other_income_present(rows, label_col, rev_row):
+    """True iff an 'Other income' row exists in the located row's section (scan up, section-window).
+    Positive evidence that a 'Total Income' aggregate folds in NON-operating income. Universal."""
+    if rev_row is None:
+        return False
+    for r in range(rev_row - 1, max(-1, rev_row - 20), -1):
+        lab = str(rows[r][label_col] or '') if label_col < len(rows[r]) else ''
+        if _OTHER_INCOME_RE.search(lab):
+            return True
+    return False
+
+
+def _operating_revenue_disposition(rows, label_col, rev_row):
+    """UNIVERSAL disposition for a located revenue row (structure-keyed, never a file/sheet name).
+    Returns one of ('relocate', rfo_row) | ('hold', reason) | ('keep', None). See the block comment."""
+    if not _is_total_income_aggregate(rows, label_col, rev_row):
+        return ('keep', None)
+    rfo = _operating_revenue_row(rows, label_col, rev_row)
+    if rfo is not None:
+        return ('relocate', rfo)
+    if _other_income_present(rows, label_col, rev_row):
+        return ('hold', _REV_AGG_HOLD)
+    return ('keep', None)
+
+
 def extract_company(label: str, path: str, *, rate_card, entity: str = None,
                     domicile=None, anchor_cr=None, as_of_year: int = None,
-                    use_model: bool = False) -> Record:
+                    use_model: bool = False, use_finder: bool = False) -> Record:
     """Extract ONE Portfolio_KPI record from a company MIS file, DETERMINISTIC-FIRST.
     Never raises on a bad figure — it holds/gaps that figure and keeps the rest.
 
@@ -964,6 +1154,7 @@ def extract_company(label: str, path: str, *, rate_card, entity: str = None,
     prof = profile_file(label, path)
     entity = entity or label
     _model = use_model and llm._resolve_provider() is not None
+    _finder = use_finder and llm._resolve_provider() is not None   # whole-file finder emit path (Step 4)
     # The source's own stated reporting boundary (filename month; header-cell deferred). Threaded into
     # every value-selecting collapse so a forward-projection column past this date is never picked/summed.
     # When NO boundary resolves (a file whose name carries no month), the value path must NOT fall back to
@@ -1031,14 +1222,24 @@ def extract_company(label: str, path: str, *, rate_card, entity: str = None,
             stated_asof, require_bound, flow_derived = fd, False, True
     collapsed = {}
     provs = {}
+    rev_hold = None                                    # operating-revenue fail-closed disclosure (if any)
     colmap = {pc.col: pc for pc in ax.columns}
     for concept in MIS_CONCEPTS:
         row = found.get(concept)
-        provs[concept] = Provenance(
+        rfo = None
+        if concept == 'revenue':                       # operating-revenue disposition (universal, structure-keyed)
+            disp, target = _operating_revenue_disposition(rows, label_col, row)
+            if disp == 'relocate':
+                rfo, row = target, target              # emit the directly-stated Revenue-from-operations row
+            elif disp == 'hold':
+                rev_hold = target                      # aggregate folds in non-op income, no RfO → HOLD
+        provs[concept] = Provenance(                   # for a revenue HOLD, prov points at the aggregate row
             source_file=label, content_fingerprint=ident.content_fp, sheet=sheet,
             cell=_a1(label_col, row) if row is not None else '',
             row_label=str(rows[row][label_col]).strip() if row is not None else '')
         if row is None:
+            continue
+        if concept == 'revenue' and rev_hold:          # never collapse → no value is emitted (fail-closed)
             continue
         values = {pc.col: rows[row][pc.col] for pc in acts
                   if pc.col < len(rows[row]) and _cell_type(rows[row][pc.col]) == 'num'}
@@ -1047,6 +1248,9 @@ def extract_company(label: str, path: str, *, rate_card, entity: str = None,
         collapsed[concept] = periods.collapse(concept, concept_nature(concept), acts, values,
                                               as_of=stated_asof, require_bound=require_bound)
         _cite_value_cells(provs[concept], collapsed[concept], row, colmap)
+        if rfo is not None:                            # disclose the relocation to operating revenue
+            provs[concept].note = (provs[concept].note + '; ' if provs[concept].note else '') + \
+                'operating revenue (relocated from total-income aggregate to Revenue-from-operations row)'
 
     # ── Resolve the STATEMENT monetary frame ONCE (money concepts) → apply to ALL ──
     money_samples = [c.value for cn, c in collapsed.items()
@@ -1059,6 +1263,9 @@ def extract_company(label: str, path: str, *, rate_card, entity: str = None,
     fields = {'company': entity}
     stmt_kind = _statement_kind(rows, sheet)         # the source sheet's self-declared statement type
     for concept in MIS_CONCEPTS:
+        if concept == 'revenue' and rev_hold:        # operating revenue not cell-citable → held, disclosed
+            fields[concept] = Figure(concept, None, None, provs[concept], held=True, hold_reason=rev_hold)
+            continue
         fields[concept] = _emit_from_collapse(
             concept, collapsed.get(concept), provs[concept], stmt_kind=stmt_kind, frame=frame,
             rows=rows, ax=ax, label_col=label_col, ebitda_row=found.get('ebitda'),
@@ -1117,13 +1324,38 @@ def extract_company(label: str, path: str, *, rate_card, entity: str = None,
         if isinstance(newfig, Figure) and not (newfig.held or newfig.gap):
             fields[tgt] = newfig
 
-    if _model:                                       # locator fallback on holds/gaps only
+    # ── grid-statement fallback (tight kind-gate, DETERMINISTIC-first, before the model) ──────────
+    # A self-declared (or income-CONFIRMED) comparison-GRID is a legitimate source the is_time_series
+    # exclusion dropped. ADDITIVE + ISOLATED (grids only, still-held/gapped only) → every series emit
+    # is byte-identical. A confirmed grid figure UPGRADES a hold/gap; a §4 held-candidate replaces only
+    # a bare GAP (surfaces a kind-recall miss for review), never clobbering a more-informative hold.
+    grid_candidates = []
+    for concept in MIS_CONCEPTS:
+        fig = fields.get(concept)
+        if not (isinstance(fig, Figure) and (fig.gap or fig.held)):
+            continue
+        if concept == 'revenue' and rev_hold:        # a fail-closed operating-revenue hold is authoritative:
+            continue                                 # a grid 'Total Income' aggregate would re-relabel it
+        gfig = _grid_resource(prof, concept, sheet, ident=ident, label=label, geo_ccy=geo_ccy,
+                              inr_mentioned=inr_mentioned, anchor_cr=anchor_cr, rate_card=rate_card,
+                              as_of=stated_asof, require_bound=require_bound)
+        if isinstance(gfig, Figure) and gfig.confirmed:
+            fields[concept] = gfig
+        elif isinstance(gfig, Figure) and fields[concept].gap:
+            fields[concept] = gfig                # gap → grid emit-attempt/held-candidate (§4, more informative)
+        if isinstance(gfig, Figure) and gfig.held and 'not kind-confirmed' in (gfig.hold_reason or ''):
+            grid_candidates.append(concept)
+    if grid_candidates:
+        fields['_grid_held_candidates'] = grid_candidates   # §4 recall bucket (reported in re-measure)
+
+    if _model or _finder:                            # locator fallback on holds/gaps only
         held = [c for c in MIS_CONCEPTS
                 if isinstance(fields.get(c), Figure) and (fields[c].held or fields[c].gap)]
         if held:
-            _model_fill(prof, ident, held, entity=entity, domicile=domicile,
-                        anchor_cr=anchor_cr, rate_card=rate_card, fields=fields, source_label=label,
-                        as_of=stated_asof, require_bound=require_bound)
+            _fill = _model_find_across_file if _finder else _model_fill   # finder = whole-file scope resolver
+            _fill(prof, ident, held, entity=entity, domicile=domicile,
+                  anchor_cr=anchor_cr, rate_card=rate_card, fields=fields, source_label=label,
+                  as_of=stated_asof, require_bound=require_bound)
     # ── Cross-sheet STOCK reconciliation (Increment 3a, LOAD-BEARING) ─────────
     # Every emitted money STOCK is cross-checked against the same concept independently
     # sourced on OTHER sheets — ANCHOR-GATED and scale-AWARE (reconcile.stock_corroboration):
@@ -1214,6 +1446,20 @@ def _region_ccy_unit(rows, st) -> Tuple[Optional[str], Optional[str]]:
 _SCENARIO_RE = re.compile(
     r'\b(budget|bdgt|target|forecast|fcst|plan(?:ned)?|prior\s*year|last\s*year|'
     r'\bpy\b|\bly\b|variance|\bvar\b|vs\b)\b', re.I)
+
+
+def _col_banner(rows, ax, col) -> str:
+    """The nearest non-empty TEXT banner just above the axis in column `col` — its scope/scenario
+    label (e.g. 'ACTUAL', 'Consolidated', 'Budget'). Used to DISCLOSE which column a grid emit came
+    from, so a reviewer sees the scope explicitly (the discriminator a budget/variance mis-pick would
+    otherwise hide). '' when the column carries no banner."""
+    for ar in ax.axis_rows:
+        for rr in range(ar - 1, max(-1, ar - 4), -1):
+            if 0 <= rr < len(rows) and col < len(rows[rr]) and _cell_type(rows[rr][col]) == 'text':
+                t = str(rows[rr][col]).strip()
+                if t:
+                    return t[:24]
+    return ''
 
 
 def _is_scenario_col(rows, ax, pc) -> bool:
@@ -1498,6 +1744,72 @@ def _finalize_terminal_state(fields):
                            basis=f.basis, months=f.months, hold_reason=reason)
 
 
+def _model_probe_order(prof):
+    """The sheet order the model path probes — the deterministic BEST MIS statement sheet FIRST, then
+    every other sheet in profile order.
+
+    WHY: the model path re-discovers the statement sheet from scratch, one locate call per statement-shaped
+    sheet, in profile order — even though _best_sheet already RANKS the best MIS statement sheet for free.
+    On a workbook with many statement-shaped tabs (a monthly report can carry 50+) that spends a model call
+    on every tab BEFORE the real statement, then early-breaks once the gaps resolve. Visiting the best sheet
+    first collapses that to ~one call for a well-formed file. This is a REORDER, never a RESTRICT: every
+    other sheet still follows in its original order, so a gap that lives OFF the best sheet (e.g. a cash
+    stock on a balance-sheet tab) is still found by the fallback — coverage is unchanged, only wasted probes
+    are removed. Pure function of sheet content (best_sheet is a stable total order; sort is stable), so the
+    probe order is deterministic and PYTHONHASHSEED-independent."""
+    sheets = list(prof['sheets'])
+    best = _best_sheet(prof, MIS_CONCEPTS)
+    if best is None:
+        return sheets                                 # no deterministic best → probe in profile order (unchanged)
+    best_name = best[2]
+    return sorted(sheets, key=lambda s: (s.sheet != best_name,))   # stable: best first, rest keep profile order
+
+
+# ── FINDER inventory (Step 4, §3a) — FAIL-OPEN: keep on doubt, drop only PROVABLE junk ───────────────
+# The opposite bias to a fit-to-size filter (which silently dropped CSS's SG-division P&Ls). A
+# statement-shaped sheet (period axis + a statement region) is KEPT unless it is PROVABLY not a
+# statement source: it carries NONE of the core statement concepts AND has no resolved statement kind
+# AND is not income-CONFIRMED. A real financial statement always shows at least one core concept, so
+# "carries zero core concepts" is a safe drop. Every drop is RETURNED (logged/disclosed, never silent),
+# so a wrongly-dropped sheet is auditable — the same fail-closed-visibility rule as the grid §4 bucket.
+_FINDER_PRESENCE_CONCEPTS = ('revenue', 'ebitda', 'cash', 'assets', 'liabilities', 'equity',
+                             'net_income', 'gross_profit', 'cogs', 'opex')
+
+
+def _finder_inventory(prof):
+    """(inventory:[Statement], dropped:[(sheet, reason)]) for the one-pass finder. FAIL-OPEN (see above);
+    inventory is in workbook order so token-budgeted chunking is deterministic."""
+    grid = prof['grid']
+    inventory, dropped = [], []
+    for s in prof['sheets']:
+        if s.sheet not in grid:
+            continue
+        rows = grid[s.sheet]
+        ax = periods.detect_period_axis(rows)
+        if not ax.columns:
+            continue                                       # no period axis → cannot source a period figure
+        lc = _sheet_label_col(rows, ax.axis_rows[0])
+        if lc is None:
+            continue
+        if not ax.is_time_series and not _is_statement_grid(rows, ax, lc, s.sheet):
+            continue
+        regs = [r for r in statements.segment_regions(s.sheet, rows) if r.kind == statements.STATEMENT]
+        if not regs:
+            continue
+        kind = _statement_kind(rows, s.sheet)
+        inc_conf = _family_verdicts(rows, ax, lc).get('income_statement') == family.CONFIRMED
+        r0 = ax.axis_rows[0] + 1
+        has_concept = any(_find_concept_row(rows, lc, c, r0, len(rows), ax.columns) is not None
+                          for c in _FINDER_PRESENCE_CONCEPTS)
+        if kind in ('income', 'balance', 'cash_flow') or inc_conf or has_concept:
+            inventory.append(statements.Statement(
+                s.sheet, min(r.start_row for r in regs), max(r.end_row for r in regs),
+                header_row=(ax.axis_rows[0] if ax.axis_rows else None), label_col=lc))
+        else:
+            dropped.append((s.sheet, 'provable non-statement: no core concept, no statement kind, not income-confirmed'))
+    return inventory, dropped
+
+
 def _model_fill(prof, ident, held, *, entity, domicile, anchor_cr, rate_card,
                 fields, source_label, as_of=None, require_bound=False) -> list:
     """S4-REFINED fallback: the model returns a ROW per held concept; CODE resolves the
@@ -1520,27 +1832,27 @@ def _model_fill(prof, ident, held, *, entity, domicile, anchor_cr, rate_card,
     remaining = set(held)
     diagnostics = []
     recall_missing = {}                           # concept → last sheet the locator left it undetermined
-    for s in prof['sheets']:
+    for s in _model_probe_order(prof):            # best MIS statement sheet first (reorder, not restrict)
         if not remaining:
             break
         rows = grid[s.sheet]
         ax = periods.detect_period_axis(rows)
-        if not ax.is_time_series or not ax.columns:
-            continue                                  # no time axis on this sheet → CF1 can't run
-        cols = _actual_columns(rows, ax)              # scenario-filtered (Actual only)
+        if not ax.columns:
+            continue                                  # no period axis at all → CF1 can't run
         label_col = _sheet_label_col(rows, ax.axis_rows[0])
         if label_col is None:
             continue
+        # TIGHT kind-gate (Part B, foundational for the model phase): a comparison-GRID is probed
+        # ONLY if it is a statement grid (self-declared kind or income-CONFIRMED) — the same gate the
+        # deterministic grid pass uses. A series sheet is unaffected (is_time_series short-circuits),
+        # so model-OFF is byte-identical and a non-statement junk grid is never handed to the model.
+        if not ax.is_time_series and not _is_statement_grid(rows, ax, label_col, s.sheet):
+            continue
+        cols = _actual_columns(rows, ax)              # scenario-filtered (Actual only)
         num_cols = [pc.col for pc in cols]
         regs = [r for r in statements.segment_regions(s.sheet, rows) if r.kind == statements.STATEMENT]
         if not regs:
             continue
-        m = llm.current_metrics()
-        if m is not None and m.calls >= _CALL_BUDGET:
-            for c in sorted(remaining):               # disclosed, reproducible budget hold
-                fields[c] = Figure(c, None, None, fields[c].provenance, held=True,
-                                   hold_reason=_BUDGET_HOLD)
-            return diagnostics
         # ONE statement window per sheet — a single-company statement's SECTION
         # sub-headers ("Cost of Goods Sold", "Digital marketing") must not fragment
         # the identity chain (revenue−cogs=gross_profit). Scope stays THIS sheet's
@@ -1550,7 +1862,32 @@ def _model_fill(prof, ident, held, *, entity, domicile, anchor_cr, rate_card,
         stmt = statements.Statement(
             s.sheet, min(r.start_row for r in regs), max(r.end_row for r in regs),
             header_row=(ax.axis_rows[0] if ax.axis_rows else None), label_col=label_col)
-        out = locator.locate_rows(stmt, grid, sorted(remaining), content_fp=ident.content_fp)
+        # LAYOUT-TEMPLATE cache (U3, cache A): a KNOWN layout reuses the model's proven row locations
+        # and SKIPS the locate call — model cost then scales with distinct LAYOUTS, not file count. A hit
+        # serves LOCATIONS ONLY; the collapse+triangulate+emit below still re-reads THIS file's cells and
+        # re-runs all three signals, so a stale/wrong/cross-tenant location can never emit a wrong number —
+        # it fails re-verify and holds (why this cache needs no org-scoping the golden store needs). On a
+        # MISS the model locates as before, gated by the per-run call budget (a budget hold is a model
+        # concern — a cache hit never touches it).
+        _stored = templates.get_statement_rows(context, stmt)
+        _template_hit = _stored is not None
+        if _template_hit:
+            # Rebuild the FULL cached record set (targets AND the identity intermediates) — the emit loop
+            # below still only emits `remaining`, exactly like the miss path, but triangulation needs the
+            # whole chain to re-verify. Filtering to `remaining` here would starve identity → SOFT → no emit.
+            out = {'records': [locator.RowRecord(concept=d['concept'], form=d['form'], row=d['row'],
+                                                 operand_rows=list(d['operand_rows'] or []),
+                                                 row_label=d['row_label'])
+                               for d in _stored],
+                   'missing': [], 'error': None}
+        else:
+            m = llm.current_metrics()
+            if m is not None and m.calls >= _CALL_BUDGET:
+                for c in sorted(remaining):           # disclosed, reproducible budget hold
+                    fields[c] = Figure(c, None, None, fields[c].provenance, held=True,
+                                       hold_reason=_BUDGET_HOLD)
+                return diagnostics
+            out = locator.locate_rows(stmt, grid, sorted(remaining), content_fp=ident.content_fp)
         for c in out.get('missing', []):          # locator disclosed a silent drop — record it
             if c in remaining:
                 recall_missing[c] = s.sheet
@@ -1624,6 +1961,16 @@ def _model_fill(prof, ident, held, *, entity, domicile, anchor_cr, rate_card,
             fields[concept] = emit
             if not (emit.held or emit.gap):
                 remaining.discard(concept)
+        # U3: freeze the FULL located set this layout produced (exactly what locate_rows returned) — the emit
+        # TARGETS *and* every identity intermediate (cogs/gross_profit/opex …), whatever their signals. The
+        # registry is a TRANSPARENT SUBSTITUTE for the locate call: a hit replays this same set through the
+        # SAME collapse+triangulate+emit path, so a hit emits the IDENTICAL CIR a miss would (hit==miss), incl.
+        # a target that only verifies via an imperfect intermediate. Safety is the RE-VERIFY, not a put filter:
+        # every location is re-read + re-triangulated on the hit, so a stale/wrong/imperfect one can never emit
+        # a wrong number — it fails re-verify and holds (test_cached_wrong_row_still_fails_closed, D2). Only on
+        # a fresh locate (a hit is already stored; rewriting churns). Sorted by concept for a deterministic store.
+        if not _template_hit and out.get('records'):
+            templates.put_statement_rows(context, stmt, sorted(out['records'], key=lambda r: r.concept))
     # recall disclosure: any target the locator never determined (a silent drop the
     # focused retry could not recover) is HELD with a disclosed reason and a
     # diagnostic — a requested concept is never silently lost.
@@ -1639,4 +1986,232 @@ def _model_fill(prof, ident, held, *, entity, domicile, anchor_cr, rate_card,
             diagnostics.append({'concept': c, 'sheet': recall_missing[c], 'row': None,
                                 'row_label': None, 'native': None, 'basis': None,
                                 'tier': None, 'signals': {}, 'recall': 'undetermined'})
+    return diagnostics
+
+
+# ── WHOLE-FILE FINDER emit path (Step 4 emit-wiring) ─────────────────────────────────────────────
+# The per-statement _model_fill re-discovers ONE statement at a time and early-breaks once the gaps
+# resolve, so it never sees the SAME concept at other scopes. The finder path instead LOCATES every
+# occurrence across the whole file (locate_across_file_chunked, targets-only), code-reads each value
+# with the identical collapse+frame machinery (never the model's number — locator-only), re-enters the
+# per-statement identity anchors via locate_rows BOUNDED to each statement (triangulation), and hands
+# the many scope-tagged ₹Cr readings for a concept to reconcile_locations, which resolves them to ONE
+# consolidated figure or HOLDS. Every emit is fail-closed: a value ships only if it is triangulated on
+# its own statement AND survives cross-scope reconciliation; anything else holds with a disclosed reason.
+# Additive + flag-gated — model-off and the per-statement path are untouched (byte-identical).
+def _region_id(sheet, reg) -> str:
+    """A statement region's STRUCTURAL scope identity — sheet + region start row, NEVER a parsed name.
+    A stacked multi-division sheet yields one id per block (N scopes); a plain statement yields one.
+    Scope is used only to COUNT distinct scopes and group the Σ-identity test — it never ADMITS a value
+    (only the Σ-consolidated identity does), so embedding the sheet here does not make names load-bearing."""
+    return f'{sheet}#{reg.start_row}'
+
+
+def _rr_in_region(rr, reg) -> bool:
+    r = rr.row if rr.row is not None else (rr.operand_rows[0] if rr.operand_rows else None)
+    return r is not None and reg.start_row <= r <= reg.end_row
+
+
+def _period_key(col, acts):
+    """The reporting period-key (a PeriodColumn.order tuple) the collapse landed on — so the SAME
+    concept is aligned across sheets by DATE, not column position (a balance-sheet 'current' column and
+    a cash-flow 'prior' column that hold the same figure must not reconcile as one period). None when
+    unresolvable → the caller keeps it out of period bucketing but still lets it corroborate."""
+    if col is None or not getattr(col, 'source_cols', None):
+        return None
+    by_col = {pc.col: pc for pc in acts}
+    orders = [by_col[c].order for c in col.source_cols if c in by_col]
+    return max(orders) if orders else None
+
+
+def _collapsed_to_cr(concept, col, frame, rate_card):
+    """₹Cr for one collapsed reading through a resolved frame — the SAME normalisation tail as
+    _emit_from_collapsed / _resource_value_cr, so a finder reading and its final emit are one number.
+    A count (headcount) passes through unscaled. None when the value can't be resolved cleanly."""
+    if col is None or col.escalate or col.value is None:
+        return None
+    if concept_measure(concept) != 'money':
+        return col.value
+    if frame.escalate or frame.scale is None:
+        return None
+    try:
+        q = Quantity(amount=col.value, currency=frame.currency, scale=frame.scale,
+                     nature=concept_nature(concept), concept=concept)
+        return (rate_card.to_inr(q.absolute_native(), frame.currency) / _CR).quantize(_Q, rounding=ROUND_HALF_UP)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _model_find_across_file(prof, ident, held, *, entity, domicile, anchor_cr, rate_card,
+                            fields, source_label, as_of=None, require_bound=False) -> list:
+    """Whole-file finder emit path. Mutates `fields` in place; returns per-concept diagnostics
+    (disposition, sources, scope, period, emitted/held). See the block comment above."""
+    grid = prof['grid']
+    geo_ccy = units.expected_currency(domicile)
+    inr_mentioned = _workbook_mentions_inr(prof)
+    context = ident.layout_fp
+    first_seen = _first_seen(context)
+    targets = sorted(c for c in set(held) if c in MIS_CONCEPTS)
+    diagnostics = []
+    if not targets:
+        return diagnostics
+    inventory, _dropped = _finder_inventory(prof)
+    if not inventory:
+        return diagnostics
+    m = llm.current_metrics()
+    if m is not None and m.calls >= _CALL_BUDGET:
+        for c in targets:
+            fields[c] = Figure(c, None, None, fields[c].provenance, held=True, hold_reason=_BUDGET_HOLD)
+        return diagnostics
+    finder = locator.locate_across_file_chunked(inventory, grid, targets, content_fp=ident.content_fp)
+    by_sheet = {}
+    for sheet, rr in finder.get('records', []):
+        by_sheet.setdefault(sheet, []).append(rr)
+    candidates = {c: [] for c in targets}
+    for sheet in sorted(by_sheet):
+        rows = grid.get(sheet)
+        if not rows:
+            continue
+        ax = periods.detect_period_axis(rows)
+        if not ax.columns:
+            continue
+        label_col = _sheet_label_col(rows, ax.axis_rows[0])
+        if label_col is None:
+            continue
+        acts = _actual_columns(rows, ax)
+        num_cols = [pc.col for pc in acts]
+        ref_col = max(acts, key=lambda c: c.order).col if acts else None
+        regs = [r for r in statements.segment_regions(sheet, rows) if r.kind == statements.STATEMENT]
+        if not regs:
+            continue
+        # G2 (non-statement noise): reconcile admits GENUINE statement sheets ONLY — a sheet with a
+        # resolved statement kind, or income-CONFIRMED. This is STRICTER than the fail-open finder
+        # inventory (which keeps on doubt so nothing is missed): a working/aux tab the inventory kept
+        # (a bonus-provision guideline, a 'Main' check cell that reads 'Chk Total Sales' = value + the
+        # word 'sales', a ratio/margin scratch sheet) carries no statement identity and must never feed
+        # a company figure. Keyed on the accounting property (kind/identity), never a sheet name.
+        _kind = _statement_kind(rows, sheet)
+        _inc_conf = _family_verdicts(rows, ax, label_col).get('income_statement') == family.CONFIRMED
+        if _kind not in ('income', 'balance', 'cash_flow') and not _inc_conf:
+            diagnostics.append({'sheet': sheet, 'rejected': 'non-statement-sheet',
+                                'concepts': sorted({rr.concept for rr in by_sheet[sheet]})})
+            continue
+        sheet_rrs = by_sheet[sheet]
+        multi_region = len(regs) > 1                # a stacked multi-division sheet: divisions are
+        for reg in regs:                            # Σ-EVIDENCE (value-read only), never emitted, so
+            in_reg = [rr for rr in sheet_rrs if _rr_in_region(rr, reg)]   # they need no identity chain
+            if not in_reg:
+                continue
+            stmt = statements.Statement(sheet, reg.start_row, reg.end_row,
+                                        header_row=(ax.axis_rows[0] if ax.axis_rows else None),
+                                        label_col=label_col)
+            recs = {}
+            verdicts = {}
+            if not multi_region:                    # G1: per-statement anchors re-enter, bounded here
+                out = locator.locate_rows(stmt, grid, targets, content_fp=ident.content_fp)
+                if not out.get('error'):
+                    for rr in out.get('records', []):
+                        recs[rr.concept] = rr        # locate_rows is AUTHORITATIVE for the identity chain — a
+            for rr in in_reg:                        # second same-concept finder row (Total Other Income under
+                recs.setdefault(rr.concept, rr)      # revenue) must not become the triangulated row; it fills a gap only
+            collapses0 = {}
+            for c0, rr0 in recs.items():
+                col0 = _collapse_row(rows, acts, c0, rr0, as_of=as_of, require_bound=require_bound)
+                if col0 is not None:
+                    collapses0[c0] = col0
+            money_samples = [collapses0[c0].value for c0 in collapses0
+                             if concept_measure(c0) == 'money' and collapses0[c0].value is not None
+                             and not collapses0[c0].escalate]
+            local_ccy, local_unit = _region_ccy_unit(rows, stmt)
+            frame = units.resolve_monetary_frame(stmt_currency=local_ccy, geo_currency=geo_ccy,
+                        inr_mentioned=inr_mentioned, declared_unit=local_unit,
+                        sample_values=money_samples, anchor_cr=anchor_cr, ratecard=rate_card)
+            if not multi_region:
+                figs, recs_tri = _tri_inputs(recs, frame, sheet, label_col, rows, ref_col)
+                tri = triangulate.triangulate(stmt, recs_tri, figs, grid,
+                                              context=context, first_seen=first_seen)
+                verdicts = tri['verdicts']
+            for rr in in_reg:                        # EACH finder location — a concept can appear >1× per region
+                concept = rr.concept
+                if concept not in targets:
+                    continue
+                row = rr.row if rr.row is not None else (rr.operand_rows[0] if rr.operand_rows else None)
+                if row is None:
+                    continue
+                if concept == 'revenue':                        # G2: operating-revenue disposition
+                    disp, alt = _operating_revenue_disposition(rows, label_col, row)
+                    if disp == 'hold':
+                        diagnostics.append({'concept': concept, 'sheet': sheet,
+                                            'scope': _region_id(sheet, reg), 'rejected': 'operating-revenue-hold'})
+                        continue
+                    if disp == 'relocate' and alt is not None:
+                        row = alt
+                        rr = locator.RowRecord(concept, 'direct', alt, [],
+                                               str(rows[alt][label_col]).strip()
+                                               if alt < len(rows) and label_col < len(rows[alt]) else '')
+                if concept == 'revenue' and _OTHER_INCOME_RE.search(rr.row_label or ''):   # G2: not revenue
+                    diagnostics.append({'concept': concept, 'sheet': sheet, 'scope': _region_id(sheet, reg),
+                                        'rejected': 'other-income-not-revenue', 'row_label': rr.row_label})
+                    continue
+                col = _collapse_row(rows, acts, concept, rr, as_of=as_of, require_bound=require_bound)
+                value_cr = _collapsed_to_cr(concept, col, frame, rate_card)
+                if value_cr is None:
+                    continue
+                prov = Provenance(source_file=source_label, content_fingerprint=ident.content_fp,
+                                  sheet=sheet, cell=_a1(label_col, row), row_label=(rr.row_label or '')[:60])
+                if col is not None:
+                    _cite_value_cells(prov, col, row, {pc.col: pc for pc in ax.columns})
+                candidates[concept].append({
+                    'sheet': sheet, 'cell': _a1(label_col, row), 'value_cr': value_cr,
+                    'scope': _region_id(sheet, reg), 'kind': _statement_kind(rows, sheet),
+                    'period_key': _period_key(col, acts), 'emit_eligible': (not multi_region),
+                    'verdict': verdicts.get(concept),
+                    'ctx': {'col': col, 'frame': frame, 'prov': prov, 'rows': rows,
+                            'label_col': label_col, 'num_cols': num_cols,
+                            'ebitda_row': (row if concept == 'ebitda' else None)}})
+    for concept in targets:
+        cand = candidates[concept]
+        if not cand:
+            continue
+        keyed = [c for c in cand if c['period_key'] is not None]
+        pool = cand
+        if keyed:                                    # G4: reconcile only the LATEST period bucket (+ undated)
+            latest = max(c['period_key'] for c in keyed)
+            pool = [c for c in cand if c['period_key'] in (latest, None)]
+        rl = reconcile.reconcile_locations(ident.content_fp, concept,
+                [{'sheet': c['sheet'], 'cell': c['cell'], 'value_cr': c['value_cr'],
+                  'scope': c['scope'], 'kind': c['kind']} for c in pool], anchor_cr=anchor_cr)
+        base = {'concept': concept, 'disposition': rl.get('disposition'), 'n': len(pool),
+                'value_cr': (str(rl['value_cr']) if rl.get('value_cr') is not None else None),
+                'sources': rl.get('sources')}
+        _held_prov = lambda: (fields[concept].provenance if isinstance(fields.get(concept), Figure)
+                              else pool[0]['ctx']['prov'])
+        if rl.get('value_cr') is None:               # G3: no consolidated resolution → HOLD
+            fields[concept] = Figure(concept, None, None, _held_prov(), held=True,
+                hold_reason=(f'finder {rl.get("disposition")}: {rl.get("detail", "")}')[:90])
+            diagnostics.append({**base, 'emitted': False})
+            continue
+        winners = [c for c in pool if c['emit_eligible']
+                   and reconcile.scale_aware_agree(c['value_cr'], rl['value_cr'])]
+        if not winners:                              # a value resolved but no triangulated statement scope
+            fields[concept] = Figure(concept, None, None, _held_prov(), held=True,
+                hold_reason=f'finder {rl.get("disposition")} value not triangulated on a statement scope — held'[:90])
+            diagnostics.append({**base, 'emitted': False, 'reason': 'winner-not-triangulated'})
+            continue
+        ctx = winners[0]['ctx']
+        emit = _model_emit(concept, winners[0]['verdict'], ctx['prov'],
+            build=lambda ctx=ctx, concept=concept: _emit_from_collapsed(
+                concept, ctx['col'], ctx['frame'], ctx['prov'], rate_card, anchor_cr,
+                rows=ctx['rows'], label_col=ctx['label_col'], num_cols=ctx['num_cols'],
+                ebitda_row=ctx['ebitda_row']))
+        if emit is None:                             # G5: winning scope failed triangulation → HOLD
+            fields[concept] = Figure(concept, None, None, ctx['prov'], held=True,
+                hold_reason='finder: winning scope failed triangulation — held')
+            diagnostics.append({**base, 'emitted': False, 'reason': 'model-emit-gate'})
+            continue
+        fields[concept] = emit
+        diagnostics.append({**base, 'emitted': not (emit.held or emit.gap),
+                            'sheet': winners[0]['sheet'], 'cell': winners[0]['cell'],
+                            'scope': winners[0]['scope'], 'period_key': str(winners[0]['period_key'])})
+    _finalize_terminal_state(fields)
     return diagnostics

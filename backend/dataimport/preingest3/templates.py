@@ -16,10 +16,16 @@ Two invariants make this safe by construction (caching_safe_design_build_spec §
   • VERSION-KEYED / SELF-ERASING. The store is stamped with net_logic_version(); a logic change invalidates
     the whole store (treated as empty → rebuilt), so the registry can never freeze yesterday's locate logic.
 
-Stored ONLY for a location whose triangulation SIGNALS all PASS (proven-correct row) — a held/escalated
-locate is never cached. The stored shape matches the LIVE model-locate seam (locator.RowRecord: row-index,
-not an A1 address) — a plain dict {concept, form, row, operand_rows, row_label}; the caller owns the
-RowRecord↔dict conversion so this module stays decoupled from the locator/llm import chain.
+Stores the FULL located set the layout produced — exactly what the model locate call returned (every emit
+TARGET *and* every identity intermediate cogs/gross_profit/opex …), whatever each row's triangulation
+signals were. This is what makes the registry a TRANSPARENT SUBSTITUTE for the locate call: a hit replays
+the same set through the same collapse+triangulate+emit path, so a hit emits the IDENTICAL result a miss
+would — including a target that only verifies via an imperfect intermediate. Safety is the re-verify above,
+NOT a put-time filter (filtering to only all-PASS rows would drop an imperfect-but-consistent intermediate
+and silently hold a target on a hit that a miss emitted — a hit≠miss coverage gap). The stored shape
+matches the LIVE model-locate seam (locator.RowRecord: row-index, not an A1 address) — a plain dict
+{concept, form, row, operand_rows, row_label}; the caller owns the RowRecord↔dict conversion so this
+module stays decoupled from the locator/llm import chain.
 """
 from __future__ import annotations
 

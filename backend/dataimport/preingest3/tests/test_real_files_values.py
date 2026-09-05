@@ -86,7 +86,12 @@ def test_fund_anchor_values_per_company():
 
 def test_hubler_mis_values_trace_to_cells():
     f = _extract(_anchors(), 'hubbler', 'AVF_2026_03_11_P_Hubler_MIS_Feb26.xlsx')
-    _close(f['revenue'], '4.1837', basis='TTM', n_cells=12)     # 12-month sum, row 20 (label@D20)
+    # operating revenue: located row is 'Total revenue' (aggregate) but a directly-stated 'Total revenue
+    # from operations' row exists → RELOCATE to it (rule #1, clean cite). TTM 40,476,676 → ₹4.0477 Cr,
+    # verified: = the stated operating-revenue row, and = Total revenue − Total other income.
+    _close(f['revenue'], '4.0477', basis='TTM', n_cells=12)     # 12-month sum of the operating-revenue row
+    assert 'operating revenue' in (f['revenue'].provenance.note or '')       # relocation disclosed
+    assert f['revenue'].provenance.row_label == 'Total revenue from operations'
     _close(f['ebitda'], '-0.4304', basis='TTM', n_cells=12)     # EBITDA line, not EBIT — row 72
     # CASH RECOVERED (R4, advisor 2026-08-14): the deterministic binder lands `cash` on D22
     # "Cash Collected" — a period FLOW, not the cash STOCK — which the stock-vs-flow guard (U5)
@@ -193,13 +198,36 @@ def test_instaastro_mis_values_trace_to_cells():
 
 
 def test_agnikul_mis_values_trace_to_cells():
-    # '(₹ Millions)' declared unit (plural — must be detected). Revenue is the same-year
-    # YTD column (E5, partial months + YTD), cash a point-in-time balance, headcount a
-    # point-in-time count. Locks FIX 1 (plural unit) + the value-cell provenance model.
+    # '(₹ Millions)' declared unit (plural — must be detected). Cash a point-in-time balance,
+    # headcount a point-in-time count. REVENUE is HELD, fail-closed: Agnikul's 'Total Income' is
+    # Interest-on-FDs + Other Income — BOTH non-operating (a pre-revenue firm living on treasury
+    # interest), with NO stated 'Revenue from operations' row. Emitting Total Income AS revenue is a
+    # silent relabel (forbidden); operating revenue = Total Income − Other Income is a subtraction the
+    # additive provenance model cannot cite → held with a disclosure. (Nothing to recover even once
+    # signed-provenance lands — a pre-revenue company has no operating revenue.)
     f = _extract(_anchors(), 'agnikul', 'AVF_2026_03_12_P_Agnikul_MIS_Feb26.xlsx')
-    _close(f['revenue'], '5.1460', basis='YTD', cell='E5')       # 'Total Income' YTD FY26
+    rev = f['revenue']
+    assert rev.held and rev.value_cr is None, \
+        f'Agnikul revenue must HOLD (aggregate = non-operating income, no operating-revenue row), got {rev.value_cr}'
+    assert 'operating revenue' in rev.hold_reason and 'Other Income' in rev.hold_reason, \
+        f'held revenue must DISCLOSE why (not a silent relabel), got: {rev.hold_reason!r}'
+    assert rev.provenance.row_label == 'Total Income', \
+        f'held revenue must still cite the aggregate it declined to emit, got {rev.provenance.row_label!r}'
     _close(f['cash'], '117.6646', basis='point_in_time', cell='B28')     # 1176.65 M → ₹117.66 Cr
     _close(f['headcount'], 299, basis='point_in_time', cell='B29')       # Feb'26 period-end
+
+
+def test_agnikul_revenue_hold_is_load_bearing(monkeypatch):
+    # REDDENING control for the Agnikul revenue HOLD: the hold is caused by the operating-revenue
+    # disposition, nothing else. Neutralise it (force 'keep') and Agnikul REVERTS to emitting Total
+    # Income (₹5.146 Cr) AS revenue — the exact silent relabel the guard prevents. Proves the fix is
+    # load-bearing, not a bare test edit (mirrors test_binding_truth::test_aliste_flip_depends_on_...).
+    import backend.dataimport.preingest3.extract as ex
+    monkeypatch.setattr(ex, '_operating_revenue_disposition', lambda *a, **k: ('keep', None))
+    f = _extract(_anchors(), 'agnikul', 'AVF_2026_03_12_P_Agnikul_MIS_Feb26.xlsx')
+    rev = f['revenue']
+    assert rev.value_cr is not None and abs(rev.value_cr - Decimal('5.1460')) < Decimal('0.02'), \
+        'without the disposition, Agnikul must revert to the silent Total-Income-as-revenue relabel (RED)'
 
 
 def test_agnikul_balance_sheet_family_confirms_single_entity():
@@ -232,7 +260,7 @@ def test_cpc_ebitda_resourced_from_income_statement_not_cash_flow():
     # The value is the same-year YTD column (F25 = 156.5 Mn = ₹15.65 Cr, basis=YTD), consistent
     # with the system's YTD-preference (locked for Agnikul revenue). The single-MONTH figure
     # (C25 = 43.91 Mn = ₹4.39 Cr) is NOT used — a YTD-vs-monthly KPI convention that spans all
-    # companies, not a CPC quirk. The critical improvement over the pre-Guard1 emit: right
+    # companies (a cross-company convention, not a CPC quirk). The critical improvement over the pre-Guard1 emit: right
     # STATEMENT (PL Summary, not CFS EL) AND right BASIS (YTD, not the landmine months=1 that
     # annualisation would ×12).
     # RE-HOMED COVERAGE: the comparative-column-SUM protection this test formerly held (May-25 |

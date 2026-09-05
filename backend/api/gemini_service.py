@@ -16,6 +16,7 @@ import os
 import random
 import re
 import time
+import typing
 
 from django.conf import settings
 from google import genai
@@ -41,15 +42,65 @@ logger = logging.getLogger(__name__)
 # jittered backoff, and idempotent — the process-kill in the pipeline is demoted
 # to a pure backstop that should now almost never fire.
 
-# HttpOptions moved modules across SDK versions; in 0.5.0 it lives in
-# _api_client and its `timeout` is seconds (requests). Newer SDKs expose it on
-# `types` with a millisecond scalar (httpx). Support both.
+# HttpOptions changed BOTH its module AND its `timeout` wire-format across SDK versions:
+#   • requests-based SDKs (e.g. 0.5.x): `timeout` is SECONDS — a float, or a (connect, read) tuple.
+#   • httpx-based SDKs (newer):         `timeout` is a MILLISECOND integer scalar.
+# HttpOptions is importable from `_api_client` in BOTH generations, so the import LOCATION does NOT
+# tell them apart — that was the ROOT-CAUSE bug: a newer SDK still exposed `_api_client.HttpOptions`,
+# so the code assumed the seconds-tuple form and pydantic rejected the tuple ("timeout Input should be
+# a valid integer ... input_value=(10.0, 240.0)") → every Gemini call died before it started. The ONLY
+# ground truth is the field's OWN declared TYPE — ask the model what it accepts. This is correct on
+# every SDK generation, past or future, with no version guessing.
 try:
     from google.genai._api_client import HttpOptions as _HttpOptions
-    _TIMEOUT_IS_MS = False   # 0.5.x → requests → seconds, (connect, read) tuple
-except Exception:  # pragma: no cover — newer SDK layout
+except Exception:  # pragma: no cover — SDK layout without _api_client
     from google.genai.types import HttpOptions as _HttpOptions
-    _TIMEOUT_IS_MS = True
+
+
+def _timeout_annotation():
+    """The declared type of HttpOptions.timeout on the INSTALLED SDK (pydantic v2 `model_fields`,
+    falling back to v1 `__fields__`), or None when the field cannot be introspected."""
+    mf = getattr(_HttpOptions, 'model_fields', None)
+    if isinstance(mf, dict) and 'timeout' in mf:
+        return getattr(mf['timeout'], 'annotation', None)
+    v1 = getattr(_HttpOptions, '__fields__', None)
+    if isinstance(v1, dict) and 'timeout' in v1:
+        return getattr(v1['timeout'], 'outer_type_', None)
+    return None
+
+
+def _annotation_allows(ann, target) -> bool:
+    """Does typing annotation `ann` admit a value of `target` (int / float / tuple)? Recurses through
+    Optional/Union; a Tuple[...] origin counts only for target `tuple`."""
+    origin = typing.get_origin(ann)
+    if origin is typing.Union:
+        return any(_annotation_allows(a, target) for a in typing.get_args(ann))
+    if origin is tuple:
+        return target is tuple
+    return ann is target
+
+
+def _timeout_shapes(ann, connect_s, read_s):
+    """Ordered candidate `timeout` values for the given field annotation: the shape the SDK DECLARES
+    first, the others after as a backstop for an unforeseen variant. A field that takes a tuple or a
+    float is SECONDS (requests); an int-only field is MILLISECONDS (httpx). Pure → unit-testable per
+    SDK generation, and it never feeds a milliseconds integer to a seconds field (the 240000-seconds
+    trap): the ms shape is chosen first only when the field rejects both tuple and float."""
+    tup = (float(connect_s), float(read_s))
+    sec = float(read_s)
+    ms = int(read_s * 1000)
+    if _annotation_allows(ann, tuple):
+        return [tup, sec, ms]
+    if _annotation_allows(ann, float):
+        return [sec, tup, ms]
+    return [ms, tup, sec]
+
+
+# Resolved ONCE at import (the installed SDK cannot change mid-process).
+_TIMEOUT_ANNOTATION = _timeout_annotation()
+_TIMEOUT_HAS_FIELD = _TIMEOUT_ANNOTATION is not None or (
+    isinstance(getattr(_HttpOptions, 'model_fields', None), dict)
+    and 'timeout' in _HttpOptions.model_fields)
 
 _CONNECT_TIMEOUT_S = float(os.environ.get('GEMINI_CONNECT_TIMEOUT_S', '10'))
 _READ_TIMEOUT_S = float(os.environ.get('GEMINI_READ_TIMEOUT_S', '60'))
@@ -69,9 +120,19 @@ _client_cache = {}
 
 
 def _build_http_options(connect_s, read_s):
-    if _TIMEOUT_IS_MS:
-        return _HttpOptions(timeout=int(read_s * 1000))
-    return _HttpOptions(timeout=(float(connect_s), float(read_s)))
+    """Build HttpOptions carrying a read-timeout in the shape THIS SDK version DECLARES — decided from
+    the field's own type, never from the import location. Tries the declared shape first, then the
+    others as a backstop; if every shape is rejected (an unforeseen SDK), returns HttpOptions with no
+    explicit timeout so a client can STILL be built (an untimed call is bounded by the pipeline's
+    process-kill backstop — far better than crashing the import as the original bug did)."""
+    if not _TIMEOUT_HAS_FIELD:
+        return _HttpOptions()
+    for shape in _timeout_shapes(_TIMEOUT_ANNOTATION, connect_s, read_s):
+        try:
+            return _HttpOptions(timeout=shape)
+        except Exception:  # noqa: BLE001 — SDK/pydantic rejected this shape; try the next
+            continue
+    return _HttpOptions()
 
 
 def _is_retryable(exc) -> bool:

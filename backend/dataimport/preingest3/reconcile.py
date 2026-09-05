@@ -180,6 +180,17 @@ def scale_aware_agree(v1, v2, tol: Decimal = _STOCK_SCALEAWARE_TOL) -> bool:
     return abs(a - b) / ref <= tol
 
 
+def agree_within_orders(v1, v2, orders: Decimal = Decimal('0.1')) -> bool:
+    """True iff v1 and v2 are within `orders` decades of each other (|log10(|v1|/|v2|)| ≤ orders) — a
+    LOOSE 'same figure allowing rounding / minor definitional differences' band (default 0.1 orders
+    ≈ 26%), DISTINCT from the tight scale_aware_agree used for value corroboration. This is the ONE
+    home for the orders-band agreement test (previously hand-rolled inline in extract._sheet_corroborated,
+    a drift risk). Caller guarantees both values are truthy (non-zero, non-None); magnitudes are compared
+    on |·| so a sign difference is NOT treated as a divergence here (the corroboration use-case is
+    magnitude agreement across sheets, not sign)."""
+    return abs(math.log10(abs(float(v1)) / abs(float(v2)))) <= float(orders)
+
+
 def _orders_from(c: Decimal, anchor: Decimal) -> float:
     if c <= 0 or anchor <= 0:
         return 99.0
@@ -350,6 +361,83 @@ def sigma_consolidated_pick(values: dict, *, elim_band: Decimal = _SIGMA_ELIM_BA
     return {'pick': None, 'satisfiers': sat,
             'reason': ('no roll-up present (0 satisfiers)' if not sat
                        else f'{len(sat)} satisfiers — ambiguous, hold')}
+
+
+# ── UNIFIED cross-sheet N-location reconciler (model-phase finder prerequisite, step B) ──────────
+# The one primitive the whole-file finder needs: a concept X located at N places across sheets →
+# ONE deterministic disposition. Today three FRAGMENTED, concept-specific pieces do slices of this
+# (stock_corroboration = same-concept agree/diverge for money STOCKS; sigma_consolidated_pick =
+# multi-scope roll-up selection; extract._sheet_corroborated = income agree). This generalises them.
+# BUILT STANDALONE + GATED FIRST (step B); routing the three existing call-sites through it is the
+# COMMITTED step A (its own byte-identical gate) — so the two paths coexist only transiently, never
+# as permanent duplication. Pure: the caller normalises every value_cr to ₹Cr (one frame) and tags
+# each location's SCOPE; this fn makes no I/O and reads no sheet names for admission.
+def _loc_tag(l: dict) -> dict:
+    return {'sheet': l.get('sheet'), 'cell': l.get('cell'), 'scope': l.get('scope'),
+            'value_cr': str(l['value_cr'])}
+
+
+def _all_pairwise_agree(vals: List[Decimal], tol: Decimal) -> bool:
+    # STRICT (fail-closed): 'agree' requires EVERY pair to agree scale-aware — any one disagreement
+    # drops out of the agree-emit path into hold/multiscope. Never emit over a disagreement.
+    for i in range(len(vals)):
+        for j in range(i + 1, len(vals)):
+            if not scale_aware_agree(vals[i], vals[j], tol):
+                return False
+    return True
+
+
+def reconcile_locations(cid: str, concept: str, locations: List[dict], *, anchor_cr=None,
+                        tol: Decimal = _STOCK_SCALEAWARE_TOL) -> dict:
+    """Reconcile the SAME concept read at N locations across sheets into ONE disposition. Each
+    location is a dict {'sheet','cell','value_cr','scope','kind'} with value_cr ALREADY normalised
+    to ₹Cr by the caller (pure fn). Dispositions (result['disposition']):
+
+      • 'none'       — no location carries a value (INDETERMINATE; value_cr=None).
+      • 'single'     — exactly one valued location → passes through, cross_checked=False
+                       (single-source DISCLOSURE — un-cross-checked; advisor catch A).
+      • 'agree'      — all valued locations agree scale-aware → emit the agreed value,
+                       cross_checked=True (SOFT PASS, corroborated on N independent sources).
+      • 'conflict'   — valued locations that SHOULD agree (same/one scope) disagree → HOLD
+                       (value_cr=None; never ship an unreconciled number — HARD FAIL).
+      • 'multiscope' — valued locations differ AND span ≥2 distinct scopes → the UNIQUE Σ-identity
+                       satisfier (R(X) ≈ Σ others = the consolidated) is emitted; 0 or ≥2 satisfiers
+                       → HOLD (value_cr=None). Naming never admits a scope — only the Σ-identity does.
+
+    Determinism: locations are processed in (sheet, cell) sort order; the emitted value is the
+    sort-first source's ₹Cr (all agree scale-aware, so any is representative)."""
+    locs = sorted((l for l in locations if l.get('value_cr') is not None),
+                  key=lambda l: (str(l.get('sheet') or ''), str(l.get('cell') or '')))
+    if not locs:
+        return _result(cid, DISCLOSURE, INDETERMINATE, disposition='none', value_cr=None,
+                       cross_checked=False, sources=[], detail=f'{concept}: no located value')
+    if len(locs) == 1:
+        v = Decimal(str(locs[0]['value_cr']))
+        return _result(cid, DISCLOSURE, 'single_source', disposition='single', value_cr=v,
+                       cross_checked=False, sources=[_loc_tag(locs[0])],
+                       detail=f'{concept}: single-source — un-cross-checked (rests on existence+label+scale)')
+    vals = [Decimal(str(l['value_cr'])) for l in locs]
+    if _all_pairwise_agree(vals, tol):
+        return _result(cid, SOFT, PASS, disposition='agree', value_cr=vals[0], cross_checked=True,
+                       n_sources=len(locs), sources=[_loc_tag(l) for l in locs],
+                       detail=f'{concept}: corroborated scale-aware on {len(locs)} independent sources')
+    distinct_scopes = {l.get('scope') for l in locs if l.get('scope') is not None}
+    if len(distinct_scopes) < 2:                      # same (or unlabelled) scope but values differ
+        return _result(cid, HARD, FAIL, disposition='conflict', value_cr=None, cross_checked=True,
+                       sources=[_loc_tag(l) for l in locs], values=[str(v) for v in vals],
+                       detail=f'{concept}: {len(locs)} same-scope sources disagree — unreconciled, held')
+    # ≥2 distinct scopes → the Σ-consolidated identity is the ONLY admissible declaration (labels never admit)
+    by_label = {f"{l.get('scope')}:{l.get('sheet') or ''}:{l.get('cell') or ''}": Decimal(str(l['value_cr']))
+                for l in locs}
+    pk = sigma_consolidated_pick(by_label)
+    if pk['pick'] is not None:
+        return _result(cid, SOFT, PASS, disposition='multiscope', value_cr=by_label[pk['pick']],
+                       cross_checked=True, n_sources=len(locs), pick=pk['pick'],
+                       sources=[_loc_tag(l) for l in locs],
+                       detail=f'{concept}: multi-scope resolved to the Σ-identity consolidated')
+    return _result(cid, HARD, FAIL, disposition='multiscope', value_cr=None, cross_checked=True,
+                   sources=[_loc_tag(l) for l in locs], reason=pk['reason'],
+                   detail=f'{concept}: multi-scope, no unique Σ-consolidated satisfier — held ({pk["reason"]})')
 
 
 def summarize(results: List[dict]) -> dict:
