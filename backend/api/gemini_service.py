@@ -316,6 +316,16 @@ def generate_content(
     model_name = model or get_model_name()
 
     config_kwargs = dict(extra_config)
+    # Thinking control (latency/cost lever): callers pass plain kwargs; build the SDK ThinkingConfig here
+    # so provider-agnostic callers never import genai types. thinking_level (3.x enum: minimal/low/...)
+    # takes precedence; thinking_budget (2.x numeric) otherwise. Never both -> the model 400s.
+    _tl = config_kwargs.pop('thinking_level', None)
+    _tb = config_kwargs.pop('thinking_budget', None)
+    if _tl is not None:
+        lvl = _tl if not isinstance(_tl, str) else genai_types.ThinkingLevel[_tl.upper()]
+        config_kwargs['thinking_config'] = genai_types.ThinkingConfig(thinking_level=lvl)
+    elif _tb is not None:
+        config_kwargs['thinking_config'] = genai_types.ThinkingConfig(thinking_budget=_tb)
     if system_instruction is not None:
         config_kwargs['system_instruction'] = system_instruction
     if response_mime_type is not None:
@@ -370,6 +380,16 @@ def create_chat(
     model_name = model or get_model_name()
 
     config_kwargs = dict(extra_config)
+    # Thinking control (latency/cost lever): callers pass plain kwargs; build the SDK ThinkingConfig here
+    # so provider-agnostic callers never import genai types. thinking_level (3.x enum: minimal/low/...)
+    # takes precedence; thinking_budget (2.x numeric) otherwise. Never both -> the model 400s.
+    _tl = config_kwargs.pop('thinking_level', None)
+    _tb = config_kwargs.pop('thinking_budget', None)
+    if _tl is not None:
+        lvl = _tl if not isinstance(_tl, str) else genai_types.ThinkingLevel[_tl.upper()]
+        config_kwargs['thinking_config'] = genai_types.ThinkingConfig(thinking_level=lvl)
+    elif _tb is not None:
+        config_kwargs['thinking_config'] = genai_types.ThinkingConfig(thinking_budget=_tb)
     if system_instruction is not None:
         config_kwargs['system_instruction'] = system_instruction
     if response_mime_type is not None:
