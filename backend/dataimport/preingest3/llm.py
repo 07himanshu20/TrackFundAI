@@ -28,6 +28,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from . import rate_governor
 from .contract import contract_signature
 
 logger = logging.getLogger(__name__)
@@ -364,6 +365,11 @@ def call_json(kind: str, inputs_signature: str, prompt: str, *,
         return CallResult(ERROR, reason='no model provider injected — holding residue')
 
     for attempt in range(1, _RL_ATTEMPTS + 1):
+        # Proactive rate GOVERNOR (default off → instant True → byte-identical). Bounds the aggregate
+        # issue rate under the Vertex quota across all threads; fail-closed to a HOLD if the wait budget
+        # is exhausted — never a flood, never a wrong number. Reactive 429 backoff below is the backstop.
+        if not rate_governor.acquire(rate_governor.est_tokens(prompt)):
+            return CallResult(ERROR, reason='rate-governor: issue-rate budget exhausted — held; re-run')
         m = _m()
         if m is not None:
             m.calls += 1
