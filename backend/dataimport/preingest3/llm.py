@@ -415,8 +415,11 @@ def call_json(kind: str, inputs_signature: str, prompt: str, *,
             if cls == 'rate_limit' and attempt < _RL_ATTEMPTS:
                 if m is not None:
                     m.retries += 1
-                logger.warning('[preingest3.llm] %s: 429 rate-limit (attempt %d/%d) — backing off',
-                               kind, attempt, _RL_ATTEMPTS)
+                # Log the FULL 429 body — it names the exact quota METRIC exceeded (e.g.
+                # generate_content_requests_per_minute_per_project_per_region). That is the ground truth
+                # for sizing the rate governor; a rebranded console label is not.
+                logger.warning('[preingest3.llm] %s: 429 rate-limit (attempt %d/%d) — backing off; '
+                               'quota detail: %s', kind, attempt, _RL_ATTEMPTS, str(e)[:400])
                 _rl_sleep(attempt, _retry_after_s(e))
                 continue
             if m is not None:
