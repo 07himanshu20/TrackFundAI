@@ -32,6 +32,17 @@ def test_rpm_bucket_spaces_the_next_issue():
     assert 0.7 <= waited <= 2.0, waited           # spaced ~1s, NOT instant (contrast the control)
 
 
+# ── BURST SHAPING: a small burst forces near-constant spacing even at a high per-minute rate ──
+def test_small_burst_forces_spacing():
+    g = rg.RateGovernor(rpm=60, burst=2, max_wait_s=10)   # 1 token/sec sustained, burst of only 2
+    t0 = time.monotonic()
+    assert g.acquire(0) and g.acquire(0)                  # burst of 2 → instant
+    assert time.monotonic() - t0 < 0.2
+    assert g.acquire(0)                                   # 3rd must wait for a refill (~1s)
+    assert 0.7 <= time.monotonic() - t0 <= 2.5           # shaped: not an unbounded burst
+    assert g.stats()['rpm'] == 60 and g.stats()['rpm_burst'] == 2
+
+
 # ── FAIL-CLOSED: budget exhausted → acquire returns False (HOLD), consumes nothing ───────────
 def test_failclosed_hold_when_wait_budget_exhausted():
     g = rg.RateGovernor(rpm=60, max_wait_s=0.3)   # needs ~1s but only waits 0.3s

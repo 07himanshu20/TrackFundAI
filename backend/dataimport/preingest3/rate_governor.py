@@ -31,9 +31,12 @@ def est_tokens(prompt: str) -> int:
 
 
 class _Bucket:
-    def __init__(self, per_min: float):
-        self.capacity = float(per_min)
-        self.tokens = float(per_min)
+    def __init__(self, per_min: float, capacity: float = None):
+        # capacity = BURST allowance (max tokens); rate_per_s = sustained refill. Decoupling them is what
+        # lets the governor shape BURSTS (the primary 429 cause) — a small capacity forces near-constant
+        # spacing even while the per-minute rate is high. Default capacity=per_min = a full-minute burst.
+        self.capacity = float(capacity if capacity is not None else per_min)
+        self.tokens = self.capacity
         self.rate_per_s = per_min / 60.0
         self.last = time.monotonic()
 
@@ -54,10 +57,11 @@ class _Bucket:
 
 
 class RateGovernor:
-    def __init__(self, rpm: int = None, tpm: int = None, max_wait_s: float = 120.0):
+    def __init__(self, rpm: int = None, tpm: int = None, max_wait_s: float = 120.0,
+                 burst: int = None, tpm_burst: int = None):
         self._cv = threading.Condition()
-        self._req = _Bucket(rpm) if rpm else None
-        self._tok = _Bucket(tpm) if tpm else None
+        self._req = _Bucket(rpm, burst) if rpm else None
+        self._tok = _Bucket(tpm, tpm_burst) if tpm else None
         self.max_wait_s = max_wait_s
         self.acquired = 0
         self.holds = 0
@@ -94,16 +98,21 @@ class RateGovernor:
                 self._cv.wait(timeout=min(max(r_wait, t_wait) + 0.01, remaining))
 
     def stats(self) -> dict:
-        return {'enabled': self.enabled, 'rpm': self._req.capacity if self._req else None,
-                'tpm': self._tok.capacity if self._tok else None, 'acquired': self.acquired,
+        return {'enabled': self.enabled,
+                'rpm': self._req.rate_per_s * 60 if self._req else None,
+                'rpm_burst': self._req.capacity if self._req else None,
+                'tpm': self._tok.rate_per_s * 60 if self._tok else None,
+                'tpm_burst': self._tok.capacity if self._tok else None, 'acquired': self.acquired,
                 'holds': self.holds, 'wait_s_total': round(self.wait_s_total, 2)}
 
 
 def _from_env() -> RateGovernor:
-    rpm = os.environ.get('PREINGEST3_RPM')
-    tpm = os.environ.get('PREINGEST3_TPM')
+    def _i(k):
+        v = os.environ.get(k)
+        return int(v) if v else None
     mw = os.environ.get('PREINGEST3_GOVERNOR_MAX_WAIT_S')
-    return RateGovernor(rpm=int(rpm) if rpm else None, tpm=int(tpm) if tpm else None,
+    return RateGovernor(rpm=_i('PREINGEST3_RPM'), tpm=_i('PREINGEST3_TPM'),
+                        burst=_i('PREINGEST3_RPM_BURST'), tpm_burst=_i('PREINGEST3_TPM_BURST'),
                         max_wait_s=float(mw) if mw else 120.0)
 
 
@@ -114,10 +123,12 @@ def acquire(tokens: int) -> bool:
     return _GOVERNOR.acquire(tokens)
 
 
-def configure(rpm: int = None, tpm: int = None, max_wait_s: float = 120.0) -> None:
-    """Set/replace the global governor (call once at startup with the confirmed quota, or in tests)."""
+def configure(rpm: int = None, tpm: int = None, max_wait_s: float = 120.0,
+              burst: int = None, tpm_burst: int = None) -> None:
+    """Set/replace the global governor (call once at startup with the confirmed quota, or in tests).
+    Set `burst`/`tpm_burst` BELOW rpm/tpm to shape bursts to near-constant spacing (the 429-safe mode)."""
     global _GOVERNOR
-    _GOVERNOR = RateGovernor(rpm=rpm, tpm=tpm, max_wait_s=max_wait_s)
+    _GOVERNOR = RateGovernor(rpm=rpm, tpm=tpm, max_wait_s=max_wait_s, burst=burst, tpm_burst=tpm_burst)
 
 
 def current() -> RateGovernor:
