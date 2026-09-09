@@ -14,6 +14,7 @@ reuses stored coordinates and spends zero tokens.
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Optional
 
 from . import llm
@@ -206,8 +207,16 @@ def _parse_located_rows(located: Any, valid_rows: set) -> tuple:
     return records, returned, absent
 
 
+def _adaptive_enabled() -> bool:
+    """Tier-2 adaptive-thinking escalation is a DORMANT safety net: default OFF (byte-identical to
+    the fast Tier-1-only path), enabled with PREINGEST3_ADAPTIVE_THINKING=on. Its coverage-recovery
+    benefit is unmeasurable on the known corpus (Tier-1 leaves ~no undetermined concepts there); it
+    is validated + threshold-tuned on the broader/messy corpus. WIRED, not yet PROVEN-beneficial."""
+    return os.environ.get('PREINGEST3_ADAPTIVE_THINKING', 'off') == 'on'
+
+
 def _locate_rows_call(st: Statement, grid: Dict[str, List[List[Any]]], concepts: List[str],
-                      *, content_fp: str, mode: str) -> dict:
+                      *, content_fp: str, mode: str, thinking: dict = None) -> dict:
     """One model round for an EXACT concept list (NO anchor expansion — the focused
     retry must ask for only the dropped concepts, not re-expand the anchor set).
     Returns {'records', 'returned', 'absent', 'error'?}."""
@@ -220,7 +229,7 @@ def _locate_rows_call(st: Statement, grid: Dict[str, List[List[Any]]], concepts:
               .replace('{concepts}', _concepts_block(concepts))
               .replace('{labels}', '\n'.join(f'{n} = {t}' for n, t in labels)))
     sig = f'{content_fp}|{st.sheet}|{st.start_row}-{st.end_row}|{mode}|{",".join(concepts)}'
-    res = llm.call_json('locate_rows', sig, prompt, read_timeout_s=90.0, stream=False)
+    res = llm.call_json('locate_rows', sig, prompt, read_timeout_s=90.0, stream=False, thinking=thinking)
     if res.is_error:
         return {'error': res.reason, 'records': [], 'returned': set(), 'absent': set()}
     located = (res.data or {}).get('located') if isinstance(res.data, dict) else None
@@ -255,6 +264,24 @@ def locate_rows(st: Statement, grid: Dict[str, List[List[Any]]], target_concepts
             returned |= retry['returned']
             absent |= retry['absent']
     still_missing = [c for c in concepts if c not in returned]
+    if still_missing and _adaptive_enabled():
+        # Tier-2 escalation: re-locate ONLY the UNDETERMINED misses (not model-confirmed absent —
+        # re-asking about a genuinely-absent concept just burns a call) with thinking ON. Bounded to
+        # the hard concepts; flows through the same rate governor as every other issue. Pure
+        # coverage-recovery — the deterministic verify still guards, so it can only recover a hold.
+        escalate = [c for c in still_missing if c not in absent]
+        if escalate:
+            esc = _locate_rows_call(st, grid, escalate, content_fp=content_fp, mode='rows-escalate',
+                                    thinking=llm.escalation_thinking_kwargs(llm.PREINGEST_MODEL))
+            if not esc.get('error'):
+                have = {r.concept for r in records}
+                for r in esc['records']:
+                    if r.concept not in have:
+                        records.append(r)
+                        have.add(r.concept)
+                returned |= esc['returned']
+                absent |= esc['absent']
+                still_missing = [c for c in concepts if c not in returned]
     return {'records': records, 'absent': sorted(absent), 'missing': still_missing}
 
 

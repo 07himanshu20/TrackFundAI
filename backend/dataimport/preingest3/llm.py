@@ -85,6 +85,21 @@ def _thinking_kwargs(model: str) -> dict:
         return {'thinking_budget': 0}
     return {}
 
+
+def escalation_thinking_kwargs(model: str) -> dict:
+    """Tier-2 (adaptive) thinking: turn reasoning ON for a re-locate of a concept Tier-1 left
+    UNDETERMINED (not confirmed-absent). Bounded to the hard concept, so the fast default stands on
+    the easy hits. gemini-2.x → a positive thinking_budget; gemini-3.x → thinking_level='low'
+    (re-tune minimal-vs-low on 3.6 when reachable). Values env-overridable for tuning on the messy
+    corpus. Correctness unchanged: more reasoning only improves POINTING; the deterministic verify
+    still guards every row, so this can only recover a hold, never emit a wrong number."""
+    m = (model or '').lower()
+    if m.startswith('gemini-3'):
+        return {'thinking_level': os.environ.get('PREINGEST3_ESCALATE_LEVEL', 'low')}
+    if m.startswith('gemini-2.'):
+        return {'thinking_budget': int(os.environ.get('PREINGEST3_ESCALATE_BUDGET', '2048'))}
+    return {}
+
 # ── the three, type-distinct outcomes of every model call ────────────────
 # The single most important rule after the timeout work: a failed call is NOT a
 # value. It can NEVER collapse into 'absent'/empty and become data.
@@ -336,7 +351,8 @@ def _extract_json(text: str):
 
 def call_json(kind: str, inputs_signature: str, prompt: str, *,
               read_timeout_s: float = 90.0, stream: bool = True,
-              temperature: float = 0.0, use_cache: bool = True) -> CallResult:
+              temperature: float = 0.0, use_cache: bool = True,
+              thinking: Optional[dict] = None) -> CallResult:
     """Run one structured model call and return a TYPED outcome. The boundary is
     now three-valued at the transport level, and the classes are NOT interchangeable:
 
@@ -375,8 +391,9 @@ def call_json(kind: str, inputs_signature: str, prompt: str, *,
             m.calls += 1
         t0 = time.monotonic()
         try:
+            _tk = thinking if thinking is not None else _thinking_kwargs(PREINGEST_MODEL)
             _kw = dict(response_mime_type='application/json', read_timeout_s=read_timeout_s,
-                       stream=stream, model=PREINGEST_MODEL, **_thinking_kwargs(PREINGEST_MODEL))
+                       stream=stream, model=PREINGEST_MODEL, **_tk)
             if not PREINGEST_MODEL.lower().startswith('gemini-3'):
                 _kw['temperature'] = temperature   # 3.x ignores temperature (400 on future gens)
             resp = provider(prompt, **_kw)
