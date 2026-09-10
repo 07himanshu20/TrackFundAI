@@ -84,12 +84,17 @@ class MonetaryFrame:
     flags: List[str] = field(default_factory=list)
 
 
-def resolve_currency(*, stmt_currency, geo_currency, inr_mentioned):
+def resolve_currency(*, stmt_currency, geo_currency, inr_mentioned, base_currency=None):
     """Resolve ONE currency for a whole statement, geography-gated. Precedence:
       1. the statement's OWN header currency (strongest local evidence), UNLESS a known
-         domicile contradicts it (either direction) → conflict, hold.
+         domicile OR a user-confirmed base currency contradicts it → conflict, hold.
       2. else the entity's geography-implied currency (its domicile).
-      3. else HOLD — no positive evidence; there is NO INR default.
+      3. else the USER-CONFIRMED base currency (a batch/fund-level assertion, e.g. "this
+         portfolio reports in INR") — positive evidence supplied by the user, disclosed as
+         such so an emit resting on it is distinguishable from a file-detected one, and any
+         file whose OWN statement token disagrees still conflicts → holds (the fail-closed
+         guard that keeps a genuinely-foreign file from ever taking the batch currency).
+      4. else HOLD — no positive evidence; there is NO INR default.
 
     Currency is CONFIRMED only by POSITIVE, NON-CONFLICTING evidence — a statement
     token, or a known domicile. Any statement-token-vs-domicile disagreement is a
@@ -106,21 +111,27 @@ def resolve_currency(*, stmt_currency, geo_currency, inr_mentioned):
     records each verdict into the run's currency ledger so the uncovered-currency report is
     complete by construction — capturing DOMICILE-implied currencies a token scan would miss."""
     result = _resolve_currency(stmt_currency=stmt_currency, geo_currency=geo_currency,
-                               inr_mentioned=inr_mentioned)
+                               inr_mentioned=inr_mentioned, base_currency=base_currency)
     currency_ledger.observe(currency=result[0], escalate=result[1], reason=result[2], flags=result[3])
     return result
 
 
-def _resolve_currency(*, stmt_currency, geo_currency, inr_mentioned):
+def _resolve_currency(*, stmt_currency, geo_currency, inr_mentioned, base_currency=None):
     flags: List[str] = []
-    # Rule (i): a statement-header token is positive local evidence — trusted UNLESS a known domicile
+    # The confirmer that a statement token must AGREE with: a known domicile (more authoritative,
+    # entity-specific) if present, else the user-confirmed base currency. A file whose own statement
+    # token disagrees with the confirmer is a genuine conflict → hold (this is what keeps a
+    # genuinely-foreign file — a foreign token on its statement — from ever taking the batch currency).
+    confirmer, confirmer_src = ((geo_currency, 'domicile') if geo_currency
+                                else (base_currency, 'user-confirmed base currency'))
+    # Rule (i): a statement-header token is positive local evidence — trusted UNLESS the confirmer
     # contradicts it (either direction), which is a genuine conflict that cannot be resolved → hold.
     if stmt_currency:
-        if geo_currency and stmt_currency != geo_currency:
+        if confirmer and stmt_currency != confirmer:
             return (None, True,
-                    f'statement shows {stmt_currency} but domicile implies {geo_currency} — currency '
+                    f'statement shows {stmt_currency} but {confirmer_src} implies {confirmer} — currency '
                     f'conflict, cannot confirm; hold',
-                    [f'currency_conflict_{stmt_currency}_vs_domicile_{geo_currency}'])
+                    [f'currency_conflict_{stmt_currency}_vs_{confirmer_src.split()[0]}_{confirmer}'])
         return stmt_currency, False, f'statement-header currency {stmt_currency}', flags
     # Rule (ii): no token, but a known domicile implies its currency. A workbook INR mention never
     # overrides a foreign domicile.
@@ -128,22 +139,28 @@ def _resolve_currency(*, stmt_currency, geo_currency, inr_mentioned):
         if inr_mentioned and geo_currency != 'INR':
             flags.append('inr_mention_ignored_foreign_domicile')
         return geo_currency, False, f'domicile-implied currency {geo_currency}', flags
-    # Rule (iii): NO positive evidence — no statement token AND no known domicile. AMBIGUOUS ⇒ hold,
-    # never INR-by-default/by-mention (the untokened-foreign hole). inr_mentioned is deliberately NOT
-    # trusted here: it is workbook-wide, not on the figure/header, and a foreign statement carries
-    # rupee FX notes too.
-    return (None, True, 'no positive currency evidence (no statement token, no known domicile) — '
-            'ambiguous, hold', ['currency_ambiguous_no_evidence'])
+    # Rule (iii): no token AND no domicile, but the USER CONFIRMED a base currency for the batch/fund.
+    # A positive user assertion — trusted, but DISCLOSED as user-confirmed so a number resting on it is
+    # auditable (and a wrong assertion on one file is catchable) distinct from a file-detected currency.
+    if base_currency:
+        return base_currency, False, f'user-confirmed base currency {base_currency}', ['currency_user_confirmed']
+    # Rule (iv): NO positive evidence — no statement token, no known domicile, no user confirmation.
+    # AMBIGUOUS ⇒ hold, never INR-by-default/by-mention (the untokened-foreign hole). inr_mentioned is
+    # deliberately NOT trusted here: it is workbook-wide, not on the figure/header, and a foreign
+    # statement carries rupee FX notes too.
+    return (None, True, 'no positive currency evidence (no statement token, no known domicile, '
+            'no user-confirmed base currency) — ambiguous, hold', ['currency_ambiguous_no_evidence'])
 
 
 def resolve_monetary_frame(*, stmt_currency, geo_currency, inr_mentioned, declared_unit,
-                           sample_values, anchor_cr, ratecard):
+                           sample_values, anchor_cr, ratecard, base_currency=None):
     """Resolve the statement's monetary frame (currency THEN scale) as one unit.
-    Currency is geography-gated (resolve_currency); scale is anchor-gated
-    (resolve_statement_scale) using that currency. If either half is unresolved
-    the frame escalates — the caller holds ALL the statement's money figures."""
+    Currency is geography-gated (resolve_currency, incl. a user-confirmed base currency);
+    scale is anchor-gated (resolve_statement_scale) using that currency. If either half is
+    unresolved the frame escalates — the caller holds ALL the statement's money figures."""
     ccy, ccy_esc, ccy_reason, ccy_flags = resolve_currency(
-        stmt_currency=stmt_currency, geo_currency=geo_currency, inr_mentioned=inr_mentioned)
+        stmt_currency=stmt_currency, geo_currency=geo_currency, inr_mentioned=inr_mentioned,
+        base_currency=base_currency)
     if ccy_esc:
         return MonetaryFrame(None, None, True, ccy_reason, ccy_flags)
     ss = resolve_statement_scale(declared_unit=declared_unit, currency=ccy,

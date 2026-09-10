@@ -25,6 +25,7 @@ place to revisit if a non-INR-reporting fund is ever onboarded.
 """
 from __future__ import annotations
 
+import contextvars
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -47,6 +48,12 @@ def _is_conflict(flags: Tuple[str, ...]) -> bool:
 
 def _is_ambiguous(flags: Tuple[str, ...]) -> bool:
     return 'currency_ambiguous_no_evidence' in flags
+
+
+def _is_user_confirmed(flags: Tuple[str, ...]) -> bool:
+    # a figure whose currency was resolved by the fund's user-confirmed base (no file token, no
+    # domicile) — weaker than file evidence, so it MUST be surfaced for per-batch human review.
+    return 'currency_user_confirmed' in flags
 
 
 @dataclass
@@ -117,7 +124,14 @@ class CurrencyLedger:
         (non-India, unmapped) held upstream would appear in NEITHER bucket above —
         invisible. It is disclosed under `foreign_domicile_currency_unmapped` so an
         unmapped geography can never hide behind a green report, for ANY future
-        fund. (Neutral where every domicile IS mapped.)"""
+        fund. (Neutral where every domicile IS mapped.)
+
+        `base_currency_applied` (condition #2 of the fund-base confirm) lists every
+        (entity, file) site whose currency was resolved by the fund's user-confirmed
+        base — NOT by a file token or domicile. It does NOT set prompt_required (a rate
+        is not needed); it is the per-batch REVIEW surface so a newly-seen foreign
+        entrant with no marker can never be silently swept into the base currency unseen.
+        Empty when no figure took the fund base (e.g. an all-file-evidenced run)."""
         rates = getattr(rate_card, 'rates', {}) or {}
 
         # positively-resolved foreign currencies (escalate False, non-INR), grouped by ccy
@@ -169,6 +183,9 @@ class CurrencyLedger:
                                        'currency — possible uncovered exposure the system cannot yet name; '
                                        'add the domicile→currency mapping (and then a rate) to surface it'})
 
+        # condition #2 review surface: distinct sites resolved via the fund's user-confirmed base
+        base_applied = self._sites([o for o in self._obs if _is_user_confirmed(o.flags)])
+
         return {
             'as_of': getattr(rate_card, 'as_of', None),
             'card_id': getattr(rate_card, 'card_id', None),
@@ -178,36 +195,44 @@ class CurrencyLedger:
             'ambiguous': _conf_rows(ambiguous),
             'foreign_domicile_unresolved': fdu,
             'foreign_domicile_currency_unmapped': fdcu,
+            'base_currency_applied': base_applied,
             'prompt_required': bool(uncovered),
         }
 
 
 # ── run-scoped activation (the pipeline owns the lifecycle) ───────────────
-# A module-level active ledger keeps resolve_currency's signature and its purity
-# for every caller/test unchanged: when no ledger is active (the default, and all
-# unit tests), record() is never reached. The pipeline sets exactly one ledger for
-# the duration of a run. Single-threaded per run by construction.
-_ACTIVE: Optional[CurrencyLedger] = None
+# The active ledger keeps resolve_currency's signature and its purity for every
+# caller/test unchanged: when no ledger is active (the default, and all unit tests),
+# record() is never reached. The pipeline sets exactly one ledger per run.
+#
+# It is a ContextVar, not a plain module global, so that CONCURRENT per-file extraction
+# (the AI-on speed path — I/O-bound model calls fanned across worker threads) keeps each
+# file's currency observations ISOLATED to its own thread: a ContextVar has an independent
+# value per thread/async-task. Were this a shared global, two files resolving in parallel
+# would record into the same ledger and cross-contaminate — the exact silent ~18× (MYR read
+# as INR) class the whole U6 design exists to prevent. Single-threaded behaviour is
+# byte-identical (a ContextVar with default None behaves exactly like the old global).
+_ACTIVE: "contextvars.ContextVar[Optional[CurrencyLedger]]" = contextvars.ContextVar(
+    'currency_ledger_active', default=None)
 
 
 def active() -> Optional[CurrencyLedger]:
-    return _ACTIVE
+    return _ACTIVE.get()
 
 
 def set_active(ledger: Optional[CurrencyLedger]) -> None:
-    global _ACTIVE
-    _ACTIVE = ledger
+    _ACTIVE.set(ledger)
 
 
 def observe(*, currency, escalate, reason, flags) -> None:
     """The hook resolve_currency calls. No-op unless a run has activated a ledger."""
-    led = _ACTIVE
+    led = _ACTIVE.get()
     if led is not None:
         led.record(currency=currency, escalate=escalate, reason=reason, flags=flags)
 
 
 def context(*, entity=None, source_file=None) -> None:
     """Set the current source on the active ledger (no-op if none active)."""
-    led = _ACTIVE
+    led = _ACTIVE.get()
     if led is not None:
         led.context(entity=entity, source_file=source_file)

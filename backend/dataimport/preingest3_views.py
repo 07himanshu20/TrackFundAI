@@ -143,6 +143,48 @@ def _parse_rate_card_field(raw):
     return json.loads(raw)
 
 
+# The disclosed RUN INPUTS that must survive the summary overwrite. `job.summary` conflates a run's
+# INPUTS (what it was given) with its OUTPUTS (_serialize's view of the results); a run replaces the whole
+# field with outputs, so without this carry-forward every input is dropped. That was masked for the rate
+# card only because /ratecard/ re-injects it immediately before its own re-run — a coincidence of one flow,
+# not a design. Carrying ALL inputs forward makes any re-run path durable (confirm base → supply a foreign
+# rate → re-run keeps both), and is the root fix, not a per-feature stash. `as_of` is carried by the caller.
+_RUN_INPUT_KEYS = ('rate_card', 'base_currency')
+
+
+def _carry_run_inputs(prior, payload):
+    """Copy the disclosed run inputs from the prior summary into the freshly-serialized payload, in place.
+    Only present inputs are copied (a never-set input stays absent — no spurious keys), so the default path
+    is unchanged."""
+    for k in _RUN_INPUT_KEYS:
+        if prior.get(k) is not None:
+            payload[k] = prior[k]
+    return payload
+
+
+def _validate_base_currency(raw):
+    """The fund's user-confirmed base reporting currency (the fund-level confirm-prompt). It is a THIRD
+    positive-evidence source at resolve_currency, applied ONLY where a file has no token and no domicile;
+    a file carrying its own foreign token/domicile still HOLDS under it (conflict guard). Empty → None.
+
+    FAIL-CLOSED to INR: the whole system is INR-reporting BY CONSTRUCTION (ratecard.BASE_CURRENCY, the
+    INR magnitude anchors, and FV-INR-by-source), so INR is the only base it can HONOR today. A non-INR
+    base is REFUSED here rather than accepted and then silently misframed downstream — a foreign statement
+    is handled by ITS currency + a rate (the rate-card box), never by changing the fund base. The engine's
+    resolve_currency stays currency-general, so this gate is the single place to widen when a genuinely
+    non-INR-reporting fund is ever onboarded (the documented BASE_CURRENCY assumption)."""
+    if raw in (None, '', {}):
+        return None
+    from .preingest3.ratecard import BASE_CURRENCY
+    bc = str(raw).strip().upper()
+    if bc != BASE_CURRENCY:
+        raise ValueError(
+            f'base_currency must be {BASE_CURRENCY} — the system reports in {BASE_CURRENCY}; a '
+            f'non-{BASE_CURRENCY}-reporting fund is not yet supported. A foreign statement is handled '
+            f'by its own currency and a rate (the rate card), not by changing the fund base.')
+    return bc
+
+
 def _rows_from_schedule_upload(uploaded):
     """Parse an uploaded rate-schedule workbook into the first sheet-grid that carries a recognisable
     currency+rate header (format-agnostic — via the intake's own header matcher, never hardcoded
@@ -218,9 +260,10 @@ def _run_job(job_id):
             PreIngestJob.objects.filter(pk=job_id).update(
                 progress_pct=int(pct), progress_message=str(msg)[:500])
 
+        base_currency = (job.summary or {}).get('base_currency') or None
         result = pipeline.run(files, as_of=as_of, org=str(job.organization_id),
                               rate_card=rc, alias_store=store, store_dir=_golden_store_base(),
-                              progress=_progress)
+                              base_currency=base_currency, progress=_progress)
 
         wb = assemble.build(result.cir, rate_card=rc)
         rel = preingest_output_path(job, job.output_name or 'TFAI.xlsx')
@@ -230,6 +273,7 @@ def _run_job(job_id):
 
         payload = _serialize(result, as_of, rc)
         payload['as_of'] = as_of
+        _carry_run_inputs(job.summary or {}, payload)
         held = payload['counts']['held_files'] + payload['counts']['read_errors']
         job.output_file = rel
         job.summary = payload
@@ -281,9 +325,15 @@ def upload(request):
         rate_card = _parse_rate_card_field(request.data.get('rate_card'))
     except (ValueError, TypeError):
         return Response({'detail': 'rate_card must be valid JSON.'}, status=400)
+    try:
+        base_currency = _validate_base_currency(request.data.get('base_currency'))
+    except ValueError as e:
+        return Response({'detail': str(e)}, status=400)
     summary = {'engine': _ENGINE}
     if rate_card is not None:                      # U6: the card is a run input from creation
         summary['rate_card'] = rate_card
+    if base_currency:                              # fund-base confirm: a disclosed run input from creation
+        summary['base_currency'] = base_currency
     job = PreIngestJob.objects.create(
         organization=org, uploaded_by=request.user, total_files=len(files),
         output_name='TFAI.xlsx', status='pending', summary=summary)
@@ -417,6 +467,33 @@ def ratecard(request, job_id):
     return Response({'ok': True, 'card_id': card.card_id, 'rates': card.disclosure_rows(),
                      'noop_currencies': noop, 'still_uncovered': still,
                      'detail': 'Rate card accepted. Re-run to apply.'})
+
+
+@api_view(['POST'])
+@permission_classes([IsGPAdmin])
+def base_currency(request, job_id):
+    """Confirm the batch's base reporting currency (the fund-level confirm-prompt payoff). Stored as a
+    DISCLOSED run input in job.summary; the client re-runs (/run/) to apply — the same write-back loop as
+    the rate card. Safety is carried by the engine, not this endpoint: a figure with its OWN foreign
+    token/domicile still HOLDS under the base (conflict guard), and EVERY figure resolved via the base is
+    surfaced under currency_report.base_currency_applied for per-batch review, so a newly-seen foreign
+    entrant with no marker can never be swept into the base unseen. Pass an empty value to clear it."""
+    job = _get_job(request, job_id)
+    try:
+        bc = _validate_base_currency(request.data.get('base_currency'))
+    except ValueError as e:
+        return Response({'detail': str(e)}, status=400)
+    summary = job.summary or {}
+    if bc:
+        summary['base_currency'] = bc
+    else:
+        summary.pop('base_currency', None)
+    job.summary = summary
+    job.save(update_fields=['summary'])
+    log_audit(request, 'update', 'preingest3_base_currency', str(job.id), {'base_currency': bc})
+    return Response({'ok': True, 'base_currency': bc,
+                    'detail': ('Base currency set. Re-run to apply.' if bc
+                               else 'Base currency cleared. Re-run to apply.')})
 
 
 @api_view(['DELETE'])

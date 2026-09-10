@@ -16,6 +16,7 @@
   let poll = null;
   let PROV = [];          // provenance objects, referenced by index (no attr-escaping hazard)
   let currentReport = null;  // U6 uncovered-currency report from the last run (drives the rate prompt)
+  let currentBase = null;    // the fund base currency applied to the last run (persisted run input)
 
   if (window.Auth && Auth.requireAuth) Auth.requireAuth();
   (function () { const u = window.Auth && Auth.getUser && Auth.getUser(); if (u) $('user-badge').textContent = u.email || u.username || '—'; })();
@@ -120,6 +121,8 @@
     ].map(([l, v]) => `<div class="pi3-kpi"><div class="lab">${l}</div><div class="val">${v ?? 0}</div></div>`).join('');
     renderFiles(rv.files || []);
     currentReport = rv.currency_report || null;
+    currentBase = rv.base_currency || null;
+    renderBaseCurrency(currentReport, currentBase);
     renderCurrencyPrompt(currentReport);
     renderReview(rv.review_queue || []);
     renderCompanies(rv.companies || []);
@@ -214,6 +217,66 @@
     if (still) msg += ` · still uncovered: ${still}`;
     notify(msg, still ? 'info' : 'success');
     rerun();
+  }
+
+  // ── base reporting currency — the INR twin of the foreign-rate box ──
+  // Two roles from ONE report: (A) REVIEW the figures resolved via the confirmed base (condition #2 — a
+  // foreign company with no marker must never be silently swept in), and (B) offer the CONFIRM when figures
+  // are held for want of any in-file currency evidence. A file carrying its own foreign currency is held by
+  // the engine's conflict guard regardless — the base never overrides file evidence, only fills its absence.
+  function renderBaseCurrency(report, base) {
+    const panel = $('base-ccy-panel'), body = $('base-ccy-body');
+    const ambiguous = (report && report.ambiguous) || [];          // held: NO positive currency evidence
+    const applied = (report && report.base_currency_applied) || []; // resolved VIA the confirmed base
+    if (!ambiguous.length && !applied.length) { panel.style.display = 'none'; return; }
+    panel.style.display = 'block';
+    let html = '';
+
+    if (applied.length) {   // (A) review surface — one human glance per fund-base-resolved site
+      const sites = applied.map((s) => esc(s.entity || s.file || '')).filter(Boolean).join(', ');
+      html += `<div class="pi3-base-applied">
+          <b>${applied.length} file${applied.length > 1 ? 's were' : ' was'} resolved using your confirmed
+          base currency (${esc(base || 'INR')}).</b> Review that none is a foreign company mis-read as
+          ${esc(base || 'INR')} — a statement carrying its own foreign currency is held automatically, but a
+          foreign company with no marker at all would surface here.
+          ${sites ? `<div class="pi3-ccy-sites" style="margin-top:6px;">${sites}</div>` : ''}
+          <div class="pi3-ccy-actions" style="margin-top:10px;">
+            <button class="v5-btn v5-btn-ghost" id="base-clear">This isn't right — clear base currency &amp; re-run</button>
+          </div>
+        </div>`;
+    }
+
+    if (ambiguous.length && !applied.length) {   // (B) confirm prompt — resolve the no-evidence holds
+      const ents = Array.from(new Set(ambiguous.map((a) => esc(a.entity || a.file || '')).filter(Boolean))).join(', ');
+      html += `<div class="pi3-ccy-intro">${ambiguous.length} figure${ambiguous.length > 1 ? 's are' : ' is'} held
+          because no currency could be determined from the file itself (no symbol, no known domicile). If these
+          are reported in your fund's base currency, confirm it to resolve them — anything carrying its own
+          foreign currency stays <b>held</b>, never converted by assumption.</div>
+        ${ents ? `<div class="pi3-ccy-sites">affects: ${ents}</div>` : ''}
+        <div class="pi3-ccy-actions" style="margin-top:10px;">
+          <button class="v5-btn v5-btn-primary" id="base-confirm">Confirm base currency is INR &amp; re-run</button>
+          <span class="pi3-muted" id="base-hint"></span>
+        </div>`;
+    }
+
+    body.innerHTML = html;
+    if ($('base-confirm')) $('base-confirm').onclick = () => setBaseCurrency('INR');
+    if ($('base-clear')) $('base-clear').onclick = () => setBaseCurrency('');
+  }
+
+  async function setBaseCurrency(bc) {
+    const btn = $('base-confirm') || $('base-clear'), hint = $('base-hint');
+    if (btn) btn.disabled = true;
+    if (hint) hint.textContent = 'Applying…';
+    try {
+      const r = await Auth.apiPost(`${API}/${jobId}/base-currency/`, { base_currency: bc });
+      notify((r.detail || 'Base currency updated') + ' — re-running', 'success');
+      rerun();
+    } catch (e) {
+      if (btn) btn.disabled = false;
+      if (hint) hint.textContent = '';
+      notify('Base currency refused: ' + (e.message || ''), 'error');   // the gate's reason surfaces verbatim
+    }
   }
 
   function statusClass(s) { return s === 'attributed' ? 'active' : s === 'read_error' ? 'rejected' : 'pending'; }

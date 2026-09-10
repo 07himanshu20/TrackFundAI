@@ -109,6 +109,55 @@ def test_honest_declared_unit_still_emits_on_emit_path():
     assert not fr.escalate and fr.scale == 'millions'
 
 
+# ── USER-CONFIRMED BASE CURRENCY (batch/fund confirm-prompt) — a THIRD positive-evidence source,
+# weaker than a file token or domicile, DISCLOSED distinctly, with the conflict guard that keeps a
+# genuinely-foreign file from ever taking the batch currency. ────────────────────────────────────────
+
+def test_user_confirmed_base_currency_resolves_when_no_file_evidence():
+    # no statement token, no domicile, but the user confirmed the batch base currency = INR. This is
+    # the batch confirm-prompt payoff: the 10 Hubler/Aliste/InstaAstro/CPC holds emit via THIS rule.
+    ccy, esc, reason, flags = units.resolve_currency(
+        stmt_currency=None, geo_currency=None, inr_mentioned=False, base_currency='INR')
+    assert ccy == 'INR' and not esc
+    assert 'currency_user_confirmed' in flags                     # tagged for the audit trail
+    assert 'user-confirmed base currency' in reason              # disclosed distinctly (not file-detected)
+
+
+def test_foreign_statement_token_conflicts_with_batch_base_currency_HOLDS():
+    # THE conflict-guard reddening control (CSS/CPM live case): a file whose OWN statement carries a
+    # foreign token (SGD) must STILL HOLD under a batch INR confirmation — never take the batch currency.
+    ccy, esc, _, flags = units.resolve_currency(
+        stmt_currency='SGD', geo_currency=None, inr_mentioned=False, base_currency='INR')
+    assert esc and ccy is None                                    # held, NOT forced to INR
+    assert ccy != 'INR'                                           # negative control: batch never overrides a foreign token
+    assert any('currency_conflict' in f for f in flags)
+
+
+def test_domicile_outranks_user_confirmed_base_currency():
+    # a KNOWN entity domicile (more specific than a batch-wide assertion) wins: a Singapore-domiciled
+    # entity under a batch INR confirmation resolves SGD (rule ii), not the batch INR.
+    ccy, esc, reason, _ = units.resolve_currency(
+        stmt_currency=None, geo_currency='SGD', inr_mentioned=False, base_currency='INR')
+    assert ccy == 'SGD' and not esc and 'domicile-implied' in reason
+
+
+def test_base_currency_none_is_byte_identical_still_holds():
+    # base_currency defaults to None → the no-evidence path is UNCHANGED (holds), so the whole feature
+    # is inert unless a base currency is supplied — the byte-identical guarantee for the default path.
+    ccy, esc, _, flags = units.resolve_currency(
+        stmt_currency=None, geo_currency=None, inr_mentioned=False, base_currency=None)
+    assert esc and ccy is None and 'currency_ambiguous_no_evidence' in flags
+
+
+def test_file_token_still_wins_over_base_currency():
+    # a statement's OWN INR token is file-detected evidence and agrees with the batch INR → emits INR,
+    # and (implicitly) is NOT tagged user-confirmed (the absence of the tag means file-determined).
+    ccy, esc, reason, flags = units.resolve_currency(
+        stmt_currency='INR', geo_currency=None, inr_mentioned=False, base_currency='INR')
+    assert ccy == 'INR' and not esc
+    assert 'currency_user_confirmed' not in flags and 'statement-header' in reason
+
+
 def test_whole_company_anchor_grosses_up_minority_stake():
     # fund paid ₹16Cr for a 20% stake → implied entry valuation ≈ ₹80Cr
     a = units.whole_company_anchor(cost_cr=16, ownership_frac=0.20, fair_value_cr=None)

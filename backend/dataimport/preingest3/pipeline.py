@@ -27,7 +27,7 @@ worker app cleanly):
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from collections import Counter
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -265,14 +265,15 @@ def _extract_company_worker(task):
     ledger so its verdicts are CAPTURED and RETURNED — never written to the shared module global —
     and the parent merges them in canonical order (byte-identical to a sequential run). Module-level
     with picklable args/result so it runs under a ProcessPoolExecutor (spawn) as well as serially."""
-    ck, company, path, domicile, anchor_cr, label, rate_card, use_model = task
+    ck, company, path, domicile, anchor_cr, label, rate_card, use_model, base_currency = task
     local = currency_ledger.CurrencyLedger()
     prev = currency_ledger.active()
     currency_ledger.set_active(local)
     currency_ledger.context(entity=company, source_file=label)
     try:
         rec = extract_company(company, path, rate_card=rate_card, entity=company,
-                              domicile=domicile, anchor_cr=anchor_cr, use_model=use_model)
+                              domicile=domicile, base_currency=base_currency,
+                              anchor_cr=anchor_cr, use_model=use_model)
     except Exception as e:  # noqa: BLE001 — CONSERVATION: a per-file failure (corrupt / password / unknown
         # format / timeout / OOM-on-that-file) MUST become a HELD record, never crash the run or let a
         # swallowed worker exception silently lose the file. The emit loop turns this _note into a held
@@ -286,16 +287,55 @@ def _extract_company_worker(task):
     return ck, rec, local.observations()
 
 
-def _run_extractions(tasks, *, rate_card, use_model, max_workers):
-    """Map `extract_company` over the cache-miss tasks. Uses a PROCESS pool when max_workers>1 and
-    the model is OFF (the 90% is GIL-bound pure-Python work → processes, not threads; isolated
-    memory makes 'no shared mutable state' structural). Serial otherwise (default max_workers=1) →
-    byte-identical to the pre-parallel path. Returns {ck: (rec, currency_observations)}.
-    Model-ON stays serial: the model boundary/metrics path is a separate concern (Phase 2.7)."""
+def _merge_metrics(dst, s) -> None:
+    """Fold a worker thread's own CallMetrics summary into the parent run's metrics (thread metrics
+    are ContextVar-isolated, so each worker counts its own calls and the parent sums them). Pure
+    addition/count-merge → order-independent, so the merged model_metrics is deterministic."""
+    if dst is None or not s:
+        return
+    dst.calls += s['calls']; dst.ok += s['ok']; dst.error += s['error']
+    dst.fatal += s['fatal']; dst.retries += s['retries']; dst.latency_s += s['latency_s']
+    for k, v in s['by_status'].items():
+        dst.by_status[k] = dst.by_status.get(k, 0) + v
+
+
+def _threaded_worker(task):
+    """Thread variant of _extract_company_worker: gives THIS worker thread its own metrics
+    accumulator (llm metrics is a thread-local ContextVar, so the parent's would be invisible here)
+    and returns its summary for the parent to merge. Currency isolation + error→held come for free
+    from _extract_company_worker (its local ledger is a per-thread ContextVar; a per-file exception
+    is already caught into a held record)."""
+    m = llm.new_metrics()
+    ck, rec, obs = _extract_company_worker(task)
+    return ck, rec, obs, m.summary()
+
+
+def _run_extractions(tasks, *, rate_card, use_model, max_workers, base_currency=None):
+    """Map `extract_company` over the cache-miss tasks. Returns {ck: (rec, currency_observations)}.
+
+    Parallelism is picked to match the work's nature:
+      • model OFF, max_workers>1 → PROCESS pool (the 90% is GIL-bound pure-Python; isolated memory
+        makes 'no shared mutable state' structural).
+      • model ON,  max_workers>1 → THREAD pool. The dominant cost is I/O — serial network locator
+        calls (measured: 80 calls ≈ 19 min, one at a time). Threads overlap that wait (the GIL is
+        released during the socket read), taking wall-time from ~N×latency toward ~N/workers×latency,
+        while currency stays per-thread isolated (ContextVar ledger) and each file's failure is
+        already a held record. Bounded to max_workers = the Vertex requests/min budget.
+      • otherwise → serial (default max_workers=1) → byte-identical to the pre-parallel path.
+
+    `base_currency` (the fund's user-confirmed base) is run-uniform — folded into each task tuple
+    like rate_card/use_model — so every worker resolves currency with the same fund base."""
     if not tasks:
         return {}
-    full = [(ck, co, pth, dom, acr, lbl, rate_card, use_model)
+    full = [(ck, co, pth, dom, acr, lbl, rate_card, use_model, base_currency)
             for (ck, co, pth, dom, acr, lbl) in tasks]
+    if max_workers and max_workers > 1 and use_model:
+        parent_m = llm.current_metrics()
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(full))) as ex:
+            results = list(ex.map(_threaded_worker, full))     # ex.map preserves input (canonical) order
+        for _ck, _rec, _obs, _sum in results:
+            _merge_metrics(parent_m, _sum)
+        return {ck: (rec, obs) for ck, rec, obs, _sum in results}
     if max_workers and max_workers > 1 and not use_model:
         with ProcessPoolExecutor(max_workers=min(max_workers, len(full))) as ex:
             results = list(ex.map(_extract_company_worker, full))
@@ -395,6 +435,7 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
         rate_card: RateCard = None, alias_store=None,
         reuse: Dict[str, Record] = None,
         store_dir: Optional[str] = None,
+        base_currency: Optional[str] = None,
         model_provider: Callable = None, require_model: bool = False,
         max_workers: int = 1,
         progress: Optional[Callable] = None) -> RunResult:
@@ -405,7 +446,18 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
     file: a 404 / auth / bad-config fault raises ModelConfigError and halts the run
     loudly (a broken model boundary can never again hide as a per-file hold). Every
     run — model-driven or purely deterministic — reports its boundary behaviour in
-    RunResult.model_metrics so 'the model ran / didn't run' is measured, not assumed."""
+    RunResult.model_metrics so 'the model ran / didn't run' is measured, not assumed.
+
+    `base_currency` is the fund's user-confirmed base reporting currency (fund-level
+    setting, e.g. 'INR' for an Indian AIF). It is a THIRD positive-evidence source at
+    resolve_currency, WEAKER than a file token or entity domicile: a statement carrying
+    its OWN foreign token (or a foreign domicile) still HOLDS under it — the fund base
+    can never override file evidence. Default None → the currency path is byte-identical
+    (no-evidence still holds). Every figure resolved via the fund base is TAGGED
+    (currency_user_confirmed) so (1) its provenance discloses it rests on the fund
+    setting, not file evidence, and (2) RunResult.currency_report['base_currency_applied']
+    surfaces those sites for per-batch review — a new foreign entrant with no marker can
+    never be silently swept into the base currency unseen."""
     def _p(pct, msg):
         if progress:
             progress(pct, msg)
@@ -812,7 +864,7 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
         _ca = anchors.get(_ek)
         _ck = extraction_cache_key(_fp, as_of=as_of, rate_card_id=rate_card.card_id,
                                    anchor_cr=_ca.anchor_cr, domicile=_ca.domicile,
-                                   use_model=require_model)
+                                   use_model=require_model, base_currency=base_currency)
         if _ck in _seen_ck or reuse.get(_ck) is not None:
             continue
         if _store_dir and golden_store.get(_store_dir, _ck) is not None:
@@ -820,7 +872,8 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
         _seen_ck.add(_ck)
         _tasks.append((_ck, _ca.company, _pth, _ca.domicile, _ca.anchor_cr, _lbl))
     _precomputed = _run_extractions(_tasks, rate_card=rate_card,
-                                    use_model=require_model, max_workers=max_workers)
+                                    use_model=require_model, max_workers=max_workers,
+                                    base_currency=base_currency)
 
     # ── emit (pass 2) ──
     _p(60, f'Extracting {len(mis_facts)} company files')
@@ -849,7 +902,7 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
         # instant any value-affecting input changes. Reporting still uses content_fp (`fp`).
         ck = extraction_cache_key(fp, as_of=as_of, rate_card_id=rate_card.card_id,
                                   anchor_cr=ca.anchor_cr, domicile=ca.domicile,
-                                  use_model=require_model)
+                                  use_model=require_model, base_currency=base_currency)
         currency_ledger.context(entity=ca.company, source_file=label)
         # Phase 2.4: the reuse cache is the in-run/in-memory layer; the durable golden store (opt-in
         # via store_dir, namespaced per-tenant as _store_dir) is the cross-PROCESS layer. Both are keyed

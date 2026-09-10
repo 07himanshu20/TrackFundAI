@@ -81,10 +81,11 @@ def _cpm_tie_group():
         found = {c: r for c, r in found.items() if r is not None}
         if not found:
             continue
+        stale, fwd = extract._sheet_vintage_flags(rows, ax, None, found)   # CPM has no filename month → (False, False)
         dump = tiers.is_dump(rows, ax.axis_rows[0] + 1, lc)
-        cands.append((dump, -len(found), -len(ax.columns), s.sheet, rows, ax, lc, found))
-    prim = min(c[:3] for c in cands)
-    return [c for c in cands if c[:3] == prim]
+        cands.append((stale, fwd, dump, -len(found), -len(ax.columns), s.sheet, rows, ax, lc, found))
+    prim = min(c[:5] for c in cands)
+    return [c for c in cands if c[:5] == prim]
 
 
 def test_cpm_consolidated_selection_correctly_holds():

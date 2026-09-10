@@ -20,7 +20,8 @@ import pytest
 # NB: import via the Django-registered `dataimport.` path (NOT `backend.dataimport.`). preingest3_views
 # imports Django models, which must resolve to the app_label in INSTALLED_APPS; and IntakeError must be
 # the SAME class object _accept_card raises internally (via its relative import), so the prefix must match.
-from dataimport.preingest3_views import _accept_card, _serialize
+from dataimport.preingest3_views import (_accept_card, _carry_run_inputs, _serialize,
+                                          _validate_base_currency)
 from dataimport.preingest3.ratecard import default_inr_card
 from dataimport.preingest3.ratecard_intake import IntakeError
 
@@ -94,6 +95,49 @@ def test_accept_card_schedule_path_is_co_equal():
                                     ['MYR', 18.6, AS_OF, 'RBI ref']],
                               as_of=AS_OF, uncovered={'MYR'})
     assert 'MYR' in card.rates and str(card.rates['MYR'].inr_per_unit) == '18.6'
+
+
+# ── the fund-base confirm gate (the confirm-prompt run input) ─────────────────────────────────────────
+def test_validate_base_currency_normalises_and_treats_empty_as_none():
+    assert _validate_base_currency('inr') == 'INR'          # case-insensitive
+    assert _validate_base_currency('  INR ') == 'INR'       # whitespace-tolerant
+    for empty in (None, '', {}):
+        assert _validate_base_currency(empty) is None       # no confirmation ⇒ inert (byte-identical run)
+
+
+def test_validate_base_currency_refuses_non_inr_reporting_base_REDDENING():
+    # reddening: the system is INR-reporting by construction (BASE_CURRENCY, INR anchors, FV-by-source).
+    # A non-INR base must be REFUSED at the door, not accepted and then silently misframed downstream. This
+    # reddens the instant the gate is loosened to admit a base the engine cannot yet honor (a wrong number).
+    with pytest.raises(ValueError):
+        _validate_base_currency('USD')
+    with pytest.raises(ValueError):
+        _validate_base_currency('SGD')
+
+
+# ── run inputs survive the summary overwrite (the root fix, not a per-feature stash) ─────────────────
+def test_run_inputs_persist_across_the_summary_overwrite():
+    # _serialize produces OUTPUTS only; a run overwrites job.summary with them. The disclosed INPUTS a run
+    # was given (rate card, confirmed base currency) must be carried forward, or a later re-run silently
+    # drops them and figures re-hold. This locks the carry-forward that makes any re-run path durable.
+    prior = {'rate_card': {'as_of': AS_OF, 'rates': [{'currency': 'MYR', 'inr_per_unit': '18.6'}]},
+             'base_currency': 'INR', 'engine': 'preingest3'}
+    payload = _serialize(_fake_result({'uncovered': [], 'base_currency_applied': []}), AS_OF,
+                         default_inr_card(AS_OF))
+    # REDDENING: the freshly-serialized payload (what would replace summary) carries NEITHER input — proof
+    # the overwrite genuinely drops them, so the carry-forward is load-bearing, not decorative.
+    assert 'rate_card' not in payload and 'base_currency' not in payload
+    _carry_run_inputs(prior, payload)
+    assert payload['base_currency'] == 'INR'                       # confirmed base survives → next run applies it
+    assert payload['rate_card'] == prior['rate_card']             # supplied card survives → foreign stays covered
+
+
+def test_carry_run_inputs_adds_no_spurious_keys_when_absent():
+    # NEGATIVE CONTROL: a run given NO inputs (the default path) must gain NO input keys — the carry-forward
+    # is inert unless an input was actually set, so byte-identical behaviour for a plain all-INR run.
+    payload = _serialize(_fake_result({'uncovered': []}), AS_OF, default_inr_card(AS_OF))
+    _carry_run_inputs({'engine': 'preingest3'}, payload)
+    assert 'rate_card' not in payload and 'base_currency' not in payload
 
 
 # ── the uploaded-schedule path parses server-side and hits the SAME gate (co-equal third input) ──────

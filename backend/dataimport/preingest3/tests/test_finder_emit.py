@@ -117,11 +117,12 @@ def _dual_provider(finder_map, rows_map):
     return provider
 
 
-def _find(fields, ident, provider, prof):
+def _find(fields, ident, provider, prof, require_bound=False, boundary_verified=True):
     llm.set_model_provider(provider)
     return extract._model_find_across_file(prof, ident, list(extract.MIS_CONCEPTS), entity='TestCo',
                                            domicile=None, anchor_cr=None, rate_card=_RC, fields=fields,
-                                           source_label='t.xlsx')
+                                           source_label='t.xlsx', require_bound=require_bound,
+                                           boundary_verified=boundary_verified)
 
 
 def _diag(diags, concept):
@@ -186,23 +187,53 @@ def test_g3_exactly_one_figure_per_concept_never_n_values():
     assert isinstance(fields['revenue'], Figure)               # one field, one Figure — never a list of 79
 
 
-# ── G1: anchors relocate to the per-statement step; removing them breaks triangulation → HOLD ──────
-def test_g1_anchors_relocate_and_are_load_bearing_for_the_emit(monkeypatch):
-    prof = _prof({'Summary': _SUMMARY})
-    finder_map = {'revenue': [('Summary', 3, 'Revenue')], 'ebitda': [('Summary', 7, 'EBITDA')],
-                  'cash': [('Summary', 8, 'Cash')], 'headcount': [('Summary', 9, 'Headcount')]}
-    fields = _gap_fields()
-    _find(fields, _ident('cfp-g1'), _dual_provider(finder_map, {'Summary': _SUM_CHAIN}), prof)
-    assert fields['revenue'].value_cr == 33 and not fields['revenue'].held   # anchors present → identity PASS → emit
-
-    # REDDENING: neutralise the per-statement anchor step → no cogs/gp/opex → identity can't be checked → HELD
+# ── G1 / unified emit: three legitimate corroboration bases, and no-basis → HOLD (fail-closed) ─────
+# The emit is unified onto the shared _emit_from_collapse discipline (not a triangulation-ONLY gate):
+# it needs ONE of (i) identity-chain, (ii) cross-sheet reconcile, (iii) deterministic-locator-match.
+def test_g1_locate_rows_relocates_per_statement_anchors(monkeypatch):
+    # Guard 2 stays wired: the finder emit path calls locate_rows per single-region statement, which
+    # re-introduces the identity anchors BOUNDED to that statement (their bounding is proven in test_finder).
+    seen = {'stmts': [], 'reqs': []}
     real = locator.locate_rows
-    monkeypatch.setattr(locator, 'locate_rows',
-                        lambda *a, **k: {'records': [], 'absent': [], 'missing': []})
-    fields2 = _gap_fields()
-    _find(fields2, _ident('cfp-g1-red'), _dual_provider(finder_map, {'Summary': _SUM_CHAIN}), prof)
-    assert fields2['revenue'].held and fields2['revenue'].value_cr is None
-    monkeypatch.setattr(locator, 'locate_rows', real)
+
+    def spy(st, grid, targets, **kw):
+        seen['stmts'].append(st.sheet)
+        seen['reqs'].append(tuple(locator.request_concepts(targets)))
+        return real(st, grid, targets, **kw)
+    monkeypatch.setattr(locator, 'locate_rows', spy)
+    _find(_gap_fields(), _ident('cfp-g1-wired'),
+          _dual_provider({'revenue': [('Summary', 3, 'Revenue')]}, {'Summary': _SUM_CHAIN}), _prof({'Summary': _SUMMARY}))
+    assert 'Summary' in seen['stmts']                                   # locate_rows invoked on the statement
+    assert any('cogs' in r or 'gross_profit' in r for r in seen['reqs'])   # anchors re-enter (relocation)
+
+
+def test_basis_i_identity_chain_alone_can_emit(monkeypatch):
+    # code locator disabled → basis (iii) off; single-source → basis (ii) off; only the identity chain
+    # remains. With anchors → chain PASSES → emit. REDDENING: remove anchors → no basis → HELD.
+    monkeypatch.setattr(extract, '_find_concept_row', lambda *a, **k: None)
+    prof = _prof({'Summary': _SUMMARY})
+    fmap = {'revenue': [('Summary', 3, 'Revenue')], 'ebitda': [('Summary', 7, 'EBITDA')],
+            'cash': [('Summary', 8, 'Cash')], 'headcount': [('Summary', 9, 'Headcount')]}
+    f = _gap_fields()
+    _find(f, _ident('cfp-basis-i'), _dual_provider(fmap, {'Summary': _SUM_CHAIN}), prof)
+    assert f['revenue'].value_cr == 33 and not f['revenue'].held        # identity-chain ALONE emits
+    monkeypatch.setattr(locator, 'locate_rows', lambda *a, **k: {'records': [], 'absent': [], 'missing': []})
+    f2 = _gap_fields()
+    _find(f2, _ident('cfp-basis-i-red'), _dual_provider(fmap, {'Summary': _SUM_CHAIN}), prof)
+    assert f2['revenue'].held and f2['revenue'].value_cr is None        # no chain, no other basis → HELD
+
+
+def test_basis_iii_locator_match_alone_can_emit(monkeypatch):
+    # no anchors (no chain → basis i off), single-source (basis ii off): the finder row MATCHES the code
+    # locator → basis (iii) emits. REDDENING: finder points at a row code does NOT pick → uncorroborated → HELD.
+    monkeypatch.setattr(locator, 'locate_rows', lambda *a, **k: {'records': [], 'absent': [], 'missing': []})
+    prof = _prof({'Summary': _SUMMARY})
+    f = _gap_fields()
+    _find(f, _ident('cfp-basis-iii'), _dual_provider({'revenue': [('Summary', 3, 'Revenue')]}, {}), prof)
+    assert f['revenue'].value_cr == 33 and not f['revenue'].held        # locator-match ALONE emits
+    f2 = _gap_fields()
+    _find(f2, _ident('cfp-basis-iii-red'), _dual_provider({'revenue': [('Summary', 5, 'Gross Profit')]}, {}), prof)
+    assert f2['revenue'].held and f2['revenue'].value_cr is None        # code finds revenue at row 3, not 5 → HELD
 
 
 # ── G2: reject 'Total Other Income'; neutralising the guard poisons reconcile → HOLD ──────────────
@@ -270,6 +301,22 @@ def test_g4_cash_period_alignment_avoids_false_conflict():
     # May-2025 (30) and Apr-2025 (25) are DIFFERENT periods → only the latest bucket reconciles →
     # 'single', NOT a false 'conflict'/'multiscope' hold from conflating the two by column position.
     assert d is not None and d['disposition'] == 'single'
+
+
+def test_g4_money_stock_held_on_unverified_reporting_boundary():
+    # Guard 4 (period-binding): a money STOCK is a point-in-time reading → trustworthy only at a VERIFIED
+    # reporting date. When the boundary is not verified (no date, or merely FLOW-DERIVED — the CSS Dec-column
+    # cash on a May file), the stock's latest column may be a projected balance → HELD, never emitted.
+    # Control: a verified boundary → it CAN emit.
+    prof = _prof({'BS': _BS})
+    fmap = {'cash': [('BS', 3, 'Cash')]}
+    f_un = _gap_fields()
+    diags = _find(f_un, _ident('cfp-g4b-un'), _dual_provider(fmap, {}), prof, boundary_verified=False)
+    assert any(d.get('rejected') == 'money-stock-on-unverified-reporting-boundary' for d in diags)
+    assert not (isinstance(f_un['cash'], Figure) and f_un['cash'].confirmed)   # HELD/gap — never emitted
+    f_ok = _gap_fields()
+    _find(f_ok, _ident('cfp-g4b-ok'), _dual_provider(fmap, {}), prof, boundary_verified=True)   # control
+    assert isinstance(f_ok['cash'], Figure) and f_ok['cash'].confirmed and f_ok['cash'].value_cr == 25
 
 
 def test_g4_reddening_without_period_alignment_a_false_conflict_appears(monkeypatch):

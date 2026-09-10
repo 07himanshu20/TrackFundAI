@@ -74,9 +74,13 @@ def test_cache_key_includes_every_value_affecting_input():
     assert extraction_cache_key('CFP', **{**base, 'anchor_cr': '200'}) != k0
     assert extraction_cache_key('CFP', **{**base, 'domicile': 'SG'}) != k0
     assert extraction_cache_key('CFP', **{**base, 'use_model': True}) != k0
+    # base_currency (fund's user-confirmed base) flips a no-evidence HOLD → base EMIT, so it changes
+    # the CIR and MUST re-key — else a held(base=None) record is served stale once the fund base is set.
+    assert extraction_cache_key('CFP', **{**base, 'base_currency': 'INR'}) != k0
     assert extraction_cache_key('CFP', **base, logic_version='lv_ZZZ') != k0  # code version
     assert extraction_cache_key('CFP', **base, contract_sig='ct_ZZZ') != k0   # B4: contract
     assert extraction_cache_key('CFP', **base) == k0                       # deterministic
+    assert extraction_cache_key('CFP', **base, base_currency=None) == k0   # default is inert (byte-identical)
     # entity is NOT a parameter — excluded by construction (proven pure attribution), so it
     # can never cause a false cache miss.
 
@@ -215,6 +219,38 @@ def test_reuse_cache_does_not_serve_prior_config_record():
                            alias_store=_store(d, 'b'), reuse={ck_a: poison})
         assert '_poison' not in _cached_record(r_b).fields, \
             'config B served config A\'s cached record — the cache key is config-incomplete (stale serve)'
+
+
+def test_base_currency_change_is_a_cache_miss_no_stale_currency_serve():
+    # The currency-dimension analogue of the config-staleness gate: base_currency flips a no-evidence
+    # HOLD into a base EMIT, so a record extracted under base=None must NEVER be served once the fund
+    # base is supplied. Same adversarial shape: poison keyed under base=None must be SERVED under
+    # base=None (path live) but NOT served under base='INR' (key includes base_currency).
+    with tempfile.TemporaryDirectory() as d:
+        files = _fixture(d)
+        card = default_inr_card('2026-06-30')
+
+        # cold run with NO fund base → resolves, extracts, caches under ck(base=None)
+        r0 = pipeline.run(files, as_of='2026-06-30', org='cachegate', rate_card=card,
+                          alias_store=_store(d, 'n0'))
+        rep = next(fr for fr in r0.files if fr.entity_id == 'Zephyr Diagnostics')
+        assert rep.status == 'attributed', 'fixture MIS must resolve, else the cache never engages'
+        (ck0, _rec0), = r0.extraction.items()
+
+        poison = Record('mis', entity_id='Zephyr Diagnostics',
+                        fields={'company': 'Zephyr Diagnostics', '_poison': True})
+
+        # (1) SAME base=None + reuse=poison → served (the base=None reuse path is LIVE) ──
+        r_same = pipeline.run(files, as_of='2026-06-30', org='cachegate', rate_card=card,
+                              alias_store=_store(d, 'n1'), reuse={ck0: poison})
+        assert _cached_record(r_same).fields.get('_poison') is True, \
+            'base=None reuse must SERVE the cached record — else this gate is vacuous'
+
+        # (2) base='INR' + reuse=poison(keyed under base=None) → NOT served (key includes base_currency) ──
+        r_inr = pipeline.run(files, as_of='2026-06-30', org='cachegate', rate_card=card,
+                             alias_store=_store(d, 'n2'), base_currency='INR', reuse={ck0: poison})
+        assert '_poison' not in _cached_record(r_inr).fields, \
+            'fund base=INR served the base=None record — base_currency is not in the cache key (stale serve)'
 
 
 # ── logic_version completeness: whole-package, not a hand-list ────────────────

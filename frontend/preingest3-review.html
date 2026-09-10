@@ -139,6 +139,17 @@
           <div class="pi3-section-title">Files</div>
           <div id="files-list"></div>
 
+          <!-- Base reporting currency — the INR twin of the foreign-rate box. Shown when figures are held
+               for want of ANY currency evidence (confirm the fund base to resolve them), or to REVIEW the
+               figures that WERE resolved via the confirmed base (a foreign entrant is never swept in unseen).
+               Hidden when nothing is held for currency and nothing rode the base. -->
+          <div class="v5-panel" id="base-ccy-panel" style="margin-top:14px;display:none;">
+            <div class="v5-panel-header">
+              <div class="v5-panel-title" id="base-ccy-title">Base reporting currency</div>
+            </div>
+            <div class="v5-panel-body" id="base-ccy-body"></div>
+          </div>
+
           <!-- U6 currency coverage — shown ONLY when a foreign currency was detected. REQUESTS a rate for
                each uncovered currency; DISCLOSES foreign exposure a rate cannot surface. Hidden on all-INR. -->
           <div class="v5-panel" id="ccy-panel" style="margin-top:14px;display:none;">

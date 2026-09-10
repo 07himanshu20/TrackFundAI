@@ -168,6 +168,76 @@ def test_foreign_domicile_that_WAS_resolved_is_not_flagged():
     assert [u['currency'] for u in rep['uncovered']] == ['MYR']
 
 
+# ── condition #2: the fund-base review surface (a fund-base resolution is never silently swept in) ─────
+def test_base_currency_applied_surfaces_user_confirmed_sites_for_review():
+    # a figure resolved by the fund's user-confirmed base (no token, no domicile) is SURFACED for
+    # per-batch review — the catch that stops a new foreign entrant being swept into the base unseen.
+    led = _under_ledger(lambda L: (L.context(entity='Hubler', source_file='h.xlsx'),
+                                   units.resolve_currency(stmt_currency=None, geo_currency=None,
+                                                          inr_mentioned=False, base_currency='INR')))
+    rep = led.uncovered_report(RC)
+    assert rep['base_currency_applied'] == [{'entity': 'Hubler', 'file': 'h.xlsx'}]
+    assert rep['prompt_required'] is False                 # a review surface, NOT a rate request
+
+
+def test_base_currency_applied_is_empty_when_evidence_is_from_the_file_REDDENING():
+    # NEGATIVE CONTROL: currency from FILE evidence (a token OR a domicile) is NOT the fund-base path,
+    # so it must NOT surface for base-review. Reddens if the surface ever widens to every emit — which
+    # would drown the review list and defeat its purpose (spotting exactly the fund-base resolutions).
+    def go(L):
+        L.context(entity='Tokened', source_file='t.xlsx')
+        units.resolve_currency(stmt_currency='INR', geo_currency=None, inr_mentioned=False, base_currency='INR')
+        L.context(entity='Domiciled', source_file='d.xlsx')
+        units.resolve_currency(stmt_currency=None, geo_currency='INR', inr_mentioned=False, base_currency='INR')
+    rep = _under_ledger(go).uncovered_report(RC)
+    assert rep['base_currency_applied'] == []
+
+
+def test_pipeline_fund_base_surfaces_applied_sites_and_is_inert_by_default():
+    # END-TO-END plumbing + condition #2: base_currency is threaded run → worker → resolve_currency.
+    # A file with NO currency token and NO domicile holds its currency without a fund base; supplying
+    # base='INR' resolves it via the fund base AND surfaces the site for review. Default (no base) is
+    # inert — nothing is force-resolved, nothing surfaced (the byte-identical guarantee, observably).
+    import tempfile
+
+    import openpyxl
+
+    from backend.dataimport.preingest3 import pipeline
+    from backend.dataimport.preingest3.alias_ledger import AliasLedger
+
+    def _xlsx(path, rows):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        for r in rows:
+            ws.append(r)
+        wb.save(path)
+        return path
+
+    with tempfile.TemporaryDirectory() as d:
+        fund = _xlsx(os.path.join(d, 'fund_schedule.xlsx'),
+                     [['Company', 'Cost', 'Fair Value', 'Ownership %'],
+                      ['Acme Labs', 40, 90, 25],
+                      ['Zephyr Diagnostics', 60, 150, 18]])
+        mis = _xlsx(os.path.join(d, 'Zephyr Diagnostics monthly.xlsx'),
+                    [['Particulars', 'Apr-25', 'May-25', 'Jun-25'],
+                     ['Revenue', 10, 11, 12], ['EBITDA', 2, 2, 3],
+                     ['Closing Cash', 5, 6, 7], ['Headcount', 20, 21, 22]])
+        files = [('fund_schedule', fund), ('Zephyr Diagnostics monthly', mis)]
+        card = default_inr_card('2026-06-30')
+
+        r_none = pipeline.run(files, as_of='2026-06-30', org='fbtest', rate_card=card,
+                              alias_store=AliasLedger(org='fbtest', path=os.path.join(d, 'a0.json')))
+        assert r_none.currency_report['base_currency_applied'] == [], 'default base=None must be inert'
+
+        r_inr = pipeline.run(files, as_of='2026-06-30', org='fbtest', rate_card=card,
+                             base_currency='INR',
+                             alias_store=AliasLedger(org='fbtest', path=os.path.join(d, 'a1.json')))
+        applied = {s['entity'] for s in r_inr.currency_report['base_currency_applied']}
+        assert 'Zephyr Diagnostics' in applied, \
+            'fund base=INR did not reach resolve_currency through the pipeline (plumbing gap) ' \
+            'or was not surfaced for review (condition #2)'
+
+
 # ── real-files integration: the per-path proof on production data (slow) ──────────────────────────────
 _IN = 'backend/media/preingest/trivesta/100e86d5/in'
 

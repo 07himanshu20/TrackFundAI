@@ -15,6 +15,7 @@ urlpatterns = [
     path('preingest3/<uuid:job_id>/run/', pv3.rerun, name='preingest3-run'),
     path('preingest3/<uuid:job_id>/resolve/', pv3.resolve, name='preingest3-resolve'),
     path('preingest3/<uuid:job_id>/ratecard/', pv3.ratecard, name='preingest3-ratecard'),
+    path('preingest3/<uuid:job_id>/base-currency/', pv3.base_currency, name='preingest3-base-currency'),
     path('preingest3/<uuid:job_id>/download/', pv3.download, name='preingest3-download'),
 
     # Pre-ingestion consolidation layer (many raw files -> one TFAI.xlsx)

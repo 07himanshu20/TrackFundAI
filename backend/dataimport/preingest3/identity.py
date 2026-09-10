@@ -458,7 +458,7 @@ def net_logic_version() -> str:
 
 
 def extraction_cache_key(content_fp: str, *, as_of, rate_card_id, anchor_cr,
-                         domicile, use_model, logic_version: str = None,
+                         domicile, use_model, base_currency=None, logic_version: str = None,
                          contract_sig: str = None) -> str:
     """The PROVABLY-COMPLETE key for the per-file extraction/reuse cache: content_fp PLUS
     every run input that can change the extracted CIR. content_fp ALONE is a config-staleness
@@ -466,14 +466,19 @@ def extraction_cache_key(content_fp: str, *, as_of, rate_card_id, anchor_cr,
     (goes live at the U6 multi-currency boundary). `entity` is EXCLUDED: empirically proven
     pure attribution (0 value-diffs when it alone changes), so keying on it would only cause
     false cache misses. `as_of` is kept explicit even though today it reaches extraction only
-    via rate_card_id — future-proofing as_of-dependent period selection. logic_version defaults
-    to the structural net-module hash; a caller may inject one (tests / a pinned prod version).
-    contract_sig (schema + SEED-and-LEARNED lexicon + identities + checks + tolerances) closes
-    D8: net_logic_version hashes preingest3 .py source only, so it misses the out-of-package
-    OUTPUT SCHEMA and the runtime-grown learned-synonym JSON — both of which change the CIR."""
+    via rate_card_id — future-proofing as_of-dependent period selection. `base_currency` (the
+    fund's user-confirmed base) is a THIRD positive-evidence source at resolve_currency: it can
+    flip a no-evidence HOLD into a base-currency EMIT, so it changes the CIR and MUST be in the
+    key — else a file extracted (held) under base=None would be served STALE on a re-run once the
+    fund base is supplied (the exact Inc-5 stale-config class, now for the currency dimension).
+    logic_version defaults to the structural net-module hash; a caller may inject one (tests / a
+    pinned prod version). contract_sig (schema + SEED-and-LEARNED lexicon + identities + checks +
+    tolerances) closes D8: net_logic_version hashes preingest3 .py source only, so it misses the
+    out-of-package OUTPUT SCHEMA and the runtime-grown learned-synonym JSON — both change the CIR."""
     lv = logic_version if logic_version is not None else net_logic_version()
     if contract_sig is None:
         from .contract import contract_signature      # deferred: identity is foundational
         contract_sig = contract_signature()
     return _sha([content_fp, str(as_of), str(rate_card_id),
-                 str(anchor_cr), str(domicile), '1' if use_model else '0', lv, contract_sig])
+                 str(anchor_cr), str(domicile), '1' if use_model else '0',
+                 str(base_currency), lv, contract_sig])
