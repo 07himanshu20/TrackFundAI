@@ -31,12 +31,12 @@ from decimal import Decimal, ROUND_HALF_UP
 from . import family, gate, lexicon, periods, reconcile, tiers, units
 from . import llm, locator, reader, statements, templates, triangulate
 from .cir import Figure, Provenance, Record
-from .contract import CONCEPT_EQUIVALENCE, ROUNDING_DP, concept_measure, concept_nature
+from .contract import CONCEPT_EQUIVALENCE, IDENTITIES, ROUNDING_DP, concept_measure, concept_nature
 from .gate import AUTO
 from .identity import compute_identity
 from .profiler import _CCY_HINTS, _UNIT_HINTS, _cell_type, profile_file
 from .profiler import token_present as _token_present
-from .quantity import EXCEL_ERRORS, Quantity
+from .quantity import EXCEL_ERRORS, Quantity, to_decimal
 
 _CR = Decimal('10000000')
 _Q = Decimal('1').scaleb(-ROUNDING_DP)
@@ -419,6 +419,100 @@ def _find_equivalent_stock_row(rows, label_col, eq_concept, r0, r1, axis_cols) -
         if score > best_score:
             best_row, best_score = r, score
     return best_row
+
+
+def _reconciled_cash_rebind(rows, label_col, acts, as_of, require_bound):
+    """Lever 2a — reconciliation-guided closing-cash SELECTION on a held cash STOCK.
+
+    A cash stock is often held as "wrong row / implausibly small" because a tiny bank-only
+    sub-line out-scored the true aggregate on label keywords alone — and the label itself can
+    LIE ('Closing Cash Balance including Fixed deposits' on a value that EXCLUDES them). Label
+    wording cannot be trusted; only the DATA can dispose. So take the closing/total cash line
+    that TWO INDEPENDENT reconciliation identities confirm on the SAME statement & column:
+      • roll-forward  opening_cash + net change in cash = closing   (contract.cash_flow_identity)
+      • component Σ    Σ(the contiguous component rows above a total) = that total
+    Return (total_row, Collapsed) for the aggregate BOTH identities confirm to within the
+    declared tolerance, else None. Purely arithmetic over located rows via the shared lexicon —
+    no per-file sheet/label spellings; fail-closed on any missing or mismatched part, and ≥2
+    agreeing anchors are REQUIRED (a single identity never rebinds), so the caller's hold simply
+    stays whenever the statement does not over-determine the answer."""
+    if label_col is None or not acts:
+        return None
+    spec = next((i for i in IDENTITIES if i['name'] == 'cash_flow_identity'), None)
+    tol_rel = Decimal(str(spec['tol_rel'])) if spec else Decimal('0.02')
+    num_cols = [pc.col for pc in acts]
+
+    def _cell(r, c):
+        return to_decimal(rows[r][c]) if (0 <= r < len(rows) and c < len(rows[r])) else None
+
+    def _toks(r):
+        return (set(lexicon.normalise_label(rows[r][label_col]).split())
+                if (label_col < len(rows[r]) and _cell_type(rows[r][label_col]) == 'text') else set())
+
+    def _is_data(r):
+        return (label_col < len(rows[r]) and _cell_type(rows[r][label_col]) == 'text'
+                and any(_cell(r, c) is not None for c in num_cols))
+
+    # the two roll-forward inputs — an opening balance and a net change in cash. These belong to
+    # the roll-forward identity ONLY; a component subtotal must be INDEPENDENT of them (never sweep
+    # them as "components", or the subtotal degenerates into the roll-forward and the ≥2-anchor bar
+    # is defeated). Defined once, reused to locate the inputs AND to bound the component walk.
+    def _is_open(r):
+        t = _toks(r)
+        return bool(t & _AGG_ANTI) and lexicon.match_detail(rows[r][label_col], 'opening_cash')[0] != 'none'
+
+    def _is_net(r):
+        t = _toks(r)
+        return 'net' in t and 'cash' in t and bool(t & {'increase', 'decrease', 'change', 'movement'})
+
+    def _first(pred):
+        for r in range(len(rows)):
+            if _is_data(r) and pred(r):
+                return r
+        return None
+
+    open_r, net_r = _first(_is_open), _first(_is_net)
+
+    # aggregate cash lines (a total/closing/overall cash line, never an opening line)
+    totals = [r for r in range(len(rows)) if _is_data(r)
+              and not (_toks(r) & _AGG_ANTI)
+              and (_toks(r) & _AGG_STRONG or 'balance' in _toks(r))
+              and (lexicon.match_detail(rows[r][label_col], 'cash')[0] != 'none'
+                   or lexicon.match_detail(rows[r][label_col], 'closing_cash')[0] != 'none')]
+
+    for tot_r in sorted(totals, reverse=True):        # bottom-up: the grand total sits lowest
+        vals = {pc.col: rows[tot_r][pc.col] for pc in acts
+                if pc.col < len(rows[tot_r]) and _cell_type(rows[tot_r][pc.col]) == 'num'}
+        col = periods.collapse('cash', concept_nature('cash'), acts, vals,
+                               as_of=as_of, require_bound=require_bound)
+        if col is None or col.value is None or col.escalate or not col.source_cols:
+            continue
+        V = to_decimal(col.value)
+        if V is None or V == 0:
+            continue
+        k, tol = col.source_cols[0], abs(V) * tol_rel
+
+        # anchor 1 — component subtotal: the contiguous balance component rows above the total sum
+        # to it. Stop at the first non-data row AND at any roll-forward input (opening / net change)
+        # so this stays INDEPENDENT of anchor 2 — a total sitting just below opening+net must never
+        # be "confirmed" by re-deriving the roll-forward.
+        parts, r = [], tot_r - 1
+        while r >= 0 and len(parts) < 12 and _is_data(r) and not (_is_open(r) or _is_net(r)):
+            pv = _cell(r, k)
+            if pv is None:
+                break
+            parts.append(pv)
+            r -= 1
+        subtotal_ok = len(parts) >= 2 and abs(sum(parts) - V) <= tol
+
+        # anchor 2 — roll-forward: opening + net change = closing, in the SAME column
+        ov = _cell(open_r, k) if open_r is not None else None
+        nv = _cell(net_r, k) if net_r is not None else None
+        rollfwd_ok = ov is not None and nv is not None and abs((ov + nv) - V) <= tol
+
+        if subtotal_ok and rollfwd_ok:                # ≥2 independent identities agree → STRONG
+            return tot_r, col
+    return None
 
 
 def _sheet_verdict_rank(rows, ax, label_col, found) -> int:
@@ -1436,6 +1530,30 @@ def extract_company(label: str, path: str, *, rate_card, entity: str = None,
                                      anchor_cr=anchor_cr, rate_card=rate_card)
         if isinstance(newfig, Figure) and not (newfig.held or newfig.gap):
             fields[tgt] = newfig
+
+    # ── Lever 2a: reconciliation-guided cash rebind (2026-09-11) ─────────────────────────────────
+    # A cash STOCK held as "wrong row / >3 orders from company scale" is the tiny bank-only sub-line
+    # that out-scored the true TOTAL on label keywords alone ('Closing Cash Balance including Fixed
+    # deposits' 2.23 Mn beats 'TOTAL CASH AND CASH EQUIVALENT' 86.33 Mn — the label LIES; only the
+    # data exposes it). Names propose the candidate rows; two INDEPENDENT identities on the SAME
+    # statement dispose (roll-forward opening+net=closing; Σ components = total). Rebind to the
+    # aggregate BOTH confirm, then run the full _emit_from_collapse gate. ADDITIVE + fail-closed:
+    # fires only on an already-held cash stock and needs ≥2 agreeing anchors, so it can only turn a
+    # HELD cash into an emit — every existing emit is byte-identical by construction.
+    cfig = fields.get('cash')
+    if isinstance(cfig, Figure) and cfig.held and concept_nature('cash') == 'stock':
+        rb = _reconciled_cash_rebind(rows, label_col, acts, stated_asof, require_bound)
+        if rb is not None:
+            rb_row, rb_col = rb
+            rb_label = str(rows[rb_row][label_col]).strip()
+            rb_prov = Provenance(source_file=label, content_fingerprint=ident.content_fp, sheet=sheet,
+                                 cell=_a1(label_col, rb_row), row_label=rb_label)
+            _cite_value_cells(rb_prov, rb_col, rb_row, colmap)
+            newfig = _emit_from_collapse('cash', rb_col, rb_prov, stmt_kind=stmt_kind, frame=frame,
+                                         rows=rows, ax=ax, label_col=label_col, ebitda_row=None,
+                                         anchor_cr=anchor_cr, rate_card=rate_card)
+            if isinstance(newfig, Figure) and not (newfig.held or newfig.gap):
+                fields['cash'] = newfig
 
     # ── grid-statement fallback (tight kind-gate, DETERMINISTIC-first, before the model) ──────────
     # A self-declared (or income-CONFIRMED) comparison-GRID is a legitimate source the is_time_series

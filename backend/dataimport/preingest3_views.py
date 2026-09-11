@@ -241,7 +241,7 @@ def _rate_card_for(summary, as_of):
 
 
 def _run_job(job_id):
-    from .preingest3 import pipeline, assemble
+    from .preingest3 import pipeline, master_workbook, rate_governor
 
     job = PreIngestJob.objects.get(pk=job_id)
     try:
@@ -261,15 +261,41 @@ def _run_job(job_id):
                 progress_pct=int(pct), progress_message=str(msg)[:500])
 
         base_currency = (job.summary or {}).get('base_currency') or None
+        # ── Model-ON (AI locator engaged) ──────────────────────────────────────────────────────────
+        # Production pre-ingestion runs the Gemini locator (Vertex ADC) so concepts the deterministic
+        # path cannot bind are LOCATED, re-read and verified — never a wrong number (doubt → HOLD).
+        # Reversible: PREINGEST3_MODEL_ON=false → deterministic-only (the prior behaviour).
+        # The client-side governor is set to the validated-safe cap (RPM=50 / burst=6) so a single
+        # import's parallel workers stay under the shared-pool wall (0 self-429s measured, ~2.6 min);
+        # max_workers overlaps the seconds-long locate waits. NOTE: this in-process governor covers
+        # only THIS run under the current one-import-at-a-time lock — before multi-tenant concurrency,
+        # promote it to the shared (Redis) governor at api.gemini_service.
+        _model_on = os.environ.get('PREINGEST3_MODEL_ON', 'true').lower() in ('true', '1', 'yes')
+        _mw = int(os.environ.get('PREINGEST3_MAX_WORKERS', '8'))
+        if _model_on:
+            rate_governor.configure(
+                rpm=int(os.environ.get('PREINGEST3_RPM', '50')),
+                tpm=int(os.environ.get('PREINGEST3_TPM', '150000')),
+                burst=int(os.environ.get('PREINGEST3_RPM_BURST', '6')))
         result = pipeline.run(files, as_of=as_of, org=str(job.organization_id),
                               rate_card=rc, alias_store=store, store_dir=_golden_store_base(),
-                              base_currency=base_currency, progress=_progress)
+                              base_currency=base_currency, progress=_progress,
+                              require_model=_model_on, max_workers=_mw)
 
-        wb = assemble.build(result.cir, rate_card=rc)
+        # DELIVERABLE = the consolidated Fund Master workbook — the full canonical sheet set
+        # (MASTER_INPUTS, LP_REGISTER, CAPITAL_CALLS, PORTFOLIO_MASTER, VALUATIONS, QUOTED_UNQUOTED,
+        # NAV_CALC, MOIC_TVPI_DPI, WATERFALL, SECTOR_ALLOCATION, EXITS, FEES, PORTFOLIO_KPI,
+        # DASHBOARD_BRIDGE, RECONCILIATION), every tab always present (a not-extracted domain is
+        # DISCLOSED, not dropped). The old download built the thin review-gate workbook (assemble.build) —
+        # a different, smaller artifact — so NAV / capital-calls / waterfall / dashboard were absent from
+        # the file even though the engine produced them. The product is the master workbook; build it here.
+        # save_reproducible keeps the file byte-identical for the same CIR (the determinism guarantee).
+        wb = master_workbook.build_master(result.cir, rate_card=rc,
+                                          files=[label for label, _ in files])
         rel = preingest_output_path(job, job.output_name or 'TFAI.xlsx')
         abs_path = os.path.join(settings.MEDIA_ROOT, rel)
         os.makedirs(os.path.dirname(abs_path), exist_ok=True)
-        wb.save(abs_path)
+        master_workbook.save_reproducible(wb, abs_path)
 
         payload = _serialize(result, as_of, rc)
         payload['as_of'] = as_of
@@ -293,9 +319,31 @@ def _run_job(job_id):
         job.save()
 
 
+def _worker_name(job_id):
+    return f'preingest3-{str(job_id)[:8]}'
+
+
+def _worker_alive(job_id):
+    """Is a run for this job actually executing RIGHT NOW in this process?
+
+    _run_job runs in a daemon thread named by _worker_name; while it is alive the job is
+    genuinely 'processing'. If the status is 'processing' but no such thread is alive, the
+    run is ORPHANED — the process was restarted (dev autoreload, deploy, crash) mid-run and
+    the daemon thread was killed before it could reach its completed/failed write. This is the
+    exact liveness signal for the current single-process threading model: it needs no timeout
+    heuristic and never mistakes a legitimately-long extraction for a dead one.
+
+    NOTE (multi-process future): when runs move off in-process threads onto a broker (Celery /
+    the shared governor), replace this with a broker liveness / heartbeat check — a thread in
+    THIS process is no longer the whole truth once work can execute in a sibling worker.
+    """
+    name = _worker_name(job_id)
+    return any(t.name == name and t.is_alive() for t in threading.enumerate())
+
+
 def _kick(job_id):
     threading.Thread(target=_run_job, args=(str(job_id),), daemon=True,
-                     name=f'preingest3-{str(job_id)[:8]}').start()
+                     name=_worker_name(job_id)).start()
 
 
 def _get_job(request, job_id):
@@ -381,7 +429,22 @@ def job_detail(request, job_id):
 def rerun(request, job_id):
     job = _get_job(request, job_id)
     if job.status == 'processing':
-        return Response({'detail': 'Job already running.'}, status=409)
+        # A re-run trigger must NEVER dead-end. Two very different situations wear the same
+        # 'processing' status, and the old flat 409 collapsed them into one unrecoverable error:
+        #   (1) LIVE  — a run really is executing (a cold model-on run takes many minutes, during
+        #       which a second Confirm / Delete / rate-card / base-currency trigger can arrive).
+        #       Starting a duplicate would double the Gemini spend and race the alias write-back,
+        #       so we DON'T re-kick; we return 202 so the client simply attaches and polls the run
+        #       already in flight — the outcome the user actually wanted.
+        #   (2) ORPHANED — the status is stuck at 'processing' but no worker is alive (the process
+        #       was restarted mid-run and the daemon thread died before writing completed/failed).
+        #       The old code refused this forever. We reclaim it and start a fresh run below.
+        if _worker_alive(job.id):
+            return Response({'job_id': str(job.id), 'status': 'processing',
+                             'detail': 'A run is already in progress — attach and watch it.'},
+                            status=202)
+        logger.warning('[preingest3] reclaiming orphaned processing job %s '
+                       '(no live worker — process restarted mid-run)', job.id)
     # U6: a re-run may supply/replace the Rate Card (the 'hold → supply rate → re-run'
     # loop). An explicit empty value clears it back to INR-only; absent leaves it as-is.
     if 'rate_card' in request.data:
@@ -455,16 +518,28 @@ def ratecard(request, job_id):
     report = (job.summary or {}).get('currency_report')
     uncovered = None if report is None else {u['currency'] for u in (report.get('uncovered') or [])}
     try:
-        card, noop, still = _accept_card(manual=manual, rows=rows, as_of=as_of, uncovered=uncovered)
+        card, noop, _still_this = _accept_card(manual=manual, rows=rows, as_of=as_of, uncovered=uncovered)
     except IntakeError as e:
         return Response({'detail': f'Rate card refused: {e}'}, status=400)
     summary = job.summary or {}
-    summary['rate_card'] = {'as_of': card.as_of, 'rates': card.disclosure_rows()}
+    # MERGE, never overwrite. The card is CUMULATIVE across the 'hold → supply rate → re-run' loop:
+    # a batch with two foreign currencies (e.g. SGD and MYR) is covered one currency per submission,
+    # so overwriting the stored card dropped the currency confirmed a moment ago and the run re-reported
+    # it as uncovered — an endless SGD↔MYR ping-pong that could NEVER cover both. Union the previously
+    # stored rows with this submission's, keyed by currency; a re-supplied currency updates its row.
+    prior_rows = (summary.get('rate_card') or {}).get('rates') or []
+    merged = {r['currency']: r for r in prior_rows}
+    for r in card.disclosure_rows():
+        merged[r['currency']] = r
+    merged_rows = [merged[k] for k in sorted(merged)]
+    summary['rate_card'] = {'as_of': card.as_of, 'rates': merged_rows}
     job.summary = summary
     job.save(update_fields=['summary'])
+    # still-uncovered is reported against the MERGED coverage, not just this one submission.
+    still = sorted((uncovered or set()) - set(merged))
     log_audit(request, 'update', 'preingest3_ratecard', str(job.id),
-              {'card_id': card.card_id, 'currencies': sorted(card.rates)})
-    return Response({'ok': True, 'card_id': card.card_id, 'rates': card.disclosure_rows(),
+              {'card_id': card.card_id, 'currencies': sorted(merged)})
+    return Response({'ok': True, 'card_id': card.card_id, 'rates': merged_rows,
                      'noop_currencies': noop, 'still_uncovered': still,
                      'detail': 'Rate card accepted. Re-run to apply.'})
 

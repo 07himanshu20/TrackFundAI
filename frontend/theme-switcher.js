@@ -32,28 +32,9 @@
   }
 
   function injectToggle() {
-    const navActions = document.querySelector('.nav-actions');
-    if (!navActions) return;
-
-    // Don't inject twice
-    if (navActions.querySelector('.theme-toggle')) return;
-
-    const btn = document.createElement('button');
-    btn.className = 'theme-toggle';
-    btn.title = 'Toggle light/dark theme';
-    btn.setAttribute('aria-label', 'Toggle theme');
-
-    const knob = document.createElement('span');
-    knob.className = 'theme-toggle-knob';
-    btn.appendChild(knob);
-
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      toggleTheme();
-    });
-
-    // Insert before the first child (before notification badge)
-    navActions.insertBefore(btn, navActions.firstChild);
+    // Global theme toggle button removed from the navbar (product decision, 2026-09).
+    // The saved-theme application above is intentionally kept so any previously chosen
+    // preference still renders; only the visible toggle button is no longer injected.
   }
 
   // Inject when DOM is ready

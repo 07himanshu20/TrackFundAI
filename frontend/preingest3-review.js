@@ -14,6 +14,7 @@
   let selected = [];      // client-side File[] before upload
   let jobId = null;
   let poll = null;
+  let running = false;    // a run is in flight — every re-run trigger is disabled while true
   let PROV = [];          // provenance objects, referenced by index (no attr-escaping hazard)
   let currentReport = null;  // U6 uncovered-currency report from the last run (drives the rate prompt)
   let currentBase = null;    // the fund base currency applied to the last run (persisted run input)
@@ -64,7 +65,19 @@
   };
 
   // ── async run polling ──
+  // A run is in flight from the moment we trigger/attach until a terminal status returns.
+  // setRunning() is the single source of truth: it flips the guard AND greys out every control
+  // that would fire another /run/ (Confirm, Delete, rate-card, base-currency), so a duplicate
+  // re-run can never be launched against a job that is already processing.
+  function setRunning(on) {
+    running = on;
+    document.querySelectorAll('[data-rerun-trigger]').forEach((el) => { el.disabled = on; });
+    const res = $('results');
+    if (res) res.classList.toggle('pi3-run-busy', on);
+  }
+
   function startPolling() {
+    setRunning(true);
     $('progress-panel').style.display = 'block';
     clearInterval(poll);
     poll = setInterval(refresh, 1500);
@@ -78,18 +91,27 @@
     $('progress-pct').textContent = (d.progress_pct || 0) + '%';
     $('progress-bar').style.width = (d.progress_pct || 0) + '%';
     $('progress-msg').textContent = d.progress_message || 'Working…';
+    running = !['completed', 'completed_with_errors', 'failed'].includes(d.status);
     renderServerFiles(d.input_files || []);
-    if (['completed', 'completed_with_errors', 'failed'].includes(d.status)) {
+    if (!running) {
       clearInterval(poll);
       $('progress-panel').style.display = 'none';
+      setRunning(false);
       if (d.status === 'failed') notify('Run failed: ' + (d.progress_message || ''), 'error');
       render(d);
     }
   }
 
+  // Never dead-ends: a fresh run starts (200) OR the server says one is already in flight
+  // (202) — both mean "watch this run", so we just poll. A 409 (or any 'already running')
+  // is likewise treated as attach-and-poll, not a hard error. The guard blocks re-entry.
   async function rerun() {
+    if (running) { startPolling(); return; }
     try { await Auth.apiPost(`${API}/${jobId}/run/`, {}); startPolling(); }
-    catch (e) { notify('Re-run failed: ' + e.message, 'error'); }
+    catch (e) {
+      if (String(e.message).includes('→ 409')) { startPolling(); return; }
+      notify('Re-run failed: ' + e.message, 'error');
+    }
   }
 
   // ── server-side file list (post-upload) with delete ──
@@ -98,7 +120,7 @@
       <div class="pi3-file-row">
         <span class="pi3-dot" style="background:var(--accent)"></span>
         <span class="nm">${esc(f.name)}</span>
-        <button class="v5-btn v5-btn-ghost" data-del="${esc(f.file_id)}">Delete</button>
+        <button class="v5-btn v5-btn-ghost" data-rerun-trigger data-del="${esc(f.file_id)}">Delete</button>
       </div>`).join('');
     $('btn-run').style.display = 'none';
     $('upload-hint').textContent = 'Drop more files above to start a new run.';
@@ -306,19 +328,21 @@
           <option value="">— choose company —</option>
           ${(rf.candidates || []).map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}
         </select>
-        <button class="v5-btn v5-btn-primary" data-cf="${i}">Confirm</button>
+        <button class="v5-btn v5-btn-primary" data-rerun-trigger data-cf="${i}">Confirm</button>
       </div>`).join('');
     $('review-list').querySelectorAll('[data-cf]').forEach((b) => b.onclick = () => confirmAlias(queue[+b.dataset.cf], +b.dataset.cf));
   }
 
   async function confirmAlias(rf, i) {
+    if (running) return;                          // a run is already in flight — ignore
     const entity_id = $('cand-' + i).value;      // the candidate.id (normalised anchor key)
     if (!entity_id) { notify('Pick a company first', 'error'); return; }
+    setRunning(true);                            // close the resolve round-trip against a double-click
     try {
       await Auth.apiPost(`${API}/${jobId}/resolve/`, { identifiers: rf.identifiers, entity_id });
       notify('Alias confirmed — re-running', 'success');
       rerun();
-    } catch (e) { notify('Resolve failed: ' + e.message, 'error'); }
+    } catch (e) { setRunning(false); notify('Resolve failed: ' + e.message, 'error'); }
   }
 
   function figCell(fj) {

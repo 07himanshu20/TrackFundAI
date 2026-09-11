@@ -58,6 +58,14 @@ _MONTHS = {m: i for i, m in enumerate(
 _MONTH_RE = re.compile(r'\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\b', re.I)
 _QUARTER_RE = re.compile(r'\b(?:q([1-4])|([1-4])\s*q)\b', re.I)
 _YTD_RE = re.compile(r'\b(ytd|year\s*to\s*date|cumulative|cumm?)\b', re.I)
+# Frame markers that OVERRIDE a bare month name (bug fix): a month inside a cumulative/quarter frame is
+# NOT a discrete month. `CY 2024 Act May` = calendar-year-to-date THROUGH May (a YTD), not May itself;
+# `For QE 30th June 2025` = the quarter ENDING June, not June the month. Without this, the cumulative
+# column takes the same (year, month) order as the real monthly column and collides with it. File-
+# agnostic — recognises the frame WORDS, never a position/company.
+_QTR_FRAME_RE = re.compile(r'\b(q\s*/?\s*e|quarter\s*end(?:ed|ing)?|quarter)\b', re.I)
+_CUM_FRAME_RE = re.compile(r'\b(cy|c\.y\.|calendar\s*year|fiscal\s*year|financial\s*year|ytd|'
+                           r'year\s*to\s*date|cumulative|cumm?|to\s*date)\b', re.I)
 _TOTAL_RE = re.compile(r'\b(grand\s+total|total|full\s*year|fy\s*total)\b', re.I)
 _FY_RE = re.compile(r'\bfy', re.I)                 # 'fy', 'fy25', 'fy2025' (attached digits ok)
 _YEAR4_RE = re.compile(r'20\d{2}')                 # a 4-digit year anywhere
@@ -71,6 +79,78 @@ class PeriodColumn:
     kind: str
     months: int = 0
     order: tuple = (0, 0)      # (year, month) for chronological sort
+    basis: str = ''            # reporting basis (Lever 1): '' | actual | budget | forecast | plan | revised | prior_year | variance
+
+
+# ── reporting BASIS — Lever 1: header-band parsing ────────────────────────────────────────────────
+# A statement column carries TWO independent header dimensions: the PERIOD (which month/quarter/year)
+# and the BASIS (is this the reported ACTUAL, or a Budget / Forecast / Plan / Revised / Prior-year
+# comparative). `parse_period_label` reads the period; `parse_basis` reads the basis from the SAME or an
+# ADJACENT header cell. PRINCIPLE (file-agnostic — a general reading skill, never an "if file==X" rule):
+# when two columns collide on the SAME period with different values, an EXPLICIT basis label breaks the
+# tie — the ACTUAL is the figure; Budget / Forecast / Plan / Revised / Prior-year yield to it. If the
+# basis cannot make the actual unique for a collision, we do NOT guess → the collision stands → hold.
+ACTUAL = 'actual'
+BUDGET = 'budget'
+FORECAST = 'forecast'
+PLAN = 'plan'
+PRIOR_YEAR = 'prior_year'
+VARIANCE = 'variance'
+AMBIGUOUS = 'ambiguous'   # a recognised basis whose relation to "the reported actual" is NOT settled
+# bases that CLEARLY YIELD to a same-period ACTUAL (a comparative the client did NOT report as actual).
+# Deliberately CONSERVATIVE — only the unambiguous comparatives. Anything else colliding with an actual
+# (VARIANCE, AMBIGUOUS, or an UNKNOWN '' label) leaves the collision UNRESOLVED → hold, never guess.
+_YIELD_BASES = frozenset({BUDGET, FORECAST, PLAN, PRIOR_YEAR})
+# ACTUAL is matched FIRST so 'Actual 2024' reads as ACTUAL (prior-year-ness is carried by the PERIOD,
+# not the basis). AMBIGUOUS covers revised/restated/provisional/unaudited/management/proforma/normalised
+# — these are NOT auto-yielded (a revised/restated ACTUAL may be the truer figure) and NOT auto-picked;
+# in a collision they force a HOLD, pending CA review / T2-T3. This vocabulary is DOMAIN KNOWLEDGE — it is
+# surfaced for the user (a CA) to confirm/extend; an unmatched label falls to '' which also holds.
+_BASIS_PATTERNS = [
+    (ACTUAL,     re.compile(r'\b(actuals?|actls?|act|reported)\b', re.I)),
+    (BUDGET,     re.compile(r'\b(budget(?:ed)?|bdgt|bgt|bud)\b', re.I)),
+    (FORECAST,   re.compile(r'\b(forecast(?:ed)?|projected|proj|fcst|fcast)\b', re.I)),
+    (PLAN,       re.compile(r'\b(planned|plan|pln)\b', re.I)),
+    (PRIOR_YEAR, re.compile(r'\b(prior\s*(?:year|yr)|previous\s*(?:year|yr)|last\s*year|py|ly)\b', re.I)),
+    (AMBIGUOUS,  re.compile(r'\b(revised|revision|rev\s*est|re-?est|restated|provisional|prov|'
+                            r'unaudited|management|mgmt|proforma|pro\s*forma|normalised|normalized)\b', re.I)),
+    (VARIANCE,   re.compile(r'(\b(variance|var|growth|change|movement|mom|yoy|vs)\b|%)', re.I)),
+]
+
+
+def parse_basis(text) -> str:
+    """Classify a header cell's reporting BASIS, or '' if it carries no basis token. File-agnostic:
+    recognises the WORDS (actual/budget/forecast/plan/prior-year/ambiguous/variance), never a position
+    or a company name. Returns '' for a plain period cell (e.g. 'Feb-25') so a period sub-row is never
+    mistaken for a basis row. Case/whitespace-insensitive; an unrecognised label → '' (which also holds
+    in a collision)."""
+    s = str(text or '')
+    if not s.strip():
+        return ''
+    for basis, pat in _BASIS_PATTERNS:
+        if pat.search(s):
+            return basis
+    return ''
+
+
+def _basis_resolved_cols(cols: List['PeriodColumn'], values: Dict[int, object], conflict: set):
+    """Lever 1 resolution — break a same-period value collision using an EXPLICIT basis label.
+    For each conflicting period: if exactly ONE colliding column is labelled ACTUAL and EVERY other
+    colliding column carrying a (non-zero) value is a KNOWN non-actual basis (Budget/Forecast/Plan/
+    Revised/Prior-year), the ACTUAL is the figure → drop the others for that period. If the basis
+    cannot make the actual unique (no explicit actual, ≥2 actuals, or ANY colliding column has an
+    UNKNOWN basis or is a variance column), the collision is left intact and the caller holds.
+    Returns the SAME list object when nothing is resolved (so callers detect 'no change' by identity)."""
+    drop = set()
+    for kind, o in conflict:
+        group = [c for c in cols
+                 if c.kind == kind and c.order == o and to_decimal(values.get(c.col)) not in (None,)
+                 and to_decimal(values.get(c.col)) != 0]
+        actuals = [c for c in group if c.basis == ACTUAL]
+        others = [c for c in group if c.basis != ACTUAL]
+        if len(actuals) == 1 and others and all(c.basis in _YIELD_BASES for c in others):
+            drop.update(c.col for c in others)
+    return [c for c in cols if c.col not in drop] if drop else cols
 
 
 def parse_period_label(text, col: int = 0) -> PeriodColumn:
@@ -95,6 +175,13 @@ def parse_period_label(text, col: int = 0) -> PeriodColumn:
     m = _MONTH_RE.search(low)
     if m:
         mon = _MONTHS[m.group(1).lower()[:3]]
+        # a month name inside a QUARTER frame ('QE June', 'quarter ended June') → the quarter ending
+        # that month; inside a CUMULATIVE/year frame ('CY 2024 … May') → year-to-date, NOT a discrete
+        # month. Only an EXPLICIT frame marker overrides; a plain 'May-24' stays a discrete month.
+        if _QTR_FRAME_RE.search(low):
+            return PeriodColumn(col, s, QUARTER, 3, (_year_of(low), mon))
+        if _CUM_FRAME_RE.search(low):
+            return PeriodColumn(col, s, YTD, 0, (_year_of(low), 12))
         return PeriodColumn(col, s, MONTH, 1, (_year_of(low), mon))
     if _FY_RE.search(low) or re.fullmatch(r'20\d{2}(\s*-\s*\d{2,4})?', low) or re.fullmatch(r"'?\d{2}", low):
         return PeriodColumn(col, s, YEAR, 12, (_year_of(low), 12))
@@ -160,6 +247,19 @@ def detect_period_axis(rows, r_start: int = 0, r_end: int = None, scan: int = 60
     distinct = len({(pc.kind, pc.order) for pc in best_cols})
     distinct_ratio = distinct / len(best_cols)
     is_grid = distinct_ratio < 0.6
+    # Lever 1 (increment 1a) — read each period column's reporting BASIS from its OWN header cell first
+    # (a combined 'May-25 Actual' cell), then from the BASIS sub-row directly beneath the period row (a
+    # 'period' row over an 'Actual│Budget' row). File-agnostic; parse_basis returns '' for a plain
+    # period/date/number, so a second period row or a data row is never mistaken for a basis row. A
+    # merged group-BANNER above the period row ('Budget 2025' spanning columns) is increment 1b.
+    sub = best_row + 1
+    sub_row = rows[sub] if 0 <= sub < n else None
+    for pc in best_cols:
+        b = parse_basis(pc.label)
+        if not b and sub_row is not None and pc.col < len(sub_row):
+            b = parse_basis(sub_row[pc.col])
+        if b:
+            pc.basis = b
     groups: Dict[tuple, List[PeriodColumn]] = {}
     for pc in best_cols:                              # period order → its columns (left→right), for the selector
         groups.setdefault((pc.kind, pc.order), []).append(pc)
@@ -216,12 +316,17 @@ def _conflicting_periods(cols: List[PeriodColumn], values: Dict[int, object]) ->
     same month with NO banner to say which is actual. There is no deterministic evidence to pick one,
     so the emit must HOLD — guessing risks shipping budget as actual (the worst failure class). A period
     with a value and its zero/blank duplicate is NOT a conflict (that resolves to the non-empty one)."""
+    # Kind-aware (bug fix): a collision is ≥2 columns of the SAME KIND at the same order carrying
+    # different non-zero values (two rival MONTH actuals, two rival YTDs …). A MONTH and a QUARTER/YTD
+    # at the same order are DIFFERENT granularities (a month vs a cumulative that ends in/contains it),
+    # never rival actuals — comparing their values is meaningless, so it is NOT a plan/actual overlap.
+    # Returns a set of (kind, order) keys; callers test (c.kind, c.order).
     by = {}
     for c in cols:
         v = to_decimal(values.get(c.col))
         if v is not None and v != 0:
-            by.setdefault(c.order, set()).add(v)
-    return {o for o, vs in by.items() if len(vs) > 1}
+            by.setdefault((c.kind, c.order), set()).add(v)
+    return {ko for ko, vs in by.items() if len(vs) > 1}
 
 
 def collapse(concept: str, nature: str, columns: List[PeriodColumn],
@@ -281,12 +386,21 @@ def collapse(concept: str, nature: str, columns: List[PeriodColumn],
     # Unlabeled plan/actual overlap (D3, guard A): fail-closed. Scoped to the emit-relevant periods so
     # a benign old conflict far from the figure never causes a false hold.
     conflict = _conflicting_periods(cols, values)
+    # Lever 1 (header-band parsing): a collision carrying an EXPLICIT basis label (Actual vs Budget/
+    # Forecast/Plan/Revised/Prior-year) is not unlabeled — resolve it to the ACTUAL rather than hold.
+    # This runs ONLY when a conflict already exists, so a currently-emitted (non-conflicting) figure is
+    # untouched: byte-identical by construction. Unresolved collisions fall through to the holds below.
+    if conflict:
+        reduced = _basis_resolved_cols(cols, values, conflict)
+        if reduced is not cols:
+            cols = reduced
+            conflict = _conflicting_periods(cols, values)
 
     # ── STOCK: always the latest balance, never summed ──────────────────
     if nature == STOCK:
         series = [c for c in cols if c.kind in (MONTH, QUARTER, YEAR)]
         pick = max(series or cols, key=lambda c: c.order)
-        if pick.order in conflict:
+        if (pick.kind, pick.order) in conflict:
             return Collapsed(None, 'point_in_time', 0, ESCALATE, True, flags=['unlabeled_period_overlap'],
                              reason=(f'as-of {pick.label!r} has ≥2 differing values with no disambiguating '
                                      f'label (unlabeled plan/actual overlap) — cannot pick, hold'))
@@ -296,7 +410,7 @@ def collapse(concept: str, nature: str, columns: List[PeriodColumn],
     # ── FLOW ────────────────────────────────────────────────────────────
     series = sorted([c for c in cols if c.kind in (MONTH, QUARTER)], key=lambda c: c.order)
     totals = [c for c in cols if c.kind in (TOTAL, YTD, YEAR)]
-    wc = conflict & {c.order for c in series}
+    wc = conflict & {(c.kind, c.order) for c in series}
     if wc:                                       # a summed FLOW period carries conflicting values → hold
         return Collapsed(None, 'point_in_time', 0, ESCALATE, True, flags=['unlabeled_period_overlap'],
                          reason=(f'{len(wc)} period(s) carry ≥2 differing values with no disambiguating '

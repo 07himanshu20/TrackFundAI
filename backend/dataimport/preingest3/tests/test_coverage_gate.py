@@ -79,6 +79,13 @@ GT = {
     ('CPC', 'ebitda'): '15.6492',
     ('CPC', 'revenue'): '111.4026',         # fork-b re-source: PL Summary!F8 'Total Revenue' YTD (₹M);
                                             # corroborated by 'PL schedule' (same 1114.03) → own statement
+    ('CPC', 'cash'): '8.6332',              # Lever 2a recovery: 'CFS EL'!D47 'TOTAL CASH AND CASH
+                                            # EQUIVALENT' = 86.33205 Mn. The primary bind was D45
+                                            # 'Closing Cash Balance including Fixed deposits' = 2.229 Mn
+                                            # (bank-only sub-line, held >3 orders vs anchor). Rebound to
+                                            # the total confirmed by BOTH the subtotal (D45 2.229 + D46
+                                            # 84.103 = 86.332) AND the roll-forward (D40 62.671 + D39
+                                            # 23.663 = 86.333); cross-ties penny-perfect to BS!E39 86.33205
     ('Aliste', 'revenue'): '5.3052',        # R1a recovery: live 'P&L' row 15 'Revenue From Operation',
                                             # FYTD Apr-25..Feb-26 (11 months, Mar-26=0 placeholder) =
                                             # ₹53,052,306 = 5.3052 Cr; corroborated TO THE RUPEE by the

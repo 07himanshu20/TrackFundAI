@@ -37,6 +37,10 @@
                        padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-sm);
                        margin-bottom: 8px; background: var(--card); }
     .pi3-muted { color: var(--text3); font-size: 11px; }
+    /* While a run is in flight every re-run trigger is disabled; dim the review controls and block
+       stray clicks so a duplicate /run/ can never be fired against a job already processing. */
+    .pi3-run-busy .pi3-resolve-row, .pi3-run-busy #files-list { opacity: .55; }
+    .pi3-run-busy [data-rerun-trigger] { pointer-events: none; cursor: not-allowed; }
     .pi3-section-title { font-size: 12px; font-weight: 700; color: var(--white); margin: 18px 0 8px; }
     /* U6 currency-coverage prompt */
     .pi3-ccy-intro { font-size: 12px; color: var(--text2); margin-bottom: 12px; line-height: 1.5; }
