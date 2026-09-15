@@ -358,9 +358,15 @@ def resolve(*, value, declared_unit=None, declared_ccy=None, header_hints=None,
     ccy_declared = (declared_ccy or '').strip().upper() or None
     ccy_hint = _first_ccy(header_hints) or _first_ccy(sheet_hints)
     ccy_geo = expected_currency(domicile)
-    currency = ccy_declared or ccy_hint or ccy_geo or 'INR'
-    if not ccy_declared and not ccy_hint and not ccy_geo:
-        flags.append('currency_assumed_inr')
+    currency = ccy_declared or ccy_hint or ccy_geo
+    if not currency:
+        # config-B: NO positive currency evidence (no declared/header token, no known domicile).
+        # Fail-closed — NEVER silently assume INR (the untokened-foreign 15-20× misread door). This
+        # mirrors the single currency choke resolve_currency() so this (dead-today) per-figure resolver
+        # cannot re-introduce the hole on any future revival; its consumer holds on escalate.
+        return UnitResolution('absolute', None, escalate=True,
+                              flags=flags + ['currency_ambiguous_no_evidence'],
+                              reason='no positive currency evidence (no token, no known domicile) — hold')
     # geography cross-check (soft flag, not escalate — a co may report in USD)
     if ccy_geo and currency != ccy_geo:
         flags.append(f'currency_{currency}_vs_domicile_{ccy_geo}')
