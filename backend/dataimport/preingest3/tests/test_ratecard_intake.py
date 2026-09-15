@@ -19,7 +19,7 @@ import pytest
 from backend.dataimport.preingest3 import units
 from backend.dataimport.preingest3.ratecard import default_inr_card
 from backend.dataimport.preingest3.ratecard_intake import (
-    IntakeError, card_from_manual, card_from_schedule, noop_currencies)
+    IntakeError, card_from_manual, card_from_schedule, noop_currencies, _decimal_shift_k)
 
 AS_OF = '2026-06-30'
 
@@ -81,6 +81,59 @@ def test_all_or_nothing_one_bad_entry_refuses_the_WHOLE_card():
 def test_empty_intake_is_refused():
     with pytest.raises(IntakeError):
         card_from_manual([], as_of=AS_OF)
+
+
+# ── rate-entry sanity band (#2): the fat-finger decimal-shift guard ───────────────────────────────────
+# A typo band is a COMPARISON against the currency's OWN prior rate (reference-only, never a conversion
+# input). A near-power-of-ten shift is a decimal-point slip → REFUSE fail-closed; a genuine % move passes;
+# NO reference (first upload) → cannot fire (disclosed unverified at the API layer, never faked); an
+# explicit human confirm overrides. Reddening BOTH directions + the pure fingerprint.
+@pytest.mark.parametrize('new,ref,k', [
+    ('233.8', '23.38', 1),      # ×10 over-type — the canonical 23.38 vs 233.8 fat-finger
+    ('2.338', '23.38', -1),     # ÷10 under-type
+    ('2338', '23.38', 2),       # ×100
+    ('26.0', '23.38', None),    # a real ~11% FX move — NOT a power of ten
+    ('14.0', '18.6', None),     # a real ~25% move — NOT a power of ten
+    ('250.0', '23.0', 1),       # ×10 typo even with ~9% underlying drift (intended ~25) — still caught
+    # tightness (must-not-misfire): genuine FX volatility is never a near-exact 10× — even LARGE real moves
+    # must pass. The band flags only a ratio in ~[7.08×, 14.1×] (|log10 − 1| ≤ 0.15), so:
+    ('27.9', '18.6', None),     # a big but real 1.5× move — passes
+    ('37.2', '18.6', None),     # a 2× move (doubling) — passes
+    ('93.0', '18.6', None),     # even a 5× move (log 0.70, nearest k=1 off by 0.30) — still passes
+])
+def test_decimal_shift_fingerprint(new, ref, k):
+    assert _decimal_shift_k(new, ref) == k
+
+
+def test_decimal_shift_needs_a_reference():
+    assert _decimal_shift_k('233.8', None) is None      # first upload — cannot fire, never faked
+
+
+def test_band_refuses_a_decimal_shift_typo_against_the_prior_rate():
+    # MUST-HANDLE: 233.8 entered where the currency's prior rate was 23.38 → ×10 slip → refused whole.
+    with pytest.raises(IntakeError):
+        card_from_manual([_entry(rate='233.8', reference_rate='23.38')], as_of=AS_OF)
+
+
+def test_band_passes_a_genuine_fx_move():
+    # MUST-NOT-MISFIRE: a real ±% move vs the prior rate is not a power of ten → builds normally.
+    card = card_from_manual([_entry(rate='19.2', reference_rate='18.6')], as_of=AS_OF)
+    assert str(card.rates['MYR'].inr_per_unit) == '19.2'
+
+
+def test_band_cannot_fire_without_a_reference():
+    # first upload for the currency — no prior rate → the band does not block (the disclosed-unverified
+    # path is handled at the API layer), never a faked band or a per-currency magic range.
+    card = card_from_manual([_entry(rate='233.8')], as_of=AS_OF)   # no reference_rate supplied
+    assert str(card.rates['MYR'].inr_per_unit) == '233.8'
+
+
+def test_explicit_confirm_overrides_the_band_and_is_load_bearing():
+    # human-in-loop: an unusual (power-of-ten) rate the user ATTESTS is intended builds — proving the band
+    # is a confirm-gate, not a hard block. This is also the reddening neutralizer: WITHOUT 'confirmed' the
+    # same entry is refused (test_band_refuses_... above), so the band is load-bearing, not incidental.
+    card = card_from_manual([_entry(rate='233.8', reference_rate='23.38', confirmed=True)], as_of=AS_OF)
+    assert str(card.rates['MYR'].inr_per_unit) == '233.8'
 
 
 # ── validity ≠ actionability: a VALID rate the run does not need is ACCEPTED-and-noted, not refused ────

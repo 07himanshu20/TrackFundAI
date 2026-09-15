@@ -240,6 +240,65 @@ def _rate_card_for(summary, as_of):
     return default_inr_card(as_of)
 
 
+def _prior_rate_for(job, currency):
+    """The currency's last-entered rate available to this org, for the sanity-band REFERENCE only — never
+    a conversion input (the operative rate is entered fresh each upload). Per-currency lookback: THIS job's
+    already-stored card first (an in-loop correction/typo), then the most recent OTHER job of the same org
+    that carried the currency. None if never seen (a first upload → the band cannot check). Self-healing —
+    it tracks whatever the last accepted rate was, org-scoped."""
+    from .preingest3.quantity import to_decimal
+
+    def _rate_in(summary):
+        for r in ((summary or {}).get('rate_card') or {}).get('rates', []):
+            if r.get('currency') == currency:
+                return to_decimal(r.get('inr_per_unit', r.get('rate')))
+        return None
+
+    here = _rate_in(job.summary)
+    if here is not None:
+        return here
+    prior = (PreIngestJob.objects.filter(organization=job.organization)
+             .exclude(id=job.id).order_by('-created_at')[:100])          # bounded org-scoped lookback
+    for pj in prior:
+        r = _rate_in(pj.summary)
+        if r is not None:
+            return r
+    return None
+
+
+def _band_partition(job, manual):
+    """Rate-entry sanity band (#2). Split manually-typed rates into (accepted, suspect, unverified) by the
+    fat-finger decimal-shift fingerprint against each currency's OWN prior rate (_prior_rate_for):
+      • suspect  — a power-of-ten shift vs the prior rate, NOT confirmed → HELD for review ('confirm or
+                   re-enter'); dropped from the card so the currency holds via the existing uniform-currency
+                   (FX_UNCOVERED) engine (no new hold type).
+      • unverified — a first upload (no prior to check) → ACCEPTED (converts) + a soft disclosure; a confirm
+                   with nothing to check is theatre, so it is never forced.
+      • accepted — a genuine ±% move, a first upload, or an explicit confirmed:true override.
+    A malformed entry (unparseable currency/rate) is left in `accepted` so the intake VALIDITY gate still
+    refuses it (the band judges typo-plausibility, not validity)."""
+    from .preingest3.ratecard_intake import _foreign_of_pair, _decimal_shift_k
+    from .preingest3.quantity import to_decimal
+    accepted, suspect, unverified = [], [], []
+    for e in manual:
+        ccy = _foreign_of_pair(e.get('currency', e.get('pair', '')))
+        rate = to_decimal(e.get('inr_per_unit', e.get('rate')))
+        ref = _prior_rate_for(job, ccy) if ccy else None
+        k = _decimal_shift_k(rate, ref) if (ccy and rate is not None) else None
+        if k is not None and not e.get('confirmed'):
+            fold = ('×' if k > 0 else '÷') + f'10^{abs(k)}'
+            suspect.append({'currency': ccy, 'rate': str(rate), 'prior_rate': str(ref), 'shift': fold,
+                            'reason': f'{ccy} rate {rate} looks like a decimal-shift typo of the prior rate '
+                                      f'{ref} ({fold}) — confirm or re-enter'})
+        else:
+            accepted.append(e)
+            if ccy and rate is not None and ref is None:
+                unverified.append({'currency': ccy, 'rate': str(rate),
+                                   'reason': f'{ccy} rate accepted — no prior rate to sanity-check against '
+                                             '(first upload for this currency; unverified)'})
+    return accepted, suspect, unverified
+
+
 def _run_job(job_id):
     from .preingest3 import pipeline, master_workbook, rate_governor
 
@@ -517,8 +576,18 @@ def ratecard(request, job_id):
     # disclosure; None when the job has not reported yet (no report to disclose against).
     report = (job.summary or {}).get('currency_report')
     uncovered = None if report is None else {u['currency'] for u in (report.get('uncovered') or [])}
+    # Rate-entry sanity band (#2): hold a suspected decimal-shift typo for review rather than converting a
+    # ~10× wrong rate (which slips under the downstream anchor-plausibility backstop). Suspect rates drop
+    # off the card so the currency holds via the existing uniform-currency engine; first uploads convert
+    # with a soft 'unverified' note. Schedule/upload paths (rows) are not manually typed → no band.
+    band_suspect, band_unverified = [], []
+    if manual:
+        manual, band_suspect, band_unverified = _band_partition(job, list(manual))
     try:
-        card, noop, _still_this = _accept_card(manual=manual, rows=rows, as_of=as_of, uncovered=uncovered)
+        if manual or rows:
+            card, noop, _still_this = _accept_card(manual=manual, rows=rows, as_of=as_of, uncovered=uncovered)
+        else:
+            card, noop = None, []                     # every supplied rate this submission is held for review
     except IntakeError as e:
         return Response({'detail': f'Rate card refused: {e}'}, status=400)
     summary = job.summary or {}
@@ -529,19 +598,36 @@ def ratecard(request, job_id):
     # stored rows with this submission's, keyed by currency; a re-supplied currency updates its row.
     prior_rows = (summary.get('rate_card') or {}).get('rates') or []
     merged = {r['currency']: r for r in prior_rows}
-    for r in card.disclosure_rows():
+    accepted_rows = card.disclosure_rows() if card is not None else []
+    for r in accepted_rows:
         merged[r['currency']] = r
     merged_rows = [merged[k] for k in sorted(merged)]
-    summary['rate_card'] = {'as_of': card.as_of, 'rates': merged_rows}
+    summary['rate_card'] = {'as_of': (card.as_of if card is not None else as_of), 'rates': merged_rows}
+    # Persist the band review, cumulative across the loop and keyed by currency, so the review-gate can show
+    # 'confirm or re-enter' (suspect) and the soft 'no prior to check' note (unverified). A currency now on
+    # the card (corrected or confirmed) clears from the suspect list.
+    review = summary.get('rate_card_review') or {}
+    suspect = {s['currency']: s for s in review.get('suspect', [])}
+    unverified = {u['currency']: u for u in review.get('unverified', [])}
+    suspect.update({s['currency']: s for s in band_suspect})
+    unverified.update({u['currency']: u for u in band_unverified})
+    for ccy in {r['currency'] for r in accepted_rows}:
+        suspect.pop(ccy, None)
+    summary['rate_card_review'] = {'suspect': [suspect[k] for k in sorted(suspect)],
+                                   'unverified': [unverified[k] for k in sorted(unverified)]}
     job.summary = summary
     job.save(update_fields=['summary'])
     # still-uncovered is reported against the MERGED coverage, not just this one submission.
     still = sorted((uncovered or set()) - set(merged))
     log_audit(request, 'update', 'preingest3_ratecard', str(job.id),
-              {'card_id': card.card_id, 'currencies': sorted(merged)})
-    return Response({'ok': True, 'card_id': card.card_id, 'rates': merged_rows,
-                     'noop_currencies': noop, 'still_uncovered': still,
-                     'detail': 'Rate card accepted. Re-run to apply.'})
+              {'card_id': (card.card_id if card else None), 'currencies': sorted(merged),
+               'held_for_review': [s['currency'] for s in band_suspect]})
+    return Response({'ok': True, 'card_id': (card.card_id if card is not None else None),
+                     'rates': merged_rows, 'noop_currencies': noop, 'still_uncovered': still,
+                     'suspect_rates': summary['rate_card_review']['suspect'],
+                     'unverified_rates': summary['rate_card_review']['unverified'],
+                     'detail': ('Rate card accepted. Re-run to apply.' if card is not None else
+                                'Supplied rate(s) held for review — confirm or re-enter.')})
 
 
 @api_view(['POST'])

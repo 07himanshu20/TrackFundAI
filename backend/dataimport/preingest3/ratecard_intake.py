@@ -24,6 +24,7 @@ whole FX card when only one pair is uncovered. So actionability never refuses a 
 """
 from __future__ import annotations
 
+import math
 import re
 from typing import Iterable, List, Optional
 
@@ -33,6 +34,31 @@ from .ratecard import BASE_CURRENCY, RateCard
 
 _CCY_RE = re.compile(r'^[A-Z]{3}$')
 _PAIR_SPLIT = re.compile(r'[\/\-\s→>|,:]+')
+
+# ── fat-finger decimal-shift guard (the rate-entry sanity band) ────────────────────────────────────────
+# A typo band is a COMPARISON — 23.38 and 233.8 are both valid-looking, only a REFERENCE distinguishes
+# them. The reference is the currency's OWN prior entered rate (supplied by the caller as `reference_rate`;
+# used for the check ONLY, never for conversion — the operative rate is still entered fresh each upload).
+# The fingerprint is a near-exact power-of-ten shift (a decimal-point slip is ×/÷10^k), which a genuine FX
+# move between uploads (±single-to-tens-of-percent) essentially never is. This is currency-agnostic — the
+# only premise is 'a clean 10^k jump between a currency's own consecutive rates is a decimal slip, a %
+# move is real FX', true for EVERY currency — NOT a per-currency plausible-range table (a rule-#0 patch).
+_DECIMAL_SHIFT_LOG_TOL = 0.15   # within ~×1.41 of a clean 10^k fold reads as a decimal slip, not FX drift:
+                                # separates the decimal-shift CLASS from real drift (a 30% move → k=0; a
+                                # 10× typo even under heavy drift → k=±1). Universal, not per-currency.
+
+
+def _decimal_shift_k(new_rate, reference_rate) -> Optional[int]:
+    """The fat-finger fingerprint: if new/reference is within tolerance of a NON-ZERO power of ten, return
+    that integer k (+1 = a 10× over-type like 233.8 for 23.38; -1 = a 10× under-type). Else None (no
+    reference, a non-power-of-ten move = real FX drift, or an unusable input). Reference-only — the prior
+    rate is never a conversion input."""
+    nr, rr = to_decimal(new_rate), to_decimal(reference_rate)
+    if nr is None or rr is None or nr <= 0 or rr <= 0:
+        return None
+    log = math.log10(float(nr) / float(rr))
+    k = round(log)
+    return k if (k != 0 and abs(log - k) <= _DECIMAL_SHIFT_LOG_TOL) else None
 
 # schedule column synonyms (matched via the CENTRAL lexicon matcher — no hand-rolled substring logic)
 _COL_SYNS = {
@@ -79,6 +105,19 @@ def _validate_entry(entry: dict, *, as_of) -> dict:
     if rate is None or rate <= 0:
         raise IntakeError(f'{ccy}: rate must be a positive number, got '
                           f'{entry.get("inr_per_unit", entry.get("rate"))!r}')
+
+    # Rate-entry sanity band: compare against the currency's OWN prior rate (reference-only). A near-exact
+    # power-of-ten shift is a decimal-point typo (a genuine FX move never is) → REFUSE fail-closed, unless
+    # the human explicitly confirms the unusual rate. With NO reference (first upload for this currency)
+    # the band cannot fire — it is disclosed as unverified (rate_verified=False), never faked or blocked.
+    reference = entry.get('reference_rate')
+    k = _decimal_shift_k(rate, reference)
+    if k is not None and not entry.get('confirmed'):
+        fold = ('×' if k > 0 else '÷') + f'10^{abs(k)}'
+        raise IntakeError(
+            f'{ccy}: rate {rate} looks like a decimal-shift typo of its prior rate {reference} ({fold}) — '
+            f'a genuine FX move is never a clean power of ten. Re-enter the correct rate, or set '
+            f"'confirmed': true to attest this unusual rate is intended.")
 
     date = str(entry.get('rate_date') or entry.get('date') or '').strip()
     if date != str(as_of):
