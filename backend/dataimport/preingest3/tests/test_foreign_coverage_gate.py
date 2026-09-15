@@ -28,8 +28,8 @@ THE LOCK + THE DISCIPLINE
 REUSABLE BY CONSTRUCTION (no per-currency code, ever)
     A new currency/country is DATA: add its rate to RATES, its review-gate confirmation to ALIASES (if
     its file needs disambiguation), and its traced values to FOREIGN_GT. No Singapore/Malaysia branch
-    exists or may be written. The MYR block below is left staged (not yet locked) with the exact reason
-    each MYR cell is not yet a verified emit — see MYR_STATUS.
+    exists or may be written. MYR is now ACTIVATED (#4): Analisa's three cells are traced + locked in
+    FOREIGN_GT; Chemopharm still HOLDS (Lever 1b), its reasons kept in MYR_STATUS.
 
 SLOW: runs the whole corpus through the real pipeline. Marked `slow`; skipped if fixtures absent.
 """
@@ -62,12 +62,11 @@ MONEY = ('revenue', 'ebitda', 'cash')
 # rate per currency per upload, never a stored default. Add a currency by adding a row here.
 RATES = [
     {'currency': 'SGD', 'inr_per_unit': '75.43', 'source': 'client-supplied 2026 upload'},
-    # MYR (23.38) is STAGED, not yet on the card: adding it makes Analisa emit an UNVERIFIED value
-    # (period-basis question — see MYR_STATUS), which the DISCIPLINE test would correctly red-flag. It
-    # is activated by (1) uncommenting the row below AND (2) adding Analisa's traced values to
-    # FOREIGN_GT (Chemopharm still holds until Lever 1b). Until then the MYR files HOLD fail-closed
-    # (uncovered currency) — safe, and no MYR number ships unchecked.
-    # {'currency': 'MYR', 'inr_per_unit': '23.38', 'source': 'client-supplied 2026 upload'},
+    # MYR ACTIVATED (foreign-safety #4): Analisa's revenue/ebitda/cash are now traced + locked in
+    # FOREIGN_GT below (the ~9× 'period-basis question' was RESOLVED in #3 — the emit is the TRUE labelled
+    # 5-month YTD, not the stale annual). Chemopharm still HOLDS (period ambiguity / Lever 1b), so no
+    # Chemopharm MYR number ships. Per the per-upload FX rule: one rate per currency per upload, dated.
+    {'currency': 'MYR', 'inr_per_unit': '23.38', 'source': 'client-supplied 2026 upload'},
 ]
 
 # Review-gate human confirmations (label → anchor key). Exactly what a reviewer resolves once. A file
@@ -85,17 +84,22 @@ FOREIGN_GT = {
                                                      # months dropped) — NOT the stale Jan column (3.20M).
     ('Chemoscience Pte Ltd', 'revenue'): '30.5607',  # 'ANA & LS' statement, SGD-native × 75.43
     ('Chemoscience Pte Ltd', 'ebitda'): '11.8477',   # 'ANA & LS' statement, SGD-native × 75.43
-    # MYR block — staged, NOT yet locked (see MYR_STATUS). Add here once traced/fixed.
+    # Analisa Resources Sdn Bhd (Malaysia, MYR @ 23.38), as-of May-2025 (file period) — #4 lock.
+    # Traced to raw cell × rate; revenue/ebitda cross-checked to the Summary '05 P&L (2)' YTD column.
+    ('Analisa Resources Sdn Bhd', 'revenue'): '8.6368',   # PL rectify(Normalised)!H3 = 3,694,112.18 MYR
+                                                          # (YTD CY25, 5mo, = Summary!H6) × 23.38 = 8.63683.
+                                                          # #3-resolved labelled 5-month YTD (basis=YTD·5mo),
+                                                          # NOT the stale annual — vintage guard demotes it.
+    ('Analisa Resources Sdn Bhd', 'ebitda'): '0.9194',    # PL rectify(Normalised)!H18 = 393,262.32 MYR
+                                                          # (Normalized EBITDA YTD, = Summary!H13) × 23.38.
+    ('Analisa Resources Sdn Bhd', 'cash'): '16.1842',     # 08 BS!AE2 = 6,922,257.27 MYR (May-2025 cash;
+                                                          # AE1=2025-05-31, future months empty → Lever-4
+                                                          # keeps May) × 23.38 = 16.18424.
 }
 
-# Why each MYR cell is not yet a verified emit (kept as an explicit ledger, not a silent gap):
+# Why each REMAINING MYR cell is not a verified emit (kept as an explicit ledger, not a silent gap).
+# Analisa's three cells were LOCKED in #4 (traced into FOREIGN_GT above); Chemopharm still HOLDS.
 MYR_STATUS = {
-    ('Analisa Resources Sdn Bhd', 'revenue'): 'EMITS under MYR card but UNVERIFIED — emit ≈3.69M MYR '
-        'is not the Σseries 33.46M MYR (≈9× gap): a YTD-vs-month period-basis question (Clientell '
-        'class). Trace to raw cell + resolve period basis before locking.',
-    ('Analisa Resources Sdn Bhd', 'ebitda'): 'EMITS under MYR card but UNVERIFIED — same period-basis '
-        'question as revenue.',
-    ('Analisa Resources Sdn Bhd', 'cash'): 'EMITS under MYR card (16.1842) — UNVERIFIED; trace BS as-of.',
     ('Chemopharm Sdn Bhd', 'revenue'): 'HELD (fail-closed) — 5 periods carry ≥2 differing values with no '
         'disambiguator (needs the CPM banner / Lever 1b + period basis). Not a currency hold.',
     ('Chemopharm Sdn Bhd', 'ebitda'): 'HELD — same period ambiguity as revenue.',
