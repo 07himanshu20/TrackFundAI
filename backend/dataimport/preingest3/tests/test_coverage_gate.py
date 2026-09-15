@@ -75,6 +75,9 @@ GT = {
     ('Agnikul', 'cash'): '117.6646',
     ('Agnikul', 'headcount'): '299',        # Feb'26 period-end (B29); NOT an average/sum
     ('InstaAstro', 'ebitda'): '-8.8686', ('InstaAstro', 'cash'): '17.7422',
+    ('InstaAstro', 'headcount'): '148',     # Lever 3 ②: 'Team Costs'!BG68 'Total Head Count', Feb-26
+                                            # period-end (135→139→145→148 monotonic — a stock, latest col,
+                                            # not a sum); recovered by the 'head count' lexicon synonym
     ('LDC', 'revenue'): '316.4753', ('LDC', 'cash'): '241.9993', ('LDC', 'headcount'): '309',
     ('CPC', 'ebitda'): '15.6492',
     ('CPC', 'revenue'): '111.4026',         # fork-b re-source: PL Summary!F8 'Total Revenue' YTD (₹M);
@@ -95,6 +98,9 @@ GT = {
                                             # near-zero); corroborated TO THE RUPEE by the sheet's OWN 'YTD'
                                             # column (P44 = −117,057.56). Was FALSELY held by the figure-
                                             # anchor magnitude guard (profit legitimately << valuation scale)
+    ('Aliste', 'headcount'): '111',         # Lever 3 ②: 'Team Cost Updated'!P80 'Total Staff', Feb-26
+                                            # period-end (88→88→96→111 monotonic — a stock, latest col, not
+                                            # a sum); recovered by the 'total staff' lexicon synonym + carrier
     ('Clientell', 'cash'): '9.3253',        # fork-b re-source: Analysis!B19 'Cash Balance' Feb-26 (₹Lakh),
                                             # corroborated by the ~₹9.2Cr summary cell in the same column
     ('Clientell', 'headcount'): '19',       # Feb'26 period-end (AM80); NOT an average/sum

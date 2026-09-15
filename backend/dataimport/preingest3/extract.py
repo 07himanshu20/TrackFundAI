@@ -515,6 +515,109 @@ def _reconciled_cash_rebind(rows, label_col, acts, as_of, require_bound):
     return None
 
 
+# A cross-statement tie is a FIRST-CLASS anchor only when it is penny-perfect (§4): two independent
+# statements stating the same concept to the paisa is not chance. Tight tolerance so a scale/wrong-row
+# figure (orders apart) or a coincidental near-match never qualifies as a tie.
+_CROSS_TIE_TOL = Decimal('0.0005')          # 0.05% — rounding between statements, never a scale gap
+
+
+def _cross_statement_tie_rebind(concept, prof, primary_sheet, primary_rows, primary_lc, primary_ax,
+                                *, ident, label, geo_ccy, inr_mentioned, anchor_cr, rate_card,
+                                as_of, require_bound, base_currency) -> Optional[Figure]:
+    """§4 cross-statement PENNY-TIE anchor for a held STOCK. A single figure from an INDEPENDENT
+    statement is authoritative iff it penny-matches (raw) a location on the primary sheet's OWN
+    concept row — the tie that promotes one cross-sheet value to a confirmed emit (balance-sheet cash
+    == cash-flow closing, to the paisa). It re-sources from the tied carrier via THAT sheet's own
+    monetary frame and the shared _emit_from_collapse gate, so the tie simultaneously resolves scale.
+    Fail-closed: no carrier, no raw penny-tie, or the re-sourced figure doesn't clear the emit gate →
+    None (the hold stays). Names propose; an independent statement agreeing to the paisa disposes."""
+    if concept_nature(concept) != 'stock':
+        return None
+    carriers = _family_carriers(prof, concept, primary_sheet, as_of=as_of)
+    if not carriers:
+        return None
+    # the primary sheet's OWN concept-row raw values — the independent location the tie must match
+    p_row = _find_concept_row(primary_rows, primary_lc, concept,
+                              primary_ax.axis_rows[0] + 1, len(primary_rows), primary_ax.columns)
+    if p_row is None:
+        return None
+    p_raws = [to_decimal(primary_rows[p_row][pc.col]) for pc in primary_ax.columns
+              if pc.col < len(primary_rows[p_row]) and _cell_type(primary_rows[p_row][pc.col]) == 'num']
+    p_raws = [v for v in p_raws if v is not None and v != 0]
+    if not p_raws:
+        return None
+    for carrier in carriers:
+        _dump, _kr, _nc, c_sheet, c_rows, c_ax, c_lc, c_row = carrier
+        c_acts = _actual_columns(c_rows, c_ax)
+        c_vals = {pc.col: c_rows[c_row][pc.col] for pc in c_acts
+                  if pc.col < len(c_rows[c_row]) and _cell_type(c_rows[c_row][pc.col]) == 'num'}
+        c_col = periods.collapse(concept, concept_nature(concept), c_acts, c_vals,
+                                 as_of=as_of, require_bound=require_bound)
+        if c_col is None or c_col.value is None or c_col.escalate:
+            continue
+        c_raw = to_decimal(c_col.value)
+        if c_raw is None or c_raw == 0:
+            continue
+        # §4 penny-tie: the carrier's raw value matches a primary-row column value to the paisa
+        if not any(abs(c_raw - pr) <= abs(c_raw) * _CROSS_TIE_TOL for pr in p_raws):
+            continue
+        # tie confirmed → emit from THIS carrier with its OWN monetary frame (resolves scale too)
+        found = {cc: _find_concept_row(c_rows, c_lc, cc, c_ax.axis_rows[0] + 1, len(c_rows), c_ax.columns)
+                 for cc in MIS_CONCEPTS}
+        money_samples = []
+        for cn, rr in found.items():
+            if rr is None or concept_measure(cn) != 'money':
+                continue
+            vv = {pc.col: c_rows[rr][pc.col] for pc in c_acts
+                  if pc.col < len(c_rows[rr]) and _cell_type(c_rows[rr][pc.col]) == 'num'}
+            if vv:
+                cc2 = periods.collapse(cn, concept_nature(cn), c_acts, vv, as_of=as_of, require_bound=require_bound)
+                if not cc2.escalate and cc2.value is not None:
+                    money_samples.append(cc2.value)
+        c_ccy, c_unit = _local_currency_unit(c_rows, c_ax)
+        frame = units.resolve_monetary_frame(stmt_currency=c_ccy, geo_currency=geo_ccy,
+                    inr_mentioned=inr_mentioned, declared_unit=c_unit, sample_values=money_samples,
+                    anchor_cr=anchor_cr, ratecard=rate_card, base_currency=base_currency)
+        prov = Provenance(source_file=label, content_fingerprint=ident.content_fp, sheet=c_sheet,
+                          cell=_a1(c_lc, c_row), row_label=str(c_rows[c_row][c_lc]).strip())
+        _cite_value_cells(prov, c_col, c_row, {pc.col: pc for pc in c_ax.columns})
+        fig = _emit_from_collapse(concept, c_col, prov, stmt_kind=_statement_kind(c_rows, c_sheet),
+                frame=frame, rows=c_rows, ax=c_ax, label_col=c_lc, ebitda_row=None,
+                anchor_cr=anchor_cr, rate_card=rate_card)
+        if isinstance(fig, Figure) and fig.confirmed:
+            return fig
+    return None
+
+
+def _reconciliation_rebind(concept, fields, *, rows, label_col, acts, ax, prof, sheet, ident, label,
+                           colmap, geo_ccy, inr_mentioned, anchor_cr, rate_card, base_currency,
+                           stmt_kind, frame, as_of, require_bound) -> Optional[Figure]:
+    """The reconciliation ENGINE — recover a HELD figure by rebinding to the value that DECLARED
+    reconciliation anchors confirm. Names propose candidate rows/cols; DATA disposes. Anchors,
+    strongest-first: (1) within-statement declared identities (≥2 independent — roll-forward from
+    contract.cash_flow_identity + component-Σ, on the SAME statement); (2) cross-statement penny-tie
+    (§4 — the same concept independently located on ANOTHER statement, penny-matching the primary
+    sheet). Each recoverable case adds a DECLARED IDENTITY / cross-sheet carrier (data), never a new
+    code path. Returns a confirmed Figure or None (additive/fail-closed: any residual doubt → hold)."""
+    within = _reconciled_cash_rebind(rows, label_col, acts, as_of, require_bound)
+    if within is not None:
+        rb_row, rb_col = within
+        prov = Provenance(source_file=label, content_fingerprint=ident.content_fp, sheet=sheet,
+                          cell=_a1(label_col, rb_row), row_label=str(rows[rb_row][label_col]).strip())
+        _cite_value_cells(prov, rb_col, rb_row, colmap)
+        fig = _emit_from_collapse(concept, rb_col, prov, stmt_kind=stmt_kind, frame=frame, rows=rows,
+                                  ax=ax, label_col=label_col, ebitda_row=None, anchor_cr=anchor_cr,
+                                  rate_card=rate_card)
+        if isinstance(fig, Figure) and fig.confirmed:
+            return fig
+    xfig = _cross_statement_tie_rebind(concept, prof, sheet, rows, label_col, ax, ident=ident,
+                label=label, geo_ccy=geo_ccy, inr_mentioned=inr_mentioned, anchor_cr=anchor_cr,
+                rate_card=rate_card, as_of=as_of, require_bound=require_bound, base_currency=base_currency)
+    if isinstance(xfig, Figure) and xfig.confirmed:
+        return xfig
+    return None
+
+
 def _sheet_verdict_rank(rows, ax, label_col, found) -> int:
     """Axis-2 for the selector: the best family verdict among the families the FOUND concepts
     belong to. Consulted ONLY to break a (tier, n_found, n_cols) tie — verdict must NEVER override
@@ -893,6 +996,22 @@ def _concept_allowed_on_kind(concept: str, kind) -> bool:
     return fam in _KIND_ALLOWED_FAMILIES.get(kind, set())
 
 
+_HEADCOUNT_MAX = Decimal('1000000')     # >1M "employees" is a monetary-magnitude value misread as a count
+
+
+def _count_gate_hold(concept, value):
+    """Concept-TYPE gate for a COUNT (headcount): return a hold-reason if `value` cannot be a real count,
+    else None. A count must be POSITIVE and of count magnitude — a currency/scale value (lakhs/crores, e.g.
+    a 'Staff Cost' row) can NEVER be a headcount. Value-level, universal (defense-in-depth beside the
+    label-level cross-concept disambiguation). Counts never pass through FX/scale (the caller returns before
+    the monetary frame), so this is the only magnitude check protecting a count from a monetary misread."""
+    if value is None or value <= 0:
+        return 'count ≤ 0 is not a valid headcount — likely a wrong-row bind'
+    if value > _HEADCOUNT_MAX:
+        return f'count {value} exceeds plausible headcount — monetary-magnitude value, not a person count'[:90]
+    return None
+
+
 def _emit_from_collapse(concept, col, prov, *, stmt_kind, frame, rows, ax, label_col,
                         ebitda_row, anchor_cr, rate_card):
     """Turn ONE collapsed concept (from ANY sheet) into a Figure under the full emit
@@ -915,9 +1034,11 @@ def _emit_from_collapse(concept, col, prov, *, stmt_kind, frame, rows, ax, label
         return Figure(concept, None, None, prov, held=True, basis=col.basis, months=col.months,
                       hold_reason=col.reason[:90])
     if concept_measure(concept) != 'money':                      # count/ratio → raw, no scaling
-        if concept_measure(concept) == 'count' and (col.value is None or col.value <= 0):
-            return Figure(concept, None, None, prov, held=True, basis=col.basis, months=col.months,
-                          hold_reason='count ≤ 0 is not a valid headcount — likely a wrong-row bind')
+        if concept_measure(concept) == 'count':
+            held = _count_gate_hold(concept, col.value)
+            if held:
+                return Figure(concept, None, None, prov, held=True, basis=col.basis, months=col.months,
+                              hold_reason=held)
         return Figure(concept, col.value, None, prov, basis=col.basis, months=col.months)
     if frame.escalate or frame.scale is None:                    # frame unresolved → hold money
         return Figure(concept, None, None, prov, held=True, basis=col.basis, months=col.months,
@@ -1272,10 +1393,18 @@ _TOTAL_INCOME_RE = re.compile(r'\btotal\s+(income|revenue|revenues)\b', re.I)
 _REV_FROM_OPS_RE = re.compile(r'\brevenue\s+from\s+operation', re.I)
 # 'Other income' is UNAMBIGUOUSLY non-operating in every industry — unlike "interest income", which IS
 # operating revenue for a lender/NBFC — so it is the one safe positive-evidence discriminator here.
-_OTHER_INCOME_RE = re.compile(r'\bother\s+income\b', re.I)
-_REV_AGG_HOLD = ("aggregate 'Total Income' folds in non-operating income (Other Income row present) and no "
-                 "stated Revenue-from-operations row exists — operating revenue = Total Income − Other "
-                 "Income is a subtraction not yet cell-citable → held (fail-closed; not a wrong number)")
+_OTHER_INCOME_RE = re.compile(r'\bother\s+incomes?\b', re.I)
+# Non-operating income lines that must NOT be folded into an operating-revenue figure. Used by the
+# reconciliation-proof accept (below): if any of these carries a non-zero value inside a 'Total
+# Income/Revenue' aggregate, the aggregate is NOT pure operating revenue → hold. Linguistic, universal.
+_NONOP_INCOME_RE = re.compile(r'\b(other\s+incomes?|interest|dividend|foreign\s+exchange|forex|'
+                              r'exceptional|extraordinary|grant|subsidy|gain\s+on|profit\s+on\s+sale)\b',
+                              re.I)
+_REV_AGG_HOLD = ("'Total Income/Revenue' aggregate not proven to be pure operating revenue (its total "
+                 "exceeds its stated components, or its operating purity could not be verified) and no "
+                 "stated Revenue-from-operations row exists — operating revenue (excluding non-operating "
+                 "other income / interest) would be a not-yet-citable subtraction → held (fail-closed; "
+                 "not a wrong number)")
 
 
 def _is_total_income_aggregate(rows, label_col, r):
@@ -1300,29 +1429,118 @@ def _operating_revenue_row(rows, label_col, rev_row):
     return None
 
 
-def _other_income_present(rows, label_col, rev_row):
-    """True iff an 'Other income' row exists in the located row's section (scan up, section-window).
-    Positive evidence that a 'Total Income' aggregate folds in NON-operating income. Universal."""
-    if rev_row is None:
-        return False
-    for r in range(rev_row - 1, max(-1, rev_row - 20), -1):
-        lab = str(rows[r][label_col] or '') if label_col < len(rows[r]) else ''
-        if _OTHER_INCOME_RE.search(lab):
-            return True
-    return False
+def _leaf_components(rows, label_col, total_row, acts):
+    """The leaf component rows that make up a 'Total Income/Revenue' aggregate: scan UP from the total,
+    within its section (stop at a no-data header row or a nested subtotal), skipping ratio/growth lines.
+    The one component set shared by the purity proof and the disposition's non-op gate — no drift."""
+    comps = []
+    if acts is None or not (0 <= total_row < len(rows)):
+        return comps
+    for r in range(total_row - 1, max(-1, total_row - 26), -1):
+        if label_col >= len(rows[r]) or _cell_type(rows[r][label_col]) != 'text':
+            continue
+        lab = str(rows[r][label_col])
+        if not any(pc.col < len(rows[r]) and _cell_type(rows[r][pc.col]) == 'num' for pc in acts):
+            break                                    # section header / blank-label row → section top
+        if _is_ratio_label(lab):
+            continue                                 # a '% of revenue' / growth line is not a component
+        if _TOTAL_INCOME_RE.search(lab):
+            break                                    # a nested subtotal → stop (never double-count)
+        comps.append(r)
+    return comps
 
 
-def _operating_revenue_disposition(rows, label_col, rev_row):
+def _rev_agg_hold_reason(rows, label_col, total_row, acts) -> str:
+    """Audit-facing reason a 'Total Income/Revenue' aggregate is HELD as revenue. NAMES the specific
+    non-operating line(s) folded in when they can be identified (single-sourced via _NONOP_INCOME_RE —
+    the SAME vocabulary the purity proof uses, so detector and proof cannot diverge), else the generic
+    structural cause (total > components / purity unverifiable / no columns). Never a keep-shortcut: it
+    only enriches the message — the hold decision is the proof's alone (default-hold)."""
+    comps = _leaf_components(rows, label_col, total_row, acts)
+    nonop = [str(rows[r][label_col]).strip() for r in comps
+             if _NONOP_INCOME_RE.search(str(rows[r][label_col]))]
+    if nonop:
+        which = ', '.join(dict.fromkeys(nonop))                  # dedupe, preserve order
+        return ("'Total Income/Revenue' aggregate folds in non-operating income (" + which + ") not "
+                "proven zero across the summed columns, and no stated Revenue-from-operations row exists "
+                "— operating revenue would be a not-yet-citable subtraction → held (fail-closed; not a "
+                "wrong number)")
+    return _REV_AGG_HOLD
+
+
+def _aggregate_is_purely_operating(rows, label_col, total_row, acts) -> bool:
+    """POSITIVE PROOF (not name/position) that a 'Total Income/Revenue' aggregate is operating revenue,
+    so it may be emitted instead of held. This is the ONLY gate to `keep`: the disposition defaults to
+    HOLD and returns True here only when ALL hold, in EVERY populated column (fail-closed on any that
+    fails, and on any gap — no acts, no components, an exception):
+      (a) NO UNLABELLED EXCESS — total ≤ Σ(its leaf component rows) + penny-tolerance. DIRECTIONAL, not
+          two-sided '==': a total that EXCLUDES a visible operating line (Aliste's 'Total Revenue'
+          excludes 'Installation' — a real operating line kept out of the subtotal) has total < Σ and is
+          a legitimate operating subtotal → allowed. Only a total that EXCEEDS its visible components
+          (total > Σ) has an unlabelled line folded in — which could be non-operating → fail (Case C).
+      (b) NON-OP == 0 — every non-operating income component (Other Income / interest / dividend / forex
+          / exceptional, by _NONOP_INCOME_RE) carries a zero value, so nothing non-operating is folded in.
+      (c) an operating (non-non_op) component carries value — never emit a total with NO operating line.
+    Universal — leaf rows and non-op lines are found by structure + one shared linguistic vocabulary, no
+    file/sheet names. Agnikul ('Total Income' = non-zero interest income) fails (b) → held. InstaAstro
+    ('Total Revenues') also fails (b): Other Incomes is 0 in the latest month but non-zero in 6 of the 12
+    TTM-summed months, so the TTM sum folds in non-op → held (the clean operating figure = Σ operating
+    components is a construction, deferred). Aliste ('Total Revenue' = Σ operating subset, no non-op)
+    passes → emits."""
+    if acts is None or not (0 <= total_row < len(rows)):
+        return False                                                # (gap) cannot prove without columns
+    comps = _leaf_components(rows, label_col, total_row, acts)
+    if not comps:
+        return False                                                # (gap) nothing to reconcile against
+
+    def _cell(r, col):
+        v = rows[r][col] if col < len(rows[r]) else None
+        return to_decimal(v) if _cell_type(v) == 'num' else None
+
+    # Every check applies in EVERY populated column — the flow emit is a MULTI-column sum (TTM), so a
+    # non-op value in ANY summed month folds into the emit; checking only one column (e.g. the latest)
+    # would miss a non-op amount in another summed month (InstaAstro: Other Incomes is 0 at Feb but
+    # non-zero in 6 of the 12 TTM months → NOT purely operating → must HOLD). Fail-closed on any column.
+    non_op = [r for r in comps if _NONOP_INCOME_RE.search(str(rows[r][label_col]))]
+    seen = op_present = False
+    for pc in acts:
+        tvd = _cell(total_row, pc.col)
+        if tvd is None:
+            continue
+        seen = True
+        tol = max(Decimal('1'), abs(tvd) * Decimal('0.0001'))       # penny at full precision
+        comp_sum = sum((_cell(r, pc.col) or Decimal('0')) for r in comps)
+        if tvd - comp_sum > tol:
+            return False               # (a) total EXCEEDS its visible components → unlabelled line folded in
+        for r in non_op:                                            # (b) every non-op line must be ~0 here
+            if abs(_cell(r, pc.col) or Decimal('0')) > tol:
+                return False
+        if any(abs(_cell(r, pc.col) or Decimal('0')) > tol for r in comps if r not in non_op):
+            op_present = True                                       # a real operating component carries value
+    return bool(seen and op_present)                               # (c) never a total with NO operating line
+
+
+def _operating_revenue_disposition(rows, label_col, rev_row, acts=None):
     """UNIVERSAL disposition for a located revenue row (structure-keyed, never a file/sheet name).
-    Returns one of ('relocate', rfo_row) | ('hold', reason) | ('keep', None). See the block comment."""
+    Returns one of ('relocate', rfo_row) | ('hold', reason) | ('keep', None).
+
+    INVARIANT (closes the class of fail-opens): a 'Total Income/Revenue' AGGREGATE with no stated
+    Revenue-from-operations row DEFAULTS TO HOLD; `keep` is reachable ONLY through the positive purity
+    proof `_aggregate_is_purely_operating`. EVERY gap falls to the fail-closed hold — acts absent (the
+    finder call site formerly passed none → fail-open), components unreadable, proof False, or proof
+    raises. There is no separate 'detect non-op then decide' path that could disagree with the proof."""
     if not _is_total_income_aggregate(rows, label_col, rev_row):
-        return ('keep', None)
+        return ('keep', None)                                       # not an aggregate → the located row is it
     rfo = _operating_revenue_row(rows, label_col, rev_row)
     if rfo is not None:
-        return ('relocate', rfo)
-    if _other_income_present(rows, label_col, rev_row):
-        return ('hold', _REV_AGG_HOLD)
-    return ('keep', None)
+        return ('relocate', rfo)                                    # a clean, citable RfO row exists
+    try:
+        proven = _aggregate_is_purely_operating(rows, label_col, rev_row, acts)
+    except Exception:
+        proven = False                                             # a proof that cannot run does not emit
+    if proven:
+        return ('keep', None)
+    return ('hold', _rev_agg_hold_reason(rows, label_col, rev_row, acts))
 
 
 def extract_company(label: str, path: str, *, rate_card, entity: str = None,
@@ -1435,7 +1653,7 @@ def extract_company(label: str, path: str, *, rate_card, entity: str = None,
         row = found.get(concept)
         rfo = None
         if concept == 'revenue':                       # operating-revenue disposition (universal, structure-keyed)
-            disp, target = _operating_revenue_disposition(rows, label_col, row)
+            disp, target = _operating_revenue_disposition(rows, label_col, row, acts=acts)
             if disp == 'relocate':
                 rfo, row = target, target              # emit the directly-stated Revenue-from-operations row
             elif disp == 'hold':
@@ -1531,29 +1749,28 @@ def extract_company(label: str, path: str, *, rate_card, entity: str = None,
         if isinstance(newfig, Figure) and not (newfig.held or newfig.gap):
             fields[tgt] = newfig
 
-    # ── Lever 2a: reconciliation-guided cash rebind (2026-09-11) ─────────────────────────────────
-    # A cash STOCK held as "wrong row / >3 orders from company scale" is the tiny bank-only sub-line
-    # that out-scored the true TOTAL on label keywords alone ('Closing Cash Balance including Fixed
-    # deposits' 2.23 Mn beats 'TOTAL CASH AND CASH EQUIVALENT' 86.33 Mn — the label LIES; only the
-    # data exposes it). Names propose the candidate rows; two INDEPENDENT identities on the SAME
-    # statement dispose (roll-forward opening+net=closing; Σ components = total). Rebind to the
-    # aggregate BOTH confirm, then run the full _emit_from_collapse gate. ADDITIVE + fail-closed:
-    # fires only on an already-held cash stock and needs ≥2 agreeing anchors, so it can only turn a
-    # HELD cash into an emit — every existing emit is byte-identical by construction.
+    # ── Reconciliation ENGINE: recover a held stock via declared anchors (2026-09-11) ────────────
+    # A held cash STOCK is recovered by rebinding to the value DECLARED reconciliation anchors
+    # confirm — names propose the candidate rows, DATA disposes. The engine tries, strongest-first:
+    #   (1) within-statement identities — the tiny bank-only sub-line ('Closing Cash Balance including
+    #       Fixed deposits' 2.23 Mn) out-scored the true TOTAL (86.33 Mn) on label keywords alone (the
+    #       label LIES); ≥2 independent identities (roll-forward opening+net=closing; Σ components =
+    #       total) dispose to the real aggregate. [CPC cash]
+    #   (2) cross-statement penny-tie (§4) — the same concept independently located on ANOTHER
+    #       statement, penny-matching the primary sheet, promotes one cross-sheet value to a confirmed
+    #       emit AND resolves its scale (balance-sheet cash == cash-flow closing). [CSS cash, SGD]
+    # ADDITIVE + fail-closed: fires only on an already-held cash stock and each anchor needs its full
+    # agreement, so it can only turn a HELD cash into an emit — every existing emit is byte-identical
+    # by construction. Adding a recoverable case = a declared identity / cross-sheet carrier (data).
     cfig = fields.get('cash')
     if isinstance(cfig, Figure) and cfig.held and concept_nature('cash') == 'stock':
-        rb = _reconciled_cash_rebind(rows, label_col, acts, stated_asof, require_bound)
-        if rb is not None:
-            rb_row, rb_col = rb
-            rb_label = str(rows[rb_row][label_col]).strip()
-            rb_prov = Provenance(source_file=label, content_fingerprint=ident.content_fp, sheet=sheet,
-                                 cell=_a1(label_col, rb_row), row_label=rb_label)
-            _cite_value_cells(rb_prov, rb_col, rb_row, colmap)
-            newfig = _emit_from_collapse('cash', rb_col, rb_prov, stmt_kind=stmt_kind, frame=frame,
-                                         rows=rows, ax=ax, label_col=label_col, ebitda_row=None,
-                                         anchor_cr=anchor_cr, rate_card=rate_card)
-            if isinstance(newfig, Figure) and not (newfig.held or newfig.gap):
-                fields['cash'] = newfig
+        newfig = _reconciliation_rebind('cash', fields, rows=rows, label_col=label_col, acts=acts,
+                    ax=ax, prof=prof, sheet=sheet, ident=ident, label=label, colmap=colmap,
+                    geo_ccy=geo_ccy, inr_mentioned=inr_mentioned, anchor_cr=anchor_cr,
+                    rate_card=rate_card, base_currency=base_currency, stmt_kind=stmt_kind,
+                    frame=frame, as_of=stated_asof, require_bound=require_bound)
+        if isinstance(newfig, Figure) and newfig.confirmed:
+            fields['cash'] = newfig
 
     # ── grid-statement fallback (tight kind-gate, DETERMINISTIC-first, before the model) ──────────
     # A self-declared (or income-CONFIRMED) comparison-GRID is a legitimate source the is_time_series
@@ -1737,12 +1954,50 @@ def _is_scenario_col(rows, ax, pc) -> bool:
     return any(_SCENARIO_RE.search(t) for t in texts if t)
 
 
+def _drop_trailing_unreported(rows, ax, cols) -> list:
+    """Lever 4 (period correctness) — drop the trailing run of NOT-YET-REPORTED period columns.
+
+    A monthly/quarterly file for a partial year carries future months as 0-filled (or blank)
+    columns ('January'…'December' with data only through May, June-Dec = 0). Those are NOT reported
+    periods; leaving them in makes the as-of pick an empty future month (a WRONG-PERIOD bind — the
+    engine nearly shipped CSS's January cash as May's) and mis-sizes a flow's trailing window.
+
+    A column is UNREPORTED iff EVERY data cell in it (across the statement's data rows) is 0 or empty
+    — checked on the WHOLE column, never one concept's cell, so a genuine latest-period 0 (its column
+    still carries other populated lines) is KEPT, not stripped. Only a MONTH/QUARTER point-in-time
+    column can be dropped (TOTAL/YTD/YEAR carry sentinel orders); the drop is the maximal SUFFIX of
+    unreported columns by period order, so an unreported month with a reported later month stays.
+    Never returns empty (an all-unreported axis falls back to the input — better a hold than nothing)."""
+    if not cols or not ax.axis_rows:
+        return cols
+    data0 = ax.axis_rows[-1] + 1
+
+    def reported(pc):
+        for r in range(data0, len(rows)):
+            if pc.col < len(rows[r]) and _cell_type(rows[r][pc.col]) == 'num':
+                v = to_decimal(rows[r][pc.col])
+                if v is not None and v != 0:
+                    return True
+        return False
+
+    pit = sorted((c for c in cols if c.kind in (periods.MONTH, periods.QUARTER)),
+                 key=lambda c: c.order)
+    drop = set()
+    for c in reversed(pit):                      # peel the trailing unreported run, latest-first
+        if reported(c):
+            break
+        drop.add(c.col)
+    kept = [c for c in cols if c.col not in drop]
+    return kept or cols
+
+
 def _actual_columns(rows, ax) -> list:
-    """Period columns with Budget/Target/Forecast/prior-year excluded. Never returns
-    empty (if everything looked like a scenario, fall back to all — better a period
-    figure than none; the frame/triangulation still guard it)."""
+    """Period columns with Budget/Target/Forecast/prior-year excluded AND trailing not-yet-reported
+    (0-filled/future) months dropped (Lever 4). Never returns empty (if everything looked like a
+    scenario, fall back to all — better a period figure than none; the frame/triangulation guard it)."""
     keep = [pc for pc in ax.columns if not _is_scenario_col(rows, ax, pc)]
-    return keep or list(ax.columns)
+    keep = keep or list(ax.columns)
+    return _drop_trailing_unreported(rows, ax, keep)
 
 
 # ── Stated reporting as-of (Rung 2): a NON-CIRCULAR reporting boundary ────────────────────────────
@@ -1895,9 +2150,11 @@ def _emit_from_collapsed(concept, col, frame, prov, rate_card, anchor_cr, *,
                       hold_reason=((col.reason if col else 'no period value')[:90]))
     basis, months = col.basis, col.months
     if concept_measure(concept) != 'money':
-        if concept_measure(concept) == 'count' and (col.value is None or col.value <= 0):
-            return Figure(concept, None, None, prov, held=True, basis=basis, months=months,
-                          hold_reason='count ≤ 0 is not a valid headcount — likely wrong-row bind')
+        if concept_measure(concept) == 'count':
+            held = _count_gate_hold(concept, col.value)
+            if held:
+                return Figure(concept, None, None, prov, held=True, basis=basis, months=months,
+                              hold_reason=held)
         return Figure(concept, col.value, None, prov, basis=basis, months=months)
     if frame.escalate or frame.scale is None:
         return Figure(concept, None, None, prov, held=True, basis=basis, months=months,
@@ -2500,7 +2757,9 @@ def _model_find_across_file(prof, ident, held, *, entity, domicile, anchor_cr, r
                                         'rejected': 'money-stock-on-unverified-reporting-boundary'})
                     continue
                 if concept == 'revenue':                        # G2: operating-revenue disposition
-                    disp, alt = _operating_revenue_disposition(rows, label_col, row)
+                    # pass acts so the purity proof can RUN in the finder path too; without columns the
+                    # disposition (correctly) fails-closed to HOLD — never the blind keep it used to.
+                    disp, alt = _operating_revenue_disposition(rows, label_col, row, acts=acts)
                     if disp == 'hold':
                         diagnostics.append({'concept': concept, 'sheet': sheet,
                                             'scope': _region_id(sheet, reg), 'rejected': 'operating-revenue-hold'})

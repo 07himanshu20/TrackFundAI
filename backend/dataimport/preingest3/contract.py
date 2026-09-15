@@ -35,8 +35,8 @@ CONTRACT_VERSION = 'contract-2.0.0'
 # edit. Values are lower-cased; matching is done after normalisation.
 CONCEPT_LEXICON = {
     # operating (company MIS)
-    'revenue': ['revenue', 'turnover', 'sales', 'total income', 'net sales',
-                'gross billings', 'total revenue', 'income from operations',
+    'revenue': ['revenue', 'revenues', 'turnover', 'sales', 'total income', 'net sales',
+                'gross billings', 'total revenue', 'total revenues', 'income from operations',
                 'operating revenue', 'total sales', 'revenue from operations',
                 'revenues from operations'],
     'cogs': ['cost of goods sold', 'cogs', 'cost of sales', 'cost of revenue',
@@ -48,8 +48,9 @@ CONCEPT_LEXICON = {
                'operating income', 'profit/(loss) before tax', 'pbt/(loss)'],
     'cash': ['cash', 'cash and cash equivalents', 'closing cash', 'bank balance',
              'cash balance', 'cash & bank', 'closing cash balance'],
-    'headcount': ['headcount', 'employees', 'fte', 'total employees',
-                  'no of employees', 'number of employees', 'total headcount'],
+    'headcount': ['headcount', 'head count', 'employees', 'fte', 'total employees',
+                  'no of employees', 'number of employees', 'total headcount',
+                  'total staff'],
     # fund-level
     'commitment': ['commitment', 'committed capital', 'total commitment', 'capital commitment'],
     'called': ['called', 'capital called', 'drawn', 'drawdown', 'cumulative called', 'paid-in'],

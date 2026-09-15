@@ -47,7 +47,11 @@ VERIFIED = {
     ('LDC', 'cash'): 'Cash & Bank Balance',
     ('Hubler', 'revenue'): 'Total revenue',
     ('Hubler', 'ebitda'): 'EBITDA',
-    ('InstaAstro', 'revenue'): None,                 # only '% of revenue' ratios exist → GAP, not 0
+    ('InstaAstro', 'revenue'): 'Total Revenues',     # Lever 3 ①: the plural 'total revenues' synonym now
+    #   LOCATES the real aggregate (was None — only '% of revenue' ratios were matchable before). This is a
+    #   LOCATION improvement, not an emit: the aggregate is a contaminated TTM (Other Incomes non-zero in
+    #   6 of 12 summed months) so it is HELD at emit, never shipped — the never-a-wrong-number guarantee is
+    #   asserted end-to-end in test_real_files_values::test_instaastro_mis_values_trace_to_cells.
     ('InstaAstro', 'ebitda'): 'EBITDA',
     ('InstaAstro', 'cash'): 'Ending Cash Balance',
     ('Agnikul', 'revenue'): 'Total Income',
