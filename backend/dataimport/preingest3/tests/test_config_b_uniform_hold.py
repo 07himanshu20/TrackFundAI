@@ -28,10 +28,9 @@ from decimal import Decimal
 import pytest
 
 from backend.dataimport.preingest3 import units
-from backend.dataimport.preingest3.extract import extract_company, MIS_CONCEPTS
+from backend.dataimport.preingest3.extract import extract_company
 from backend.dataimport.preingest3.ratecard import default_inr_card
 from backend.dataimport.preingest3.cir import Figure
-from backend.dataimport.preingest3.concept import concept_measure
 
 IN = 'backend/media/preingest/trivesta/100e86d5/in'
 RC = default_inr_card('2026-02-28')                       # INR-only production card
@@ -81,8 +80,6 @@ def test_dead_per_figure_resolver_is_fail_closed_on_no_evidence():
 
 
 # ── PRODUCTION-PATH reddening: real extract_company, currency gated for the whole entity ───────────────
-_slow = [pytest.mark.slow, pytest.mark.skipif(not os.path.isdir(IN), reason='real fixture files not present')]
-
 CPC = ('CPC', 'CPC_Monthly_MIS-_May_25_to_be_sent_to_EL.xlsx')      # no ccy token; inr_mentioned=True
 LDC = ('LDC', 'AVF_2026_03_20_P_LDC_Detailed_MIS_Feb26.xlsx')       # carries an INR statement token
 
@@ -110,6 +107,30 @@ def test_domicile_lost_untokened_entity_holds_ALL_money_uniformly():
     # the reason names the true cause (no positive currency evidence), and it is NOT an INR emit
     assert any('currency' in (m[c].hold_reason or '').lower() for c in _MONEY), \
         'the hold must disclose the currency-evidence cause, not silently drop'
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not os.path.isdir(IN), reason='real fixture files not present')
+def test_uniform_hold_is_load_bearing(monkeypatch):
+    # NEGATIVE CONTROL ([[feedback_negative_control_gates]]): reintroduce the config-B defect at the single
+    # currency choke — force it to silently assume INR whenever it would have escalated — and CPC(domicile=
+    # None) must REVERT to emitting misread-as-INR money. Proves the uniform hold above is caused by the
+    # fail-closed frame, not something incidental (a green-only gate is unproven).
+    import backend.dataimport.preingest3.units as u
+    real = u.resolve_currency
+
+    def forced(*, stmt_currency, geo_currency, inr_mentioned, base_currency=None):
+        ccy, esc, reason, flags = real(stmt_currency=stmt_currency, geo_currency=geo_currency,
+                                       inr_mentioned=inr_mentioned, base_currency=base_currency)
+        if esc:                                   # the defect: assume INR instead of holding
+            return ('INR', False, 'FORCED config-B defect', [])
+        return (ccy, esc, reason, flags)
+
+    monkeypatch.setattr(u, 'resolve_currency', forced)
+    m = _money(*CPC, domicile=None)
+    assert any((m[c] is not None and not (m[c].held or m[c].gap)) for c in _MONEY), \
+        'with the config-B defect reintroduced, CPC(domicile=None) must emit misread-as-INR money — ' \
+        'proves the uniform hold is load-bearing, not incidental'
 
 
 @pytest.mark.slow
