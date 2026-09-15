@@ -249,6 +249,37 @@ def _declared_scale_is_magnitude_lie(scale, currency, sample_values, anchor_cr, 
     return None
 
 
+def _foreign_scale_uncorroborated(sc, currency, sample_values, anchor_cr, ratecard):
+    """Foreign-scoped scale corroboration — the scale×FX 1000× door. It bites ONLY when a foreign
+    figure will actually be CONVERTED (its currency is covered by the card). An UNCOVERED currency is
+    already held downstream by FX_UNCOVERED — which also fires the 'supply a rate' prompt — so scale
+    corroboration must DEFER to it and never pre-empt that prompt (the entry point to activating a
+    rate). When the currency IS covered, a bare foreign banner (a stale/template "'000") applied with
+    no whole-company anchor to cross-check it is a 10^k error COMPOUNDED by the rate → HOLD. Returns
+    True (→ caller HOLDS, fail-closed) iff the currency is foreign AND covered AND no anchor magnitude
+    cross-check could run (no anchor / no usable sample). INR/domestic is never gated — an anchored MIS
+    is covered by the magnitude-lie check above, and the fund's own ₹Cr books are the trusted, cross-
+    tied backbone. Uniform across ALL foreign currencies (like the config-B currency hold) — never a
+    per-currency plausible-range table (a rule-#0 patch). A false hold on an un-anchored, convertible
+    foreign statement is safe; a silent 10^k is not."""
+    if not currency or currency == 'INR':      # domestic base — never gated here (see docstring)
+        return False
+    rates = getattr(ratecard, 'rates', None) or {}
+    if currency not in rates:                   # uncovered → FX_UNCOVERED owns the hold + the rate prompt
+        return False
+    if not anchor_cr:                           # convertible foreign scale, no anchor to corroborate → hold
+        return True
+    samples = [abs(to_decimal(v)) for v in (sample_values or []) if to_decimal(v) is not None]
+    samples = [s for s in samples if s]
+    if not samples:
+        return True
+    try:
+        float(ratecard.to_inr(max(samples) * SCALE_TO_ABS[sc], currency))
+    except Exception:  # noqa: BLE001 — covered but cannot price → cannot corroborate → hold
+        return True
+    return False
+
+
 def resolve_statement_scale(*, declared_unit, currency, sample_values, anchor_cr, ratecard):
     """Resolve ONE scale for a whole statement (all its figures share it). Order:
       1. an explicit unit label on the statement wins — UNLESS the anchor proves it a
@@ -272,6 +303,15 @@ def resolve_statement_scale(*, declared_unit, currency, sample_values, anchor_cr
             lie = _declared_scale_is_magnitude_lie(sc, currency, sample_values, anchor_cr, ratecard)
             if lie:
                 return StatementScale(None, currency, True, lie)
+            # Foreign-scoped corroboration (the scale×FX 1000× door): a FOREIGN declared scale is
+            # trusted ONLY when the whole-company anchor could corroborate it. INR/domestic keep the
+            # declared unit — anchored MIS are covered by the magnitude-lie check above and the fund's
+            # own ₹Cr books are the trusted, cross-tied backbone. Unit-agnostic (not banner-widening).
+            if _foreign_scale_uncorroborated(sc, currency, sample_values, anchor_cr, ratecard):
+                return StatementScale(None, currency, True,
+                                      f'foreign declared unit {declared_unit!r} not corroborated by a '
+                                      f'whole-company anchor — a bare foreign scale is a 10^k×FX door; '
+                                      f'hold (fail-closed)')
             return StatementScale(sc, currency, False, f'declared unit {declared_unit!r}')
         return StatementScale(None, currency, True, f'declared unit {declared_unit!r} unrecognised')
 

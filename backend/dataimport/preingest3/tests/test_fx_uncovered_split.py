@@ -37,12 +37,15 @@ def test_frame_holds_foreign_without_a_rate_as_fx_uncovered():
 
 
 def test_frame_resolves_the_same_foreign_WITH_a_rate():
-    # negative control: identical statement, but the card carries MYR → the frame RESOLVES (not FX-held).
+    # negative control: identical statement, but the card carries MYR AND a whole-company anchor
+    # corroborates the declared scale (₹93Cr ≈ 5 crore MYR ×18.6) → the frame RESOLVES (neither FX-held
+    # NOR scale-held). #3's foreign-scale door requires that anchor corroboration; with the rate AND the
+    # anchor the frame fully resolves — proving the holds are targeted, not 'hold everything'.
     card = card_from_manual([{'currency': 'MYR', 'rate': '18.6', 'date': '2026-06-30', 'source': 'x'}],
                             as_of='2026-06-30')
     fr = units.resolve_monetary_frame(stmt_currency='MYR', geo_currency='MYR', inr_mentioned=False,
                                       declared_unit='crore', sample_values=[Decimal('5')],
-                                      anchor_cr=None, ratecard=card)
+                                      anchor_cr=Decimal('93'), ratecard=card)
     assert not fr.escalate and fr.currency == 'MYR' and fr.scale == 'crore'
     assert not any('fx_uncovered' in f for f in fr.flags)
 
@@ -62,15 +65,20 @@ def test_ledger_foreign_resolved_no_rate_HOLDS_not_raises():
     assert all(f.held for rec in lr.records for f in rec.figures())
 
 
-def test_ledger_foreign_with_a_rate_CONVERTS():
-    # negative control: the SAME block with a USD rate converts and ties (150+150 USD-Cr → ×83). Proves
-    # the fix is a targeted FX hold, not 'hold everything'.
+def test_ledger_foreign_with_a_rate_but_no_anchor_HOLDS_scale_uncorroborated():
+    # #3 INTERACTION (updated from the old 'CONVERTS' control): with a USD rate the currency is now
+    # COVERED, but there is no whole-company anchor to corroborate the declared 'Cr' scale → the foreign-
+    # scale door HOLDS (fail-closed) — and still never RAISES. Fund ledgers are INR in practice (this
+    # foreign block is synthetic), and a foreign fund ledger cannot corroborate its own scale (its only
+    # anchor is the INR capital-account control, which would itself conflict with the foreign token). The
+    # FX-fix's targeted 'a rate resolves it, not hold-everything' guarantee now lives at the frame level
+    # (test_frame_resolves_the_same_foreign_WITH_a_rate, which supplies both the rate and the anchor).
     card = card_from_manual([{'currency': 'USD', 'rate': '83', 'date': '2026-06-30', 'source': 'x'}],
                             as_of='2026-06-30')
     lr = ledger.extract_from_sheet(_USD_CR_NO_RATE, 'S1', CAPITAL_CALLS, anchor_cr=None,
                                    label='t', content_fp='fp', rate_card=card)
-    assert lr.held is False
-    assert sum((f.value_cr for f in lr.amount_figures), Decimal('0')) == Decimal('24900')  # 300 × 83
+    assert lr.held is True                                                    # scale-uncorroborated hold
+    assert all(f.held for rec in lr.records for f in rec.figures())           # never raises, uniformly held
 
 
 # ── a genuine (non-FX) fault surfaces as UNEXPECTED_ERROR, distinct from an FX hold (reddening) ───────

@@ -68,6 +68,23 @@ def _find(rows, col0_startswith):
 
 
 # 1 ── Total FV = Σ company FV → PASS ────────────────────────────────────────
+def test_fig_basis_discloses_partial_year_span_REDDENING():
+    # #3 Q1: a PARTIAL-year figure must be unmissable beside full-year peers. Analisa emits a TRUE
+    # 5-month YTD (₹6.87Cr) — we DISCLOSE the span "YTD · 5mo (Jan–May)" rather than destroy the true
+    # number or fake an annual. Reddening: the old bare "YTD" could be read as annual next to peers.
+    rev = _fig('revenue', 6.87, basis='YTD'); rev.months = 5
+    figs = {'revenue': rev, 'ebitda': None, 'cash': None, 'headcount': None}
+    assert mw._fig_basis(figs, mo=5) == 'YTD · 5mo (Jan–May)'    # span + reporting month → month range
+    assert mw._fig_basis(figs, mo=None) == 'YTD · 5mo'           # no reporting month → span count alone
+    # must-not-misfire: a full-year (12mo) figure shows the bare basis, no span suffix
+    fy = _fig('revenue', 50, basis='YTD'); fy.months = 12
+    assert mw._fig_basis({'revenue': fy, 'ebitda': None, 'cash': None, 'headcount': None}, mo=12) == 'YTD'
+    # must-not-misfire: a point-in-time stock (months 0) shows the bare basis, no span
+    pit = _fig('cash', 5, basis='point_in_time'); pit.months = 0
+    assert mw._fig_basis({'revenue': None, 'ebitda': None, 'cash': pit, 'headcount': None}, mo=5) \
+        == 'point_in_time'
+
+
 def test_total_fv_identity_passes():
     wb = mw.build_master(_base_cir(), files=['x'])
     row = _find(_sheet_rows(wb, 'MOIC_TVPI_DPI'), 'Total FV = Σ company FV')

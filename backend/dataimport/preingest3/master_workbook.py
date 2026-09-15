@@ -954,7 +954,7 @@ def _portfolio_kpi(wb, cir, ctx):
         warn = [6 + i for i, c in enumerate(('revenue', 'ebitda', 'cash', 'headcount'))
                 if not (isinstance(figs[c], Figure) and figs[c].confirmed)]
         _row(ws, [ent, sector, stage, asof or NR, (mo if mo is not None else '?'),
-                  STALE if stale else '', rev, eb, margin, cash, hc, _fig_basis(figs),
+                  STALE if stale else '', rev, eb, margin, cash, hc, _fig_basis(figs, mo),
                   ('all solid' if hg == 0 else f'{hg} awaiting review') + (' · STALE' if stale else '')],
              warn=tuple(warn), stale=(3, 4, 5) if stale else ())
     _row(ws, [])
@@ -963,10 +963,25 @@ def _portfolio_kpi(wb, cir, ctx):
                f'({round(100*emit/tot) if tot else 0}% company-side)'])
 
 
-def _fig_basis(figs):
+_MON = ('', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')
+
+
+def _fig_basis(figs, mo=None):
+    # Disclose the period SPAN so a PARTIAL-year figure is unmissable next to full-year peers: a
+    # 5-month YTD reads "YTD · 5mo (Jan–May)", not a bare "YTD" that could be mistaken for annual.
+    # The span comes from the Figure's own months count; the month range is rendered only when it
+    # cleanly resolves to a same-year consecutive window ending at the reporting month (else just Nmo).
     for c in ('revenue', 'ebitda', 'cash', 'headcount'):
         f = figs.get(c)
         if isinstance(f, Figure) and f.basis:
+            m = getattr(f, 'months', 0) or 0
+            if 0 < m < 12:
+                span = f'{m}mo'
+                if isinstance(mo, int) and 1 <= mo <= 12:
+                    start = mo - m + 1
+                    if 1 <= start <= mo:
+                        span = f'{m}mo ({_MON[start]}–{_MON[mo]})'
+                return f'{f.basis} · {span}'
             return f.basis
     return ''
 

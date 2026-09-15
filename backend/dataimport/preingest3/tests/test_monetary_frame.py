@@ -8,7 +8,15 @@ UNTOKENED-FOREIGN hole — a foreign figure with no marker and unknown domicile 
 silently ship as INR (a 15-20× error); (3) any statement-token-vs-domicile conflict holds in
 BOTH directions (INR-stmt-vs-foreign AND foreign-stmt-vs-INR), never auto-applied.
 """
-from backend.dataimport.preingest3 import units
+from decimal import Decimal
+
+from backend.dataimport.preingest3 import profiler, units
+from backend.dataimport.preingest3.ratecard import RateCard, default_inr_card
+
+
+def _myr_card():
+    return RateCard.from_input({'as_of': '2026-06-30', 'rates': [
+        {'currency': 'MYR', 'inr_per_unit': '18.6', 'rate_date': '2026-06-30', 'source': 'test'}]})
 
 
 def test_statement_header_currency_wins():
@@ -169,6 +177,97 @@ def test_whole_company_anchor_grosses_up_minority_stake():
     # FV only as a fallback when cost is absent
     a3 = units.whole_company_anchor(cost_cr=None, ownership_frac=0.25, fair_value_cr=30)
     assert abs(float(a3) - 120.0) < 1e-6
+
+
+# ── #3 Q2 — FOREIGN-SCOPED SCALE CORROBORATION (the scale×FX 1000× door) ─────────────────────────────
+# A FOREIGN statement's declared scale is trusted ONLY when the whole-company anchor can corroborate it;
+# a bare foreign banner (a stale/template "'000") applied with no cross-check is a 10^k error compounded
+# by the FX rate. Uniform across ALL foreign currencies (config-B pattern), NEVER per-currency. INR/
+# domestic is untouched — anchored MIS are covered by the magnitude-lie check, and the fund's own ₹Cr
+# books are the trusted, self-tied backbone. All corpus foreign cos are anchored ⇒ blast radius 0 today.
+
+def test_foreign_declared_scale_without_anchor_HOLDS_the_1000x_door():
+    # MUST-HANDLE: a MYR statement declares 'thousands' with NO whole-company anchor to corroborate it.
+    # USED to trust the banner and apply ×1000 (a stale/template '000 → 1000× × FX). Now HELD.
+    fr = units.resolve_monetary_frame(stmt_currency='MYR', geo_currency='MYR', inr_mentioned=False,
+                                      declared_unit='thousands', sample_values=[15342397.11],
+                                      anchor_cr=None, ratecard=_myr_card())
+    assert fr.escalate and fr.scale is None
+    assert 'not corroborated' in fr.reason
+
+
+def test_foreign_no_anchor_door_reddening_neutralized(monkeypatch):
+    # REDDENING: neutralize the door (restore trust-when-uncheckable) and the SAME foreign no-anchor
+    # statement applies 'thousands' again — the 1000× reappears. Proves the gate is load-bearing.
+    monkeypatch.setattr(units, '_foreign_scale_uncorroborated', lambda *a, **k: False)
+    ss = units.resolve_statement_scale(declared_unit='thousands', currency='MYR',
+                                       sample_values=[15342397.11], anchor_cr=None, ratecard=_myr_card())
+    assert ss.scale == 'thousands' and not ss.escalate      # the wrong-number path, laid bare
+
+
+def test_foreign_declared_scale_with_consistent_anchor_emits():
+    # MUST-NOT-MISFIRE: a GENUINE foreign 'thousands' statement whose top line sits in-band with its
+    # anchor is corroborated → emits at 'thousands'. 5000 (thousands) MYR ×18.6 = ₹9.3Cr = the anchor;
+    # 'absolute' would be 3 decades low. The door only holds the UNCORROBORATED case.
+    fr = units.resolve_monetary_frame(stmt_currency='MYR', geo_currency='MYR', inr_mentioned=False,
+                                      declared_unit='thousands', sample_values=[5000],
+                                      anchor_cr=Decimal('9.3'), ratecard=_myr_card())
+    assert not fr.escalate and fr.scale == 'thousands'
+
+
+def test_foreign_declared_scale_lie_still_held_with_anchor():
+    # the real CPM shape: a MYR 'thousands' banner over ABSOLUTE values, anchor ₹239Cr → 'thousands' is
+    # ~2 decades off while 'absolute' fits → magnitude-lie HOLD (corroboration present, scale contradicted).
+    fr = units.resolve_monetary_frame(stmt_currency='MYR', geo_currency='MYR', inr_mentioned=False,
+                                      declared_unit='thousands', sample_values=[15342397.11],
+                                      anchor_cr=Decimal('239.1'), ratecard=_myr_card())
+    assert fr.escalate and fr.scale is None
+
+
+def test_no_declared_unit_foreign_anchor_resolves_absolute():
+    # MUST-NOT-MISFIRE (no-banner → anchor → absolute): the common foreign case (stale banner NOT read)
+    # + a ₹239Cr anchor → the anchor resolves 'absolute' (CPM/Analisa's safe path). 15.34M MYR ×18.6 =
+    # ₹28.5Cr fits; 'thousands' is out of band. The door does not apply (no declared unit).
+    fr = units.resolve_monetary_frame(stmt_currency='MYR', geo_currency='MYR', inr_mentioned=False,
+                                      declared_unit=None, sample_values=[15342397.11],
+                                      anchor_cr=Decimal('239.1'), ratecard=_myr_card())
+    assert not fr.escalate and fr.scale == 'absolute'
+
+
+def test_domestic_declared_scale_without_anchor_STILL_emits_the_backbone():
+    # MUST-NOT-MISFIRE + documents RESIDUAL (a): the foreign door must NOT touch INR/domestic. An INR
+    # statement declaring 'crore' with NO anchor still EMITS. KNOWN RESIDUAL: a DOMESTIC portfolio co
+    # missing from fund records (no anchor) + a stale READ banner is not caught here — rare (domestic
+    # cos are normally anchored) and kept shut in practice by the banner read-gap below; revisit if a
+    # real domestic-no-anchor case appears.
+    fr = units.resolve_monetary_frame(stmt_currency='INR', geo_currency='INR', inr_mentioned=True,
+                                      declared_unit='crore', sample_values=[826.4],
+                                      anchor_cr=None, ratecard=default_inr_card('2026-06-30'))
+    assert not fr.escalate and fr.scale == 'crore'
+
+
+def test_fund_scale_trust_is_a_documented_assumption_residual_b():
+    # DOCUMENTED ASSUMPTION (residual b, pre-existing, OUTSIDE #3's foreign scope): the fund domain
+    # declares its own scale ('Rs Cr') and is trusted for it. Its internal cross-ties (NAV = called −
+    # distributed + P&L; fees = 2% committed) corroborate RELATIONSHIPS but NOT a UNIFORM scale error —
+    # ×100 on every figure leaves the identities intact. #3's foreign door neither adds nor removes this
+    # trust; a fund-scale corroboration is a separate, later question. This control makes it explicit.
+    fr = units.resolve_monetary_frame(stmt_currency='INR', geo_currency='INR', inr_mentioned=True,
+                                      declared_unit='crore', sample_values=[500, 826.4, 1000],
+                                      anchor_cr=None, ratecard=default_inr_card('2026-06-30'))
+    assert not fr.escalate and fr.scale == 'crore'
+
+
+def test_banner_read_gap_glued_and_curly_apostrophe_documented():
+    # DOCUMENTED RESIDUAL: the "'000" unit token is NOT read from a currency-glued or curly-apostrophe
+    # banner — token_present needs an alnum boundary, and CPM/Analisa write "In MYR'000"/"(RM’000)"
+    # ('000 glued to the currency; curly ’). This currently PROTECTS coverage (Analisa's stale MYR'000
+    # is ignored → its anchor picks 'absolute' → it emits). #3's door-close is UNIT-AGNOSTIC (anchor-
+    # corroboration, not banner-reading), so the gap is left closed deliberately; this control locks the
+    # current not-read behavior so any future widening of the read is a conscious, reddening change.
+    assert profiler.token_present("'000", "in myr'000") is False        # glued to 'myr' → not a whole token
+    assert profiler.token_present("'000", "(rm’000)") is False          # curly apostrophe → not matched
+    assert profiler.token_present("'000", "rm '000") is True            # spaced → WOULD match (it's the boundary)
 
 
 if __name__ == '__main__':
