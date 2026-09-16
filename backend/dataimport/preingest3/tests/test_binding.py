@@ -129,6 +129,49 @@ def test_ebitda_arithmetic_identity_verifies_proxy():
     assert ex._verify_ebitda_arithmetic(no_da, 0, [1], 2) is None  # no D&A line → can't check
 
 
+def test_stated_ebitda_proxy_emits_with_disclosure_bar3():
+    # Lever 5 sub-B (bar 3 — synthetic-adversarial, byte-distinct from the LDC cells): a
+    # SELF-DESCRIBING 'Profit/Earnings/Loss BEFORE … depreciation …' proxy whose EBIT+D&A parts
+    # are ABSENT (identity → None) is EMITTED with a composition-disclosure (the label IS the
+    # disclosure). A proxy whose identity BROKE, one that is AFTER D&A, one with no profit base,
+    # and every non-proxy class stay HELD/clean. Principle: emit the company's own stated figure
+    # labelled by its definition; derive only what reconciles, else hold.
+    P = ex._is_stated_ebitda_proxy
+    # positives — self-describing (word-order / synonyms / loss base / 'pre' / 'excluding')
+    assert P('Profit Before Tax, depreciation and ESOP')          # LDC shape
+    assert P('Earnings before depreciation, interest and tax')
+    assert P('Loss before amortisation and depreciation')          # loss base, reordered
+    assert P('Profit pre depreciation & tax')
+    assert P('Profit excluding depreciation and finance cost')
+    # negatives — NOT emit-with-disclosure
+    assert not P('Profit after depreciation and amortisation')     # D&A SUBTRACTED (no add-back marker)
+    assert not P('Profit Before Tax')                              # not_ebitda (no D&A)
+    assert not P('Operating Profit before Depreciation')           # operating_addback (already clean)
+    assert not P('EBITDA')                                         # explicit clean
+    assert not P('Depreciation & Amortisation')                    # the expense line, no profit base
+
+    # gate: proxy + absent EBIT/D&A parts + self-describing → (True, None, <disclosure>)
+    proxy = [['Line', 'Feb-26'], ['Profit Before Tax, depreciation and ESOP', 120.0]]
+    v, why, disc = ex._ebitda_metric_gate('Profit Before Tax, depreciation and ESOP', proxy, 0, [1], 1)
+    assert v is True and why is None and disc and 'proxy' in disc.lower(), (v, why, disc)
+    # gate: proxy whose EBIT+D&A identity BROKE → HELD even though self-describing (must-not-misfire)
+    broke = [['Line', 'Feb-26'], ['Operating Profit', 100.0], ['Depreciation', 20.0],
+             ['Profit before tax and depreciation', 95.0]]         # 100+20 != 95
+    v2, why2, disc2 = ex._ebitda_metric_gate('Profit before tax and depreciation', broke, 0, [1], 3)
+    assert v2 is False and disc2 is None and 'identity broke' in why2, (v2, why2, disc2)
+    # gate: proxy that RECONCILES → clean emit, no disclosure (the arithmetic path wins)
+    ok = [['Line', 'Feb-26'], ['Operating Profit', 100.0], ['Depreciation', 20.0],
+          ['Profit before tax and depreciation', 120.0]]           # 100+20 == 120
+    v3, why3, disc3 = ex._ebitda_metric_gate('Profit before tax and depreciation', ok, 0, [1], 3)
+    assert v3 is True and disc3 is None, (v3, why3, disc3)
+    # gate: an unverifiable proxy that is NOT self-describing (no profit base) → HELD
+    v4, why4, disc4 = ex._ebitda_metric_gate('before depreciation and tax', proxy, 0, [1], 1)
+    assert v4 is False and disc4 is None and 'no EBIT/D&A lines' in why4, (v4, why4, disc4)
+    # gate: not_ebitda → HELD
+    v5, why5, disc5 = ex._ebitda_metric_gate('Profit Before Tax', proxy, 0, [1], 1)
+    assert v5 is False and 'not EBITDA' in why5, (v5, why5, disc5)
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_') and callable(fn):

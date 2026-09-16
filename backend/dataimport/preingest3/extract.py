@@ -238,6 +238,8 @@ def _is_ratio_label(label) -> bool:
 _DANDA_TOKENS = {'depreciation', 'amortisation', 'amortization', 'depreciaton',
                  'dna', 'd&a'}
 _OPERATING_TOKENS = {'operating', 'operational'}
+_PROXY_PROFIT_TOKENS = {'profit', 'earnings', 'loss'}            # a bottom-line result base
+_PROXY_ADDBACK_MARKERS = {'before', 'pre', 'excluding', 'excl'}  # D&A ADDED back (not subtracted)
 
 
 def _ebitda_label_class(label) -> str:
@@ -269,6 +271,21 @@ def _ebitda_is_clean(label) -> bool:
     D&A add-back. A proxy add-back (PBT/net + D&A) is NOT clean by label — it must
     pass the arithmetic identity (_verify_ebitda_arithmetic) or be held."""
     return _ebitda_label_class(label) in ('ebitda', 'operating_addback')
+
+
+def _is_stated_ebitda_proxy(label) -> bool:
+    """A self-describing company-stated EBITDA proxy: a Profit/Earnings/Loss line explicitly
+    BEFORE (…) depreciation (…) on a post-interest/tax base — the LABEL enumerates its own
+    add-backs. When such a proxy's EBIT+D&A parts are absent from the statement so the
+    arithmetic identity cannot run (_verify_ebitda_arithmetic → None), it is EMITTED with a
+    composition-disclosure rather than held: the number is the company's own stated figure and
+    the label IS the disclosure of what it contains (Lever 5 sub-B — e.g. LDC's 'Profit Before
+    Tax, depreciation and ESOP'). Excludes an AFTER-D&A profit (no add-back marker) and every
+    non-proxy class. Linguistic, no per-file spellings."""
+    if _ebitda_label_class(label) != 'proxy_addback':
+        return False
+    toks = set(lexicon.normalise_label(label).split())
+    return bool(toks & _PROXY_PROFIT_TOKENS) and bool(toks & _PROXY_ADDBACK_MARKERS)
 
 
 def _row_nums(rows, r, num_cols):
@@ -317,6 +334,36 @@ def _verify_ebitda_arithmetic(rows, label_col, num_cols, ebitda_row):
         return abs(lhs - rhs) / abs(rhs) <= 0.05
     except Exception:  # noqa: BLE001 — verification must never crash the extract
         return None
+
+
+def _ebitda_metric_gate(row_label, rows, label_col, num_cols, ebitda_row):
+    """The U2 EBITDA metric-class gate — the ONE rule shared by the deterministic and finder
+    emit paths (no drift, no duplicated guard). Returns (verified, why, disclosure):
+      • (True, None, None)   clean EBITDA — explicit, an operating-base D&A add-back, or a proxy
+                             that RECONCILES to EBIT+D&A on a shared column;
+      • (True, None, note)   a self-describing company-stated proxy whose EBIT+D&A parts are
+                             ABSENT so the identity cannot run: EMIT with a composition-disclosure
+                             — the label IS the disclosure (Lever 5 sub-B, see
+                             _is_stated_ebitda_proxy); the reader is told the exact makeup;
+      • (False, why, None)   not EBITDA (EBIT/PBT, no D&A add-back), a proxy whose EBIT+D&A
+                             identity BROKE (a wrong metric), or a non-self-describing
+                             unverifiable proxy → held to avoid metric-mix.
+    Linguistic + arithmetic only; no per-file spellings."""
+    cls = _ebitda_label_class(row_label)
+    if cls in ('ebitda', 'operating_addback'):
+        return True, None, None
+    if cls == 'not_ebitda':
+        return False, f"'{row_label[:30]}' is EBIT/PBT (no D&A add-back), not EBITDA", None
+    chk = (_verify_ebitda_arithmetic(rows, label_col, num_cols, ebitda_row)
+           if (rows is not None and ebitda_row is not None) else None)
+    if chk is True:
+        return True, None, None
+    if chk is None and _is_stated_ebitda_proxy(row_label):
+        return True, None, (f"company-stated EBITDA proxy — '{row_label[:44]}'; composition per "
+                            f'label (not reconciled to separate EBIT+D&A lines on the statement)')
+    why = (f"'{row_label[:30]}' is a post-interest/tax + D&A proxy; "
+           + ('EBIT+D&A identity broke' if chk is False else 'no EBIT/D&A lines to verify'))
+    return False, why, None
 
 
 def _label_score(label, concept, toks) -> float:
@@ -1045,20 +1092,13 @@ def _emit_from_collapse(concept, col, prov, *, stmt_kind, frame, rows, ax, label
                       hold_reason=f'monetary frame unresolved: {frame.reason}'[:90])
     _disclose_currency_basis(prov, frame)                        # audit: file / user-confirmed / rate
     if concept == 'ebitda':                                      # metric-definition consistency (U2)
-        cls = _ebitda_label_class(prov.row_label)
-        verified, why = cls in ('ebitda', 'operating_addback'), None
-        if cls == 'not_ebitda':
-            why = f"'{prov.row_label[:30]}' is EBIT/PBT (no D&A add-back), not EBITDA"
-        elif cls == 'proxy_addback':
-            chk = _verify_ebitda_arithmetic(rows, label_col, [pc.col for pc in ax.columns], ebitda_row)
-            if chk is True:
-                verified = True
-            else:
-                why = (f"'{prov.row_label[:30]}' is a post-interest/tax + D&A proxy; "
-                       + ('EBIT+D&A identity broke' if chk is False else 'no EBIT/D&A lines to verify'))
+        verified, why, disclosure = _ebitda_metric_gate(
+            prov.row_label, rows, label_col, [pc.col for pc in ax.columns], ebitda_row)
         if not verified:
             return Figure(concept, None, None, prov, held=True, basis=col.basis, months=col.months,
                           hold_reason=(why + ' — held to avoid metric-mix')[:90])
+        if disclosure:
+            prov.note = f'{prov.note}; {disclosure}' if prov.note else disclosure
     try:
         q = Quantity(amount=col.value, currency=frame.currency, scale=frame.scale,
                      nature=concept_nature(concept), concept=concept)
@@ -2236,20 +2276,13 @@ def _emit_from_collapsed(concept, col, frame, prov, rate_card, anchor_cr, *,
                       hold_reason=f'monetary frame unresolved: {frame.reason}'[:90])
     _disclose_currency_basis(prov, frame)                            # audit: file / user-confirmed / rate
     if concept == 'ebitda' and rows is not None:                     # U2 metric-definition consistency
-        cls = _ebitda_label_class(prov.row_label)
-        verified, why = cls in ('ebitda', 'operating_addback'), None
-        if cls == 'not_ebitda':
-            why = f"'{prov.row_label[:30]}' is EBIT/PBT (no D&A add-back), not EBITDA"
-        elif cls == 'proxy_addback':
-            chk = (_verify_ebitda_arithmetic(rows, label_col, num_cols, ebitda_row)
-                   if ebitda_row is not None else None)
-            verified = chk is True
-            if not verified:
-                why = (f"'{prov.row_label[:30]}' is a post-interest/tax + D&A proxy; "
-                       + ('EBIT+D&A identity broke' if chk is False else 'no EBIT/D&A lines to verify'))
+        verified, why, disclosure = _ebitda_metric_gate(
+            prov.row_label, rows, label_col, num_cols, ebitda_row)
         if not verified:
             return Figure(concept, None, None, prov, held=True, basis=basis, months=months,
                           hold_reason=(why + ' — held to avoid metric-mix')[:90])
+        if disclosure:
+            prov.note = f'{prov.note}; {disclosure}' if prov.note else disclosure
     try:
         q = Quantity(amount=col.value, currency=frame.currency, scale=frame.scale,
                      nature=concept_nature(concept), concept=concept)
