@@ -195,12 +195,12 @@ def test_instaastro_mis_values_trace_to_cells():
     f = _extract(_anchors(), 'instaastro', 'AVF_2026_03_18_P_InstaAstro_MIS_Feb_2026.xlsx')
     _close(f['ebitda'], '-8.8686', basis='TTM', n_cells=12)
     _close(f['cash'], '17.7422', basis='point_in_time', cell='BG79')
-    # Lever 3 ① never-a-wrong-number guarantee: the 'total revenues' synonym now LOCATES the 'Total
-    # Revenues' aggregate, but it is a contaminated TTM (Other Incomes non-zero in 6 of the 12 summed
-    # months) → the purity proof fails (b) → HELD at emit, never shipped. Located-AND-held, not just found.
-    rev = f['revenue']
-    assert rev.held and rev.value_cr is None, \
-        f'InstaAstro revenue must HOLD (contaminated TTM aggregate), got {rev.value_cr}'
+    # Lever 5 (clean-operating construction): the 'Total Revenues' aggregate folds in non-operating Other
+    # Incomes (non-zero in some of the 12 TTM months), so the total itself is not emittable AS operating
+    # revenue — but its leaf components RECONCILE to the total in every column, so clean operating revenue
+    # = Σ(operating components) = Total − Other Incomes is CONSTRUCTED and emitted (₹104.2639 Cr TTM,
+    # cited to the operating component cells; cell='' as a multi-cell sum). Was HELD pre-Lever-5.
+    _close(f['revenue'], '104.2639', basis='TTM')
 
 
 def test_agnikul_mis_values_trace_to_cells():

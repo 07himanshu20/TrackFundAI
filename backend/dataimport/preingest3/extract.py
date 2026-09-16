@@ -1520,15 +1520,57 @@ def _aggregate_is_purely_operating(rows, label_col, total_row, acts) -> bool:
     return bool(seen and op_present)                               # (c) never a total with NO operating line
 
 
+def _construct_operating_rows(rows, label_col, total_row, acts):
+    """Clean-operating-revenue CONSTRUCTION set (Lever 5): the operating leaf component rows whose SUM is
+    the citable operating revenue when a 'Total Income/Revenue' aggregate cannot itself be emitted (it
+    folds in non-operating income). Returns the operating rows, or None if the figure cannot be cleanly
+    built (→ caller HOLDS, fail-closed). PRINCIPLE (accounting identity, not fitted): operating revenue =
+    total revenue − non-operating income, valid ONLY when the leaf components are COMPLETE — Σ(all
+    components) == total in EVERY populated column (± penny), so nothing is unlabelled/hidden — and at
+    least one operating (non-non_op) component carries value. Then clean operating = Σ(operating
+    components) = total − Σ(non-op). Non-op is the SAME single-sourced vocabulary (_NONOP_INCOME_RE) the
+    purity proof uses, so construction and proof cannot diverge. Distinct from `keep`: `keep` needs
+    non-op == 0 (the total already IS operating); `construct` handles a COMPLETE component set whose
+    non-op is NON-zero — it rebuilds the operating figure from the operating leaves only."""
+    if acts is None or not (0 <= total_row < len(rows)):
+        return None
+    comps = _leaf_components(rows, label_col, total_row, acts)
+    if not comps:
+        return None
+    non_op = {r for r in comps if _NONOP_INCOME_RE.search(str(rows[r][label_col]))}
+    op = [r for r in comps if r not in non_op]
+    if not op:
+        return None
+
+    def _cell(r, col):
+        v = rows[r][col] if col < len(rows[r]) else None
+        return to_decimal(v) if _cell_type(v) == 'num' else None
+
+    seen = op_present = False
+    for pc in acts:
+        tvd = _cell(total_row, pc.col)
+        if tvd is None:
+            continue
+        seen = True
+        tol = max(Decimal('1'), abs(tvd) * Decimal('0.0001'))
+        comp_sum = sum((_cell(r, pc.col) or Decimal('0')) for r in comps)
+        if abs(comp_sum - tvd) > tol:
+            return None                    # components do NOT reconcile to the total → unlabelled line, hold
+        if any(abs(_cell(r, pc.col) or Decimal('0')) > tol for r in op):
+            op_present = True
+    return op if (seen and op_present) else None
+
+
 def _operating_revenue_disposition(rows, label_col, rev_row, acts=None):
     """UNIVERSAL disposition for a located revenue row (structure-keyed, never a file/sheet name).
-    Returns one of ('relocate', rfo_row) | ('hold', reason) | ('keep', None).
+    Returns one of ('relocate', rfo_row) | ('construct', op_rows) | ('hold', reason) | ('keep', None).
 
     INVARIANT (closes the class of fail-opens): a 'Total Income/Revenue' AGGREGATE with no stated
-    Revenue-from-operations row DEFAULTS TO HOLD; `keep` is reachable ONLY through the positive purity
-    proof `_aggregate_is_purely_operating`. EVERY gap falls to the fail-closed hold — acts absent (the
-    finder call site formerly passed none → fail-open), components unreadable, proof False, or proof
-    raises. There is no separate 'detect non-op then decide' path that could disagree with the proof."""
+    Revenue-from-operations row DEFAULTS TO HOLD; `keep`/`construct` are reachable ONLY through a positive
+    proof. `keep` = the total is proven purely operating (`_aggregate_is_purely_operating`). `construct` =
+    the total folds in non-op BUT its leaf components are complete + reconcile, so the operating figure is
+    rebuilt as Σ(operating leaves) (`_construct_operating_rows`, Lever 5). EVERY gap falls to the
+    fail-closed hold — acts absent, components unreadable, proofs False, or a proof raises."""
     if not _is_total_income_aggregate(rows, label_col, rev_row):
         return ('keep', None)                                       # not an aggregate → the located row is it
     rfo = _operating_revenue_row(rows, label_col, rev_row)
@@ -1540,6 +1582,12 @@ def _operating_revenue_disposition(rows, label_col, rev_row, acts=None):
         proven = False                                             # a proof that cannot run does not emit
     if proven:
         return ('keep', None)
+    try:
+        op = _construct_operating_rows(rows, label_col, rev_row, acts)
+    except Exception:
+        op = None                                                  # a construction that cannot run does not emit
+    if op is not None:
+        return ('construct', op)
     return ('hold', _rev_agg_hold_reason(rows, label_col, rev_row, acts))
 
 
@@ -1652,10 +1700,13 @@ def extract_company(label: str, path: str, *, rate_card, entity: str = None,
     for concept in MIS_CONCEPTS:
         row = found.get(concept)
         rfo = None
+        construct_rows = None
         if concept == 'revenue':                       # operating-revenue disposition (universal, structure-keyed)
             disp, target = _operating_revenue_disposition(rows, label_col, row, acts=acts)
             if disp == 'relocate':
                 rfo, row = target, target              # emit the directly-stated Revenue-from-operations row
+            elif disp == 'construct':
+                construct_rows = target                # clean operating revenue = Σ(operating components)
             elif disp == 'hold':
                 rev_hold = target                      # aggregate folds in non-op income, no RfO → HOLD
         provs[concept] = Provenance(                   # for a revenue HOLD, prov points at the aggregate row
@@ -1666,16 +1717,40 @@ def extract_company(label: str, path: str, *, rate_card, entity: str = None,
             continue
         if concept == 'revenue' and rev_hold:          # never collapse → no value is emitted (fail-closed)
             continue
-        values = {pc.col: rows[row][pc.col] for pc in acts
-                  if pc.col < len(rows[row]) and _cell_type(rows[row][pc.col]) == 'num'}
+        if construct_rows:                             # clean operating revenue = Σ(operating leaf components)
+            values = {}
+            for pc in acts:
+                parts = [Decimal(str(rows[r][pc.col])) for r in construct_rows
+                         if pc.col < len(rows[r]) and _cell_type(rows[r][pc.col]) == 'num']
+                if parts:
+                    values[pc.col] = sum(parts)
+        else:
+            values = {pc.col: rows[row][pc.col] for pc in acts
+                      if pc.col < len(rows[row]) and _cell_type(rows[row][pc.col]) == 'num'}
         if not values:
             continue
         collapsed[concept] = periods.collapse(concept, concept_nature(concept), acts, values,
                                               as_of=stated_asof, require_bound=require_bound)
-        _cite_value_cells(provs[concept], collapsed[concept], row, colmap)
-        if rfo is not None:                            # disclose the relocation to operating revenue
+        if construct_rows is not None:                  # constructed sum → cite the OPERATING COMPONENT
+            sc = collapsed[concept].source_cols        # value cells (the reconstruction set), cell='' —
+            provs[concept].derived_from = [_a1(c, r) for c in sc for r in construct_rows   # re-adding them
+                                           if c < len(rows[r]) and _cell_type(rows[r][c]) == 'num']  # → value
+            provs[concept].note = ((provs[concept].note + ' ' if provs[concept].note else '') +
+                                   f'label@{provs[concept].cell}').strip() if provs[concept].cell else \
+                provs[concept].note
+            provs[concept].cell = ''                    # a constructed multi-row sum has no single value cell
+            _last = colmap.get(sc[-1]) if sc else None
+            if _last is not None:
+                provs[concept].col_label = str(_last.label)
+            _labs = ', '.join(dict.fromkeys(str(rows[r][label_col]).strip() for r in construct_rows))
             provs[concept].note = (provs[concept].note + '; ' if provs[concept].note else '') + \
-                'operating revenue (relocated from total-income aggregate to Revenue-from-operations row)'
+                ('clean operating revenue constructed = Σ(operating components: ' + _labs[:80] +
+                 ') = total − non-operating income; Σ components == total verified per column')
+        else:
+            _cite_value_cells(provs[concept], collapsed[concept], row, colmap)
+            if rfo is not None:                        # disclose the relocation to operating revenue
+                provs[concept].note = (provs[concept].note + '; ' if provs[concept].note else '') + \
+                    'operating revenue (relocated from total-income aggregate to Revenue-from-operations row)'
 
     # ── Resolve the STATEMENT monetary frame ONCE (money concepts) → apply to ALL ──
     money_samples = [c.value for cn, c in collapsed.items()
@@ -2769,6 +2844,11 @@ def _model_find_across_file(prof, ident, held, *, entity, domicile, anchor_cr, r
                         rr = locator.RowRecord(concept, 'direct', alt, [],
                                                str(rows[alt][label_col]).strip()
                                                if alt < len(rows) and label_col < len(rows[alt]) else '')
+                    if disp == 'construct' and alt:            # Lever 5: clean operating = Σ(operating leaves)
+                        # expression form → _collapse_row sums the operand rows per column (same machinery
+                        # the deterministic path uses); the total row stays the provenance anchor.
+                        rr = locator.RowRecord(concept, 'expression', row, list(alt),
+                                               'clean operating revenue = Σ(operating components)')
                 if concept == 'revenue' and _OTHER_INCOME_RE.search(rr.row_label or ''):   # G2: not revenue
                     diagnostics.append({'concept': concept, 'sheet': sheet, 'scope': _region_id(sheet, reg),
                                         'rejected': 'other-income-not-revenue', 'row_label': rr.row_label})

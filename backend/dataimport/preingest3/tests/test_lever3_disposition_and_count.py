@@ -9,9 +9,11 @@ must-not-misfire controls, on principle-based synthetic grids (not the corpus ce
    unlabelled line folded in], (b) every non-op line (Other Income / interest / …) is ~0, and (c) a real
    operating component carries value. Every gap (no acts, no components, proof raises) → HOLD (default).
    MUST-HANDLE: a pure reconciling total, and an Aliste-class total that excludes an operating line (< Σ).
-   MUST-NOT-MISFIRE: a non-op line carrying value (Agnikul 'Interest on FDs'), a total that folds in
-   Other Income in a NON-emit summed column (InstaAstro TTM), a total that EXCEEDS its components (an
-   unlabelled/hidden line), an all-non-op total, or no columns to check → HOLD.
+   The PURITY PROOF must return False for any contaminated total (a non-op line carrying value, Other
+   Income non-zero in a NON-emit summed column, an excess/hidden line, an all-non-op total, no columns) —
+   so the total is never emitted as-is. Lever 5 then adds `construct`: where a contaminated total's leaf
+   components RECONCILE (Σ == total), the disposition builds clean operating = Σ(operating leaves); where
+   they do NOT reconcile (excess/hidden line), or no operating leaf carries value, or no columns → HOLD.
 
 ② `_count_gate_hold`: a count (headcount) must be positive and of count magnitude — a currency/scale
    value (a monetary 'Staff Cost') can NEVER be a headcount. MUST-NOT-MISFIRE: ≤0 and monetary-magnitude
@@ -41,12 +43,17 @@ class OperatingRevenueProof(SimpleTestCase):
         self.assertTrue(_aggregate_is_purely_operating(rows, 0, 4, ACTS))
         self.assertEqual(_operating_revenue_disposition(rows, 0, 4, acts=ACTS), ('keep', None))
 
-    def test_interest_line_nonzero_holds(self):
-        # Agnikul shape: 'Interest on FDs' is non-op and non-zero → must NOT be accepted as revenue
+    def test_interest_line_nonzero_total_not_pure_but_reconciles_constructs(self):
+        # 'Interest on FDs' is non-op + non-zero → the TOTAL is NOT purely operating (proof False, so the
+        # contaminated total is never emitted). But the leaf components RECONCILE to the total (130=100+30,
+        # 160=120+40) → Lever 5 CONSTRUCTS clean operating = Σ(operating leaves) = Product A (row 1),
+        # stripping the interest. (Pre-Lever-5 this HELD; the construction is the intended upgrade — the
+        # clean operating figure is citable from citable leaves. Where components do NOT reconcile it HOLDS,
+        # see test_total_exceeds_components_holds.)
         rows = _grid(['Income', None, None], ['Product A', 100, 120], ['Interest on FDs', 30, 40],
                      ['Total Income', 130, 160])
-        self.assertFalse(_aggregate_is_purely_operating(rows, 0, 3, ACTS))
-        self.assertEqual(_operating_revenue_disposition(rows, 0, 3, acts=ACTS)[0], 'hold')
+        self.assertFalse(_aggregate_is_purely_operating(rows, 0, 3, ACTS))     # total not emittable as-is
+        self.assertEqual(_operating_revenue_disposition(rows, 0, 3, acts=ACTS), ('construct', [1]))
 
     def test_other_income_nonzero_in_a_nonemit_column_holds(self):
         # InstaAstro TTM shape: Other Income 0 in the max-total (emit) column but non-zero in the OTHER

@@ -74,6 +74,14 @@ GT = {
     #   and TI − OI is a not-yet-citable subtraction → held. A held slot is SAFE (not an unverified emit).
     ('Agnikul', 'cash'): '117.6646',
     ('Agnikul', 'headcount'): '299',        # Feb'26 period-end (B29); NOT an average/sum
+    ('InstaAstro', 'revenue'): '104.2639',  # Lever 5 sub-C: clean operating revenue CONSTRUCTED =
+                                            # Σ(operating leaves) on 'P&L' — Reading Sessions (R8),
+                                            # Pooja (R12), Stones (R16), Trishona (R20) — over the TTM
+                                            # 12 cols (AV..BG, ending 28-Feb-26). Σ = ₹1,042,638,599.79
+                                            # = 104.2639 Cr (÷1e7). Reconciles penny-clean: Total
+                                            # Revenues (R28) ₹1,045,024,553.15 = Σ(operating) + Other
+                                            # Incomes (R24) ₹2,385,953.36 → clean operating = Total −
+                                            # Other Income. Independently recomputed from raw cells.
     ('InstaAstro', 'ebitda'): '-8.8686', ('InstaAstro', 'cash'): '17.7422',
     ('InstaAstro', 'headcount'): '148',     # Lever 3 ②: 'Team Costs'!BG68 'Total Head Count', Feb-26
                                             # period-end (135→139→145→148 monotonic — a stock, latest col,
