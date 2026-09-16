@@ -86,19 +86,22 @@ FOREIGN_GT = {
     ('Chemoscience Pte Ltd', 'ebitda'): '11.8477',   # 'ANA & LS' statement, SGD-native × 75.43
     # Analisa Resources Sdn Bhd (Malaysia, MYR @ 23.38), as-of May-2025 (file period) — #4 lock.
     # Traced to raw cell × rate; revenue/ebitda cross-checked to the Summary '05 P&L (2)' YTD column.
-    ('Analisa Resources Sdn Bhd', 'revenue'): '8.6368',   # PL rectify(Normalised)!H3 = 3,694,112.18 MYR
-                                                          # (YTD CY25, 5mo, = Summary!H6) × 23.38 = 8.63683.
-                                                          # #3-resolved labelled 5-month YTD (basis=YTD·5mo),
-                                                          # NOT the stale annual — vintage guard demotes it.
-    ('Analisa Resources Sdn Bhd', 'ebitda'): '0.9194',    # PL rectify(Normalised)!H18 = 393,262.32 MYR
-                                                          # (Normalized EBITDA YTD, = Summary!H13) × 23.38.
-                                                          # LEVER-5 RE-BASE FLAG: this is the ADJUSTED basis.
-                                                          # The dual-reporting policy wants Standard reported
-                                                          # PRIMARY + Adjusted disclosed. Plain EBITDA (Summary
-                                                          # '05 P&L(2)'!R11 YTD 233,485.32 → ₹0.5459, a ~68%
-                                                          # gap) is the Standard row. Lever 5 must re-base this
-                                                          # GT (and audit every company's located-EBITDA basis)
-                                                          # so the consolidated column is not mixed-basis.
+    ('Analisa Resources Sdn Bhd', 'revenue'): '8.6368',   # '05 Summary P&L'!H6 = 3,694,112.18 MYR (YTD CY25,
+                                                          # 5mo) × 23.38 = 8.63683. #3-resolved labelled 5-month
+                                                          # YTD (basis=YTD·5mo), NOT the stale annual. Lever 5
+                                                          # sub-A re-pointed the source from the normalized
+                                                          # variant to the plain Summary — SAME value (revenue
+                                                          # is not normalized), provenance sheet changed only.
+    ('Analisa Resources Sdn Bhd', 'ebitda'): '0.5459',    # Lever 5 sub-A RE-BASE (DONE): plain/standard EBITDA
+                                                          # is now PRIMARY — '05 Summary P&L'!H11 = 233,485.32
+                                                          # MYR (YTD) × 23.38 = 0.5459. The engine prefers the
+                                                          # plain/actual sheet over the normalized variant ('PL
+                                                          # rectify (Normalised)', H18 = 393,262.32 → ₹0.9194)
+                                                          # per the prefer-plain policy. The Normalized EBITDA
+                                                          # (₹0.9194 = plain + one-time adj H12 159,777, forex
+                                                          # reclass) is DISCLOSED in the provenance note;
+                                                          # structured Adjusted slot deferred (gated on the
+                                                          # downstream basis-awareness fact).
     ('Analisa Resources Sdn Bhd', 'cash'): '16.1842',     # 08 BS!AE2 = 6,922,257.27 MYR (May-2025 cash;
                                                           # AE1=2025-05-31, future months empty → Lever-4
                                                           # keeps May) × 23.38 = 16.18424. BS==CFS CROSS-TIE

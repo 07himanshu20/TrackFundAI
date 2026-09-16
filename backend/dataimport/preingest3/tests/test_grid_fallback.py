@@ -149,6 +149,56 @@ def test_no_grid_carrying_concept_returns_none():
     assert fig is None
 
 
+# ── Lever 5 sub-A: prefer PLAIN/actual over the normalized/adjusted variant ────────────────────────
+# income-CONFIRMED grids (identity holds). PLAIN: Opex 15 → EBITDA 15. NORMALISED: lower Opex 5 →
+# EBITDA 25, AND more columns (would win on ncols without the demotion). Byte-distinct from the corpus.
+# both are COMPARISON grids (period pairs REPEAT → not a time-series, so _grid_resource reads them);
+# the normalized one has MORE column-pairs (would win the old (dump,-ncols,sheet) key without the demotion).
+_PLAIN_PL = [
+    ['PL rectify (Actuals) (INR Cr)', 'Jan-25', 'Feb-25', 'Jan-25', 'Feb-25'],
+    ['Revenue', 50, 50, 50, 50], ['COGS', 20, 20, 20, 20], ['Gross Profit', 30, 30, 30, 30],
+    ['Operating Expenses', 15, 15, 15, 15], ['EBITDA', 15, 15, 15, 15],
+]
+_NORM_PL = [
+    ['PL rectify (Normalised) (INR Cr)', 'Jan-25', 'Feb-25', 'Jan-25', 'Feb-25', 'Jan-25', 'Feb-25'],
+    ['Revenue', 50, 50, 50, 50, 50, 50], ['COGS', 20, 20, 20, 20, 20, 20],
+    ['Gross Profit', 30, 30, 30, 30, 30, 30], ['Operating Expenses', 5, 5, 5, 5, 5, 5],
+    ['EBITDA', 25, 25, 25, 25, 25, 25],
+]
+
+
+def _resource_multi(sheets, concept, **kw):
+    prof = {'sheets': [types.SimpleNamespace(sheet=n, currency_hints=['INR']) for n in sheets],
+            'grid': {n: [list(r) for r in rows] for n, rows in sheets.items()}}
+    return extract._grid_resource(prof, concept, primary_sheet='__none__', ident=_ident(),
+                                  label='t.xlsx', geo_ccy=None, inr_mentioned=True,
+                                  anchor_cr=kw.pop('anchor_cr', None), rate_card=_RC,
+                                  as_of=kw.pop('as_of', (2025, 2)), require_bound=False)
+
+
+def test_prefer_plain_over_normalized_variant():
+    # MUST-HANDLE: both a plain and a normalized grid carry EBITDA; the normalized one has MORE columns
+    # (would win the old (dump,-ncols,sheet) key). The prefer-plain demotion picks the PLAIN sheet and
+    # discloses the demoted variant. Value == the plain-only value (NOT the normalized one).
+    plain_only = _resource_multi({'PL rectify (Actuals)': _PLAIN_PL}, 'ebitda', anchor_cr=Decimal('20'))
+    both = _resource_multi({'PL rectify (Normalised)': _NORM_PL, 'PL rectify (Actuals)': _PLAIN_PL},
+                           'ebitda', anchor_cr=Decimal('20'))
+    assert isinstance(both, Figure) and both.confirmed
+    assert both.provenance.sheet == 'PL rectify (Actuals)', both.provenance.sheet
+    assert both.value_cr == plain_only.value_cr                      # plain value, not the normalized 25-basis
+    assert 'prefer-plain' in (both.provenance.note or '')            # the demotion is disclosed
+    assert "'PL rectify (Normalised)'" in (both.provenance.note or '')
+
+
+def test_normalized_only_still_emits_demote_not_exclude():
+    # MUST-NOT-MISFIRE: when ONLY a normalized variant exists it is still used (demote, never exclude) —
+    # coverage is not lost. No prefer-plain disclosure (nothing plainer was available).
+    fig = _resource_multi({'PL rectify (Normalised)': _NORM_PL}, 'ebitda', anchor_cr=Decimal('20'))
+    assert isinstance(fig, Figure) and fig.confirmed
+    assert fig.provenance.sheet == 'PL rectify (Normalised)'
+    assert 'prefer-plain' not in (fig.provenance.note or '')
+
+
 # ── CSS real-file reddening: the SGD currency path (green only once SGD is covered) ────────────────
 IN = 'backend/media/preingest/trivesta/100e86d5/in'
 CSS = '0525_CSS_Monthy_Report_-_Consol_Updated.xlsx'

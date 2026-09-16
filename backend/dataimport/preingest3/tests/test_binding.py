@@ -172,6 +172,31 @@ def test_stated_ebitda_proxy_emits_with_disclosure_bar3():
     assert v5 is False and 'not EBITDA' in why5, (v5, why5, disc5)
 
 
+def test_normalized_variant_prefer_plain_bar3():
+    # Lever 5 sub-A (bar 3 — synthetic-adversarial): a sheet whose NAME marks it a normalized/
+    # adjusted VARIANT is DEMOTED below its plain/actual counterpart when selecting the primary
+    # comparable figure. Critically the marker often lives in a PARENTHETICAL ('(Normalised)')
+    # that lexicon.normalise_label STRIPS — so detection must scan the RAW name. The classic bug:
+    # 'PL rectify (Normalised)' and 'PL rectify (Actuals)' both collapse to 'pl rectify' under
+    # normalise_label — indistinguishable. Prove the predicate separates them on the raw name.
+    from backend.dataimport.preingest3 import lexicon
+    assert lexicon.normalise_label('PL rectify (Normalised)') == lexicon.normalise_label('PL rectify (Actuals)')
+    V = ex._is_normalized_variant
+    # positives (normalized/adjusted variants) — parenthetical, standalone, truncated, inflected
+    assert V('PL rectify (Normalised)')          # Analisa case (marker inside parens)
+    assert V('P&L (normalized)')
+    assert V('Normalisation CY24')
+    assert V("06b Opex B'down (Normalisatio) ")  # truncated → prefix match
+    assert V('Adjusted P&L')
+    assert V('Underlying Earnings')
+    # negatives (plain/actual) — must NOT misfire
+    assert not V('PL rectify (Actuals)')
+    assert not V('05 Summary P&L')
+    assert not V('05 Summary P&L (2)')
+    assert not V('Consolidated MIS')
+    assert not V('Income Statement')
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_') and callable(fn):

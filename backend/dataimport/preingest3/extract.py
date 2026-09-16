@@ -288,6 +288,24 @@ def _is_stated_ebitda_proxy(label) -> bool:
     return bool(toks & _PROXY_PROFIT_TOKENS) and bool(toks & _PROXY_ADDBACK_MARKERS)
 
 
+# prefixes so truncations ('Normalisatio') and inflections ('adjustment'/'adjusted') all match
+_NORMALIZED_VARIANT_PREFIXES = ('normalis', 'normaliz', 'adjust', 'underlying')
+
+
+def _is_normalized_variant(name) -> bool:
+    """True iff a SHEET name (or row label) marks it as a normalized/adjusted VARIANT of a
+    statement — a management-adjusted presentation (e.g. 'PL rectify (Normalised)'). Such a
+    variant is DEMOTED (never excluded) below its plain/actual counterpart when selecting the
+    PRIMARY comparable figure, so a plain EBITDA is preferred over a normalized one; if ONLY a
+    normalized variant exists it is still used (and disclosed). Universal — any file, no
+    per-file sheet names; a sheet-quality signal in the spirit of the vintage guard.
+
+    Scans the RAW name (NOT lexicon.normalise_label, which strips parenthetical notes — the
+    very place the '(Normalised)' marker lives — collapsing it onto '(Actuals)')."""
+    toks = re.findall(r'[a-z]+', str(name or '').lower())
+    return any(t.startswith(p) for t in toks for p in _NORMALIZED_VARIANT_PREFIXES)
+
+
 def _row_nums(rows, r, num_cols):
     return {c: rows[r][c] for c in num_cols
             if c < len(rows[r]) and _cell_type(rows[r][c]) == 'num'}
@@ -1339,7 +1357,8 @@ def _grid_resource(prof, concept, primary_sheet, *, ident, label, geo_ccy, inr_m
     Multi-scope / comparative conflicts fail-close INSIDE collapse (→ held). GRIDS ONLY — series sheets
     are never read here, so every series emit is byte-identical."""
     candidate_held = None                        # §4: a statement-shaped-but-unconfirmed grid, if any
-    best = None                                  # (dump, -ncols, sheet, rows, ax, lc, row, kind)
+    best = None                                  # (key, sheet, rows, ax, lc, row, kind)
+    normalized_variants = []                     # eligible normalized/adjusted grids carrying the concept
     for s in prof['sheets']:
         if s.sheet == primary_sheet or s.sheet not in prof['grid']:
             continue
@@ -1368,12 +1387,16 @@ def _grid_resource(prof, concept, primary_sheet, *, ident, label, geo_ccy, inr_m
                                  f'(kind={kind}) — held for review, not skipped')[:90])
             continue
         dump = tiers.is_dump(rows, ax.axis_rows[0] + 1, lc)
-        key = (dump, -len(ax.columns), s.sheet)
+        nv = _is_normalized_variant(s.sheet)                     # prefer PLAIN over normalized/adjusted
+        if nv:
+            normalized_variants.append(s.sheet)
+        key = (dump, nv, -len(ax.columns), s.sheet)             # nv BEFORE ncols: plain wins any col count
         if best is None or key < best[0]:
             best = (key, s.sheet, rows, ax, lc, row, kind)
     if best is None:
         return candidate_held
     _key, sheet, rows, ax, lc, row, kind = best
+    winner_nv = _key[1]
     acts = _actual_columns(rows, ax)
     found = {c: _find_concept_row(rows, lc, c, ax.axis_rows[0] + 1, len(rows), ax.columns)
              for c in MIS_CONCEPTS}
@@ -1403,6 +1426,9 @@ def _grid_resource(prof, concept, primary_sheet, *, ident, label, geo_ccy, inr_m
             banner = _col_banner(rows, ax, col.source_cols[-1])
             scope = f'; scope={banner}' if banner else ''
     prov.note = (prov.note + '; ' if prov.note else '') + f'grid statement source (kind={kind}{scope})'
+    if not winner_nv and normalized_variants:    # a PLAIN grid won over an available normalized/adjusted
+        prov.note += (f'; primary=plain/actual {concept}; a normalized/adjusted variant exists '
+                      f'({normalized_variants[0]!r}) — demoted per prefer-plain policy (comparable basis)')
     fig = _emit_from_collapse(concept, col, prov, stmt_kind=kind, frame=frame, rows=rows, ax=ax,
                               label_col=lc, ebitda_row=found.get('ebitda'), anchor_cr=anchor_cr,
                               rate_card=rate_card)
