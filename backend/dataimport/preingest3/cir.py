@@ -83,6 +83,10 @@ class Figure:
     months: Optional[int] = None           # period length (for basis-aware aggregation)
     stale: bool = False                    # period older than staleness threshold
     estimated_rate: bool = False           # FX used a management-estimate rate
+    adjustment_type: Optional[str] = None  # for an *_adjusted companion figure: the adjustment it carries
+                                           # ('ESOP', 'normalized', 'forex-normalized', …) — the
+                                           # comparable primary stays plain; the adjusted is DISCLOSED,
+                                           # never blended into a cross-company total (Lever 5 sub-A2).
     hold_reason: str = ''
 
     @property

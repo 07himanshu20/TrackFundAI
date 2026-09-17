@@ -36,6 +36,7 @@ SLOW: runs the whole corpus through the real pipeline. Marked `slow`; skipped if
 import datetime as _dt
 import os
 import tempfile
+from decimal import Decimal
 
 import pytest
 
@@ -187,3 +188,24 @@ def test_no_unverified_foreign_emit():
     assert not leaked, ('UN-VERIFIED FOREIGN EMIT(S) under the supplied card (trace to GT, or the emit '
                         'is wrong and must HOLD — do NOT allowlist a verifiable number):\n' +
                         '\n'.join(leaked))
+
+
+def test_analisa_ebitda_adjusted_companion_on_real_data():
+    """Lever 5 sub-A2 on real data (MYR priced): Analisa's PLAIN EBITDA emits as the comparable primary
+    (₹0.5459, locked in FOREIGN_GT) and the NORMALIZED figure emits as the `ebitda_adjusted` COMPANION —
+    ₹0.9194, tagged 'normalized' (= plain + the sheet's one-time adjustment, verified in-sheet). Proves
+    the comparable column is never contaminated by the normalized figure."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = AliasLedger(org='fxgate', path=os.path.join(tmp, 'alias.json'))
+        for label, key in ALIASES.items():
+            store.learn([label], key, provenance='human')
+        res = _run(store)
+    rec = next((r for r in res.cir.records
+                if r.domain == 'mis' and r.entity_id == 'Analisa Resources Sdn Bhd'), None)
+    assert rec is not None, 'Analisa record missing'
+    prim, adj = rec.fields.get('ebitda'), rec.fields.get('ebitda_adjusted')
+    assert isinstance(prim, Figure) and prim.confirmed and abs(prim.value_cr - Decimal('0.5459')) < Decimal('0.01'), \
+        f'plain/comparable ebitda must be 0.5459, got {getattr(prim, "value_cr", None)}'
+    assert isinstance(adj, Figure) and adj.confirmed, f'ebitda_adjusted companion must EMIT, got {adj}'
+    assert abs(adj.value_cr - Decimal('0.9194')) < Decimal('0.01'), adj.value_cr
+    assert adj.adjustment_type == 'normalized', adj.adjustment_type

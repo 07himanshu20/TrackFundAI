@@ -67,9 +67,31 @@ def _fig_json(f):
         'state': 'held' if f.held else ('gap' if f.gap else 'emitted'),
         'reason': f.hold_reason or '',
         'basis': f.basis or '', 'months': f.months,
+        'adjustment_type': f.adjustment_type or '',       # plain/adjusted marker (Lever 5 sub-A2)
         'source': f.provenance.source_file, 'sheet': f.provenance.sheet,
         'cell': f.provenance.cell, 'row_label': f.provenance.row_label,
+        'note': f.provenance.note or '',                  # disclosures now reach the consumer, not just the CIR
     }
+
+
+def _concept_total(companies, concept):
+    # FAIL-CLOSED cross-company total (Lever 5 sub-A2): sum ONLY the plain/Standard `concept` (the
+    # *_adjusted companion is a SEPARATE concept, never summed here — never blend plain + adjusted); a
+    # held member OR a MIXED period-basis makes the sum invalid → 'INCOMPLETE'. A blind sum across TTM +
+    # partial-YTD (or plain + adjusted) is a wrong number, not a total.
+    vals, bases, held = [], set(), False
+    for c in companies.values():
+        fj = c['figures'].get(concept)
+        if not fj:
+            continue
+        if fj['state'] == 'emitted' and fj['value_cr'] is not None:
+            vals.append(fj['value_cr'])
+            bases.add(fj.get('basis') or '')
+        elif fj['state'] == 'held':
+            held = True
+    if held or len(bases) > 1:                        # incomplete coverage OR mixed basis → not a total
+        return 'INCOMPLETE'
+    return round(sum(vals), 4)
 
 
 def _serialize(result, as_of, rate_card):
@@ -86,16 +108,7 @@ def _serialize(result, as_of, rate_card):
                 row['figures'][v.concept] = _fig_json(v)
 
     def _total(concept):
-        vals, held = [], False
-        for c in companies.values():
-            fj = c['figures'].get(concept)
-            if not fj:
-                continue
-            if fj['state'] == 'emitted' and fj['value_cr'] is not None:
-                vals.append(fj['value_cr'])
-            elif fj['state'] == 'held':
-                held = True
-        return 'INCOMPLETE' if held else round(sum(vals), 4)
+        return _concept_total(companies, concept)
 
     files = [{'label': fr.label, 'role': fr.role, 'status': fr.status,
               'entity_id': fr.entity_id, 'reason': fr.reason} for fr in result.files]

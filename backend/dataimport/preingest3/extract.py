@@ -76,8 +76,8 @@ def _first_seen(context: str) -> bool:
 # or negative (a real breakeven EBITDA is 'orders below company scale' by ratio
 # and must not be held). Same principle as judging scale against the top line.
 _FIGURE_ANCHOR_ORDERS = 3.0
-_FIGURE_SANITY_EXEMPT = {'ebitda', 'net_income', 'gross_profit', 'operating_profit',
-                         'pbt', 'opex', 'cogs'}
+_FIGURE_SANITY_EXEMPT = {'ebitda', 'ebitda_adjusted', 'net_income', 'gross_profit',
+                         'operating_profit', 'pbt', 'opex', 'cogs'}
 
 # ── stock-vs-flow bind guard (U5, advisor 2026-07-23) ────────────────────────
 # A balance-sheet STOCK (cash, assets, liabilities, equity, opening/closing cash)
@@ -1657,6 +1657,184 @@ def _operating_revenue_disposition(rows, label_col, rev_row, acts=None):
     return ('hold', _rev_agg_hold_reason(rows, label_col, rev_row, acts))
 
 
+# ── Lever 5 sub-A2: the EBITDA adjusted-companion (universal companion-figure pattern) ────────────────
+# non-standard EBITDA add-backs (beyond interest/tax/depreciation/amortisation): their presence makes a
+# proxy an ADJUSTED figure, not the plain/standard comparable.
+_NONSTANDARD_ADDBACK = {'esop', 'exceptional', 'provision', 'impairment'}
+_ADJUSTMENT_ROW_TOKENS = {'adjustment', 'adjustments', 'reclass', 'normalisation', 'normalization',
+                          'exceptional'}
+
+
+def _proxy_adjustment_type(label) -> Optional[str]:
+    """If a self-describing EBITDA proxy adds back a NON-STANDARD item (ESOP/exceptional/provision),
+    return the adjustment type ('ESOP', …) — the proxy is then an ADJUSTED figure, not the plain
+    comparable. Standard add-backs (interest/tax/depreciation/amortisation) alone → None (stays the
+    standard primary). Linguistic, universal."""
+    hit = set(lexicon.normalise_label(label).split()) & _NONSTANDARD_ADDBACK
+    if not hit:
+        return None
+    return 'ESOP' if 'esop' in hit else sorted(hit)[0]
+
+
+def _adjustment_type_label(norm_label, adj_label) -> str:
+    """Name the adjustment type of an in-sheet normalized EBITDA from its own + the adjustment row's
+    labels: forex-normalized / ESOP / normalized (fallback). Universal token scan."""
+    toks = set(lexicon.normalise_label(f'{norm_label} {adj_label}').split())
+    if 'forex' in toks or 'fx' in toks:
+        return 'forex-normalized'
+    if 'esop' in toks:
+        return 'ESOP'
+    return 'normalized'
+
+
+def _find_normalized_ebitda_row(rows, label_col, num_cols) -> Optional[int]:
+    """A data-bearing row whose label denotes a NORMALIZED/ADJUSTED EBITDA ('Normalized EBITDA',
+    'Adjusted EBITDA'): has an 'ebitda' token AND _is_normalized_variant on the RAW label. First match."""
+    for r in range(len(rows)):
+        if not (label_col < len(rows[r]) and _cell_type(rows[r][label_col]) == 'text'):
+            continue
+        lab = rows[r][label_col]
+        if 'ebitda' not in str(lab).lower() or not _is_normalized_variant(lab):
+            continue
+        if any(pc.col < len(rows[r]) and _cell_type(rows[r][pc.col]) == 'num' for pc in num_cols):
+            return r
+    return None
+
+
+def _find_adjustment_row(rows, label_col, num_cols) -> Optional[int]:
+    """A data-bearing NON-ebitda row whose label denotes the adjustment line ('One-time adjustment',
+    'Forex reclass', 'Normalisation') that bridges plain → normalized EBITDA. First match."""
+    for r in range(len(rows)):
+        if not (label_col < len(rows[r]) and _cell_type(rows[r][label_col]) == 'text'):
+            continue
+        toks = set(lexicon.normalise_label(rows[r][label_col]).split())
+        if 'ebitda' in toks or not (toks & _ADJUSTMENT_ROW_TOKENS):
+            continue
+        if any(pc.col < len(rows[r]) and _cell_type(rows[r][pc.col]) == 'num' for pc in num_cols):
+            return r
+    return None
+
+
+def _col_of_a1(a1) -> Optional[int]:
+    """0-based column index of an A1 cell ref ('H11' → 7); None if unparseable."""
+    m = re.match(r'^([A-Za-z]+)', str(a1 or ''))
+    if not m:
+        return None
+    idx = 0
+    for ch in m.group(1).upper():
+        idx = idx * 26 + (ord(ch) - 64)
+    return idx - 1
+
+
+def _row_sum_at(rows, r, cols) -> Optional[Decimal]:
+    """RAW sum of a row over the given column indices (the primary's reporting columns), or None if the
+    row carries no numeric cell there — so plain/normalized/adjustment are read on the SAME basis."""
+    if r is None:
+        return None
+    s, got = Decimal('0'), False
+    for c in cols:
+        if c < len(rows[r]) and _cell_type(rows[r][c]) == 'num':
+            s += Decimal(str(rows[r][c]))
+            got = True
+    return s if got else None
+
+
+def _derive_ebitda_adjusted(fields, prof, *, geo_ccy, inr_mentioned, base_currency, anchor_cr,
+                            rate_card, as_of=None, require_bound=False):
+    """Lever 5 sub-A2 — derive the EBITDA companion (`ebitda_adjusted`), the universal companion-figure
+    pattern instantiated for EBITDA. The comparable primary `ebitda` stays PLAIN/Standard; the adjusted
+    is a DISCLOSED companion, never blended into a cross-company total. Two paths:
+      • PATH 2 (adjusted proxy is the sole stated figure — LDC's 'Profit Before Tax, depreciation and
+        ESOP'): the located primary is itself an adjusted proxy (a non-standard add-back). Move it to
+        `ebitda_adjusted` (tagged) and HOLD the plain primary — there is no plain/standard EBITDA on the
+        reporting basis, so the comparable column must not carry the adjusted figure.
+      • PATH 1 (plain primary + in-sheet normalized/adjusted EBITDA + adjustment line that VERIFY —
+        Analisa): emit the normalized as `ebitda_adjusted` iff normalized == plain + stated adjustment on
+        the shared column (verify-or-hold), through the SAME sheet frame as the primary (no rounding
+        drift). Primary stays plain. adjustment_type from the labels.
+    Otherwise no companion. Never scans for a stray 'Adjusted EBITDA' on another sheet (CPC's cross-sheet
+    adjusted is below-plain / undefined-bridge → left absent, per the understand-before-populating rule)."""
+    primary = fields.get('ebitda')
+    if not isinstance(primary, Figure) or primary.provenance is None:
+        return
+    rl = primary.provenance.row_label or ''
+    atype = _proxy_adjustment_type(rl)
+    if atype and _is_stated_ebitda_proxy(rl):                    # PATH 2 — proxy is the adjusted figure
+        primary.adjustment_type = atype
+        primary.concept = 'ebitda_adjusted'
+        primary.provenance.note = ((primary.provenance.note + '; ') if primary.provenance.note else '') + \
+            f'adjusted EBITDA ({atype}); no plain/standard EBITDA stated on the reporting basis'
+        fields['ebitda_adjusted'] = primary
+        fields['ebitda'] = Figure('ebitda', None, None, primary.provenance, held=True,
+            basis=primary.basis, months=primary.months,
+            hold_reason=(f'no plain/standard EBITDA on the reporting basis; sole stated figure is the '
+                         f'{atype}-adjusted proxy — see ebitda_adjusted')[:90])
+        return
+    if not primary.confirmed:
+        return
+    rows = (prof.get('grid') or {}).get(primary.provenance.sheet)
+    if not rows:
+        return
+    # read the bridge on the PRIMARY's OWN reporting column(s) — the plain/normalized/adjustment rows
+    # summed over the SAME cells the primary was read from (independent per-row collapse can pick
+    # different columns when a row has N/A gaps — the adjustment line does).
+    src = list(primary.provenance.derived_from or [])
+    if not src and primary.provenance.cell:
+        src = [primary.provenance.cell]
+    cols = sorted({c for c in (_col_of_a1(a) for a in src) if c is not None})
+    ax = periods.detect_period_axis(rows)
+    lc = _sheet_label_col(rows, ax.axis_rows[0]) if ax.columns else None
+    if lc is None or not cols:
+        return
+    plain_row = _find_concept_row(rows, lc, 'ebitda', ax.axis_rows[0] + 1, len(rows), ax.columns)
+    norm_row = _find_normalized_ebitda_row(rows, lc, ax.columns)
+    if plain_row is None or norm_row is None:
+        return                                                  # no normalized variant on this sheet
+    adj_row = _find_adjustment_row(rows, lc, ax.columns)
+    atype1 = _adjustment_type_label(rows[norm_row][lc], rows[adj_row][lc] if adj_row is not None else '')
+    multi = len(cols) > 1
+    prov_adj = Provenance(source_file=primary.provenance.source_file,
+                          content_fingerprint=primary.provenance.content_fingerprint,
+                          sheet=primary.provenance.sheet,
+                          cell=('' if multi else _a1(cols[0], norm_row)),
+                          row_label=str(rows[norm_row][lc]).strip(),
+                          derived_from=[_a1(c, norm_row) for c in cols])
+    pv, nv, av = (_row_sum_at(rows, plain_row, cols), _row_sum_at(rows, norm_row, cols),
+                  _row_sum_at(rows, adj_row, cols))
+    # verify the bridge: normalized == plain + stated adjustment on the primary's reporting column(s)
+    if pv is None or nv is None or av is None or abs(nv - (pv + av)) > (abs(nv) * Decimal('0.02') + Decimal('1')):
+        fields['ebitda_adjusted'] = Figure('ebitda_adjusted', None, None, prov_adj, held=True,
+            basis=primary.basis, months=primary.months, adjustment_type=atype1,
+            hold_reason='adjusted EBITDA != plain + stated adjustment (or bridge absent) — held')
+        return
+    local_ccy, local_unit = _local_currency_unit(rows, ax)      # SAME sheet → SAME frame as the primary
+    # reproduce the primary's money_samples (all MIS money concepts at the primary's reporting columns) so
+    # magnitude-based SCALE inference resolves IDENTICALLY — [norm,plain] alone can mis-infer the decade.
+    samples = []
+    for c in MIS_CONCEPTS:
+        if concept_measure(c) != 'money':
+            continue
+        cr = _find_concept_row(rows, lc, c, ax.axis_rows[0] + 1, len(rows), ax.columns)
+        sv = _row_sum_at(rows, cr, cols)
+        if sv is not None:
+            samples.append(sv)
+    frame = units.resolve_monetary_frame(stmt_currency=local_ccy, geo_currency=geo_ccy,
+                inr_mentioned=inr_mentioned, declared_unit=local_unit, sample_values=(samples or [nv, pv]),
+                anchor_cr=anchor_cr, ratecard=rate_card, base_currency=base_currency)
+    if frame.escalate or frame.scale is None:
+        fields['ebitda_adjusted'] = Figure('ebitda_adjusted', None, None, prov_adj, held=True,
+            basis=primary.basis, months=primary.months, adjustment_type=atype1,
+            hold_reason=f'adjusted EBITDA monetary frame unresolved: {frame.reason}'[:90])
+        return
+    q = Quantity(amount=nv, currency=frame.currency, scale=frame.scale, nature='flow',
+                 concept='ebitda_adjusted')
+    adjusted_cr = (rate_card.to_inr(q.absolute_native(), frame.currency) / _CR).quantize(
+        _Q, rounding=ROUND_HALF_UP)
+    prov_adj.note = f'adjusted EBITDA ({atype1}) = plain + stated adjustment, verified in-sheet'
+    fields['ebitda_adjusted'] = Figure('ebitda_adjusted', adjusted_cr, None, prov_adj,
+        basis=primary.basis, months=primary.months, adjustment_type=atype1)
+
+
 def extract_company(label: str, path: str, *, rate_card, entity: str = None,
                     domicile=None, base_currency=None, anchor_cr=None, as_of_year: int = None,
                     use_model: bool = False, use_finder: bool = False) -> Record:
@@ -2020,6 +2198,9 @@ def extract_company(label: str, path: str, *, rate_card, entity: str = None,
             if isinstance(f, Figure) and f.confirmed and f.provenance is not None:
                 f.provenance.note = (f.provenance.note + '; ' if f.provenance.note else '') + \
                     'as-of flow-derived (no stated/filename reporting date) — period boundary unverified'
+    _derive_ebitda_adjusted(fields, prof, geo_ccy=geo_ccy, inr_mentioned=inr_mentioned,
+                            base_currency=base_currency, anchor_cr=anchor_cr, rate_card=rate_card,
+                            as_of=stated_asof, require_bound=require_bound)  # Lever 5 sub-A2 companion
     _finalize_terminal_state(fields)                 # choke: no figure ships in limbo
     return Record('mis', entity_id=entity, fields=fields)
 

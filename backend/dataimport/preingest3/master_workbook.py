@@ -523,7 +523,7 @@ def _portfolio_master(wb, cir, ctx):
     _rowh(ws, ['PORTFOLIO MASTER — per company (₹Cr). Fund cols as-of ' + str(ctx.fund_asof) +
                '; MIS cols carry each company’s own date + ⚠stale if > ' + str(ctx.stale_m) + 'm old'])
     _rowh(ws, ['#', 'Company', 'Sector', 'Stage', 'Domicile', 'Inv Date', 'Inv Year', 'Yrs Held',
-               'Cost', 'Equity %', 'Val Method', 'Revenue TTM', 'EBITDA', 'Cash', 'Monthly Burn',
+               'Cost', 'Equity %', 'Val Method', 'Revenue', 'EBITDA (Standard)', 'Cash', 'Monthly Burn',
                'Status', 'MIS As-of', 'Stale?', 'Notes'])
     from .nav import _parse_date as _pd
     fund_d = _pd(str(ctx.fund_asof))
@@ -543,10 +543,12 @@ def _portfolio_master(wb, cir, ctx):
         inv_year = inv_d.year if inv_d else NR
         yrs = round((fund_d - inv_d).days / 365.25, 1) if (inv_d and fund_d) else NR
         warn = [c for c, v in [(11, rev), (12, eb), (13, cash)] if isinstance(v, str) and ('HELD' in v or 'no data' in v)]
+        edisc = _ebitda_disclosure(mis, mo) if mis else ''       # EBITDA basis + adjusted companion → Notes
+        note = ' · '.join(x for x in [f'{len(warn)} MIS held' if warn else '', edisc] if x)
         _row(ws, [i, ent, f.get('sector', NR), f.get('stage', NR), f.get('domicile', NR),
                   f.get('investment_date', NR), inv_year, yrs, _f(_num(f.get('cost'))),
                   _f(own) if own is not None else NR, f.get('valuation_method', NR), rev, eb, cash, NR, status,
-                  asof or NR, STALE if stale else '', f'{len(warn)} MIS held' if warn else ''],
+                  asof or NR, STALE if stale else '', note],
              warn=tuple(warn), stale=(16, 17) if stale else ())
     _row(ws, [])
     _row(ws, ['', 'Σ', '', '', '', '', '', '', _f(ctx.sum_cost) if not ctx.cost_held else 'INCOMPLETE'])
@@ -923,7 +925,7 @@ def _portfolio_kpi(wb, cir, ctx):
     _rowh(ws, ['PORTFOLIO KPI TRACKER — company MIS (each at its OWN as-of; ⚠stale if > '
                + str(ctx.stale_m) + 'm before fund as-of ' + str(ctx.fund_asof) + ')'])
     _rowh(ws, ['Company', 'Sector', 'Stage', 'MIS As-of', 'Age(mo)', 'Stale?', 'Revenue', 'EBITDA',
-               'EBITDA Margin %', 'Cash', 'Head-count', 'Basis', 'State'])
+               'EBITDA Margin %', 'Cash', 'Head-count', 'Basis', 'State', 'EBITDA basis/adj'])
     inv_by = {lexicon.normalise_label(_entity(r)): r for r in _recs(cir, 'portfolio_investments')}
     emit = held = gap = 0
     for rec in _recs(cir, 'mis', 'company', 'portfolio_companies'):
@@ -955,7 +957,8 @@ def _portfolio_kpi(wb, cir, ctx):
                 if not (isinstance(figs[c], Figure) and figs[c].confirmed)]
         _row(ws, [ent, sector, stage, asof or NR, (mo if mo is not None else '?'),
                   STALE if stale else '', rev, eb, margin, cash, hc, _fig_basis(figs, mo),
-                  ('all solid' if hg == 0 else f'{hg} awaiting review') + (' · STALE' if stale else '')],
+                  ('all solid' if hg == 0 else f'{hg} awaiting review') + (' · STALE' if stale else ''),
+                  _ebitda_disclosure(rec, mo)],
              warn=tuple(warn), stale=(3, 4, 5) if stale else ())
     _row(ws, [])
     tot = emit + held + gap
@@ -966,24 +969,47 @@ def _portfolio_kpi(wb, cir, ctx):
 _MON = ('', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')
 
 
-def _fig_basis(figs, mo=None):
-    # Disclose the period SPAN so a PARTIAL-year figure is unmissable next to full-year peers: a
-    # 5-month YTD reads "YTD · 5mo (Jan–May)", not a bare "YTD" that could be mistaken for annual.
-    # The span comes from the Figure's own months count; the month range is rendered only when it
+def _basis_span(f, mo=None):
+    # The period SPAN of ONE figure, so a PARTIAL-year figure is unmissable next to full-year peers: a
+    # 5-month YTD reads "YTD · 5mo (Jan–May)", not a bare "YTD". The month range renders only when it
     # cleanly resolves to a same-year consecutive window ending at the reporting month (else just Nmo).
+    if not (isinstance(f, Figure) and f.basis):
+        return ''
+    m = getattr(f, 'months', 0) or 0
+    if 0 < m < 12:
+        span = f'{m}mo'
+        if isinstance(mo, int) and 1 <= mo <= 12:
+            start = mo - m + 1
+            if 1 <= start <= mo:
+                span = f'{m}mo ({_MON[start]}–{_MON[mo]})'
+        return f'{f.basis} · {span}'
+    return f.basis
+
+
+def _fig_basis(figs, mo=None):
     for c in ('revenue', 'ebitda', 'cash', 'headcount'):
-        f = figs.get(c)
-        if isinstance(f, Figure) and f.basis:
-            m = getattr(f, 'months', 0) or 0
-            if 0 < m < 12:
-                span = f'{m}mo'
-                if isinstance(mo, int) and 1 <= mo <= 12:
-                    start = mo - m + 1
-                    if 1 <= start <= mo:
-                        span = f'{m}mo ({_MON[start]}–{_MON[mo]})'
-                return f'{f.basis} · {span}'
-            return f.basis
+        s = _basis_span(figs.get(c), mo)
+        if s:
+            return s
     return ''
+
+
+def _ebitda_disclosure(rec, mo=None):
+    """The deliverable's EBITDA disclosure (Lever 5 sub-A2): EBITDA's OWN basis span (never masked
+    behind revenue's) + the adjusted companion value & type when present, so LDC's ₹113.69 ships as
+    ESOP-inclusive and Analisa's normalized ₹0.9194 is visible — not hidden and not blended into the
+    plain/comparable EBITDA column. Empty when there is nothing to disclose."""
+    e, a = rec.fields.get('ebitda'), rec.fields.get('ebitda_adjusted')
+    parts = []
+    b = _basis_span(e, mo)
+    if b:
+        parts.append(b)
+    if isinstance(a, Figure) and a.confirmed:
+        parts.append(f'adj {a.adjustment_type or "?"}={_f(a.value_cr)}'
+                     + (' (no plain std)' if isinstance(e, Figure) and e.held else ''))
+    elif isinstance(a, Figure) and a.held:
+        parts.append(f'adj {a.adjustment_type or "?"}: held')
+    return ' · '.join(parts)
 
 
 # ── 13. DASHBOARD_BRIDGE (curated widget→source map, like the sample) ───────

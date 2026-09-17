@@ -189,18 +189,20 @@ def test_ldc_mis_values_trace_to_cells():
     _close(f['revenue'], '316.4753', basis='TTM', n_cells=12)   # Σ C34..N34
     _close(f['cash'], '241.9993', basis='point_in_time', cell='N43')     # latest balance
     _close(f['headcount'], 309, basis='point_in_time', cell='N49')       # latest period-end count
-    # Lever 5 sub-B: EBITDA built on the SAME basis as revenue (TTM Mar'25..Feb'26), NOT the Feb'26
-    # single month (₹21.04, ~5.4× smaller). The reporting sheet states one self-describing
-    # EBITDA-equivalent — 'Profit Before Tax, depreciation and ESOP' (R41) — with no separate PBT/
-    # Depn/ESOP rows to reconcile against, so the engine EMITS it with a composition-disclosure (the
-    # label IS the disclosure). = Σ C41..N41 = ₹113.6891 Cr; ties to the Org P-L PBT+Depn+ESOP
-    # identity for every overlapping month. The Standard/ESOP-excluded split HOLDS (not derivable on
-    # the TTM window — Org P-L is FY26, no Mar'25 — never fabricate the missing month).
-    ebitda = f['ebitda']
-    _close(ebitda, '113.6891', basis='TTM', n_cells=12)                  # Σ C41..N41
-    assert ebitda.provenance.row_label == 'Profit Before Tax, depreciation and ESOP'
-    assert 'proxy' in (ebitda.provenance.note or '').lower(), \
-        f'ESOP-inclusive proxy disclosure must reach the output, got note={ebitda.provenance.note!r}'
+    # Lever 5 sub-B/sub-A2: EBITDA on the SAME basis as revenue (TTM Mar'25..Feb'26), NOT the Feb'26
+    # single month (₹21.04). The reporting sheet states ONE self-describing EBITDA-equivalent — 'Profit
+    # Before Tax, depreciation and ESOP' (R41) — an ESOP-ADJUSTED figure with NO plain/standard EBITDA on
+    # the reporting basis (the Org-P-L split is not derivable on the TTM window — FY26, no Mar'25). So the
+    # plain/comparable `ebitda` HOLDS and the ESOP-adjusted figure moves to the `ebitda_adjusted` companion
+    # (₹113.6891 Cr TTM, tagged ESOP) — the comparable EBITDA column is never contaminated by an adjusted
+    # number. Ties to the Org P-L PBT+Depn+ESOP identity every overlapping month.
+    assert f['ebitda'].held and f['ebitda'].value_cr is None, \
+        f"LDC plain/standard ebitda must HOLD (only an adjusted proxy exists), got {f['ebitda'].value_cr}"
+    assert 'no plain/standard' in (f['ebitda'].hold_reason or '').lower()
+    adj = f['ebitda_adjusted']
+    _close(adj, '113.6891', basis='TTM', n_cells=12)                     # Σ C41..N41
+    assert adj.adjustment_type == 'ESOP', f'expected ESOP tag, got {adj.adjustment_type!r}'
+    assert adj.provenance.row_label == 'Profit Before Tax, depreciation and ESOP'
 
 
 def test_instaastro_mis_values_trace_to_cells():

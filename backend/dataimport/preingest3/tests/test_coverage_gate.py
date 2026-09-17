@@ -87,18 +87,11 @@ GT = {
                                             # period-end (135→139→145→148 monotonic — a stock, latest col,
                                             # not a sum); recovered by the 'head count' lexicon synonym
     ('LDC', 'revenue'): '316.4753', ('LDC', 'cash'): '241.9993', ('LDC', 'headcount'): '309',
-    ('LDC', 'ebitda'): '113.6891',          # Lever 5 sub-B: company-stated EBITDA proxy 'Profit
-                                            # Before Tax, depreciation and ESOP' on 'Consolidated
-                                            # MIS' R41, Σ(C41..N41) = 113.6891 Cr over the SAME TTM
-                                            # window as revenue (Mar'25..Feb'26, ₹Cr) — NOT the
-                                            # Feb'26 single month (₹21.04, ~5.4× smaller). Emitted
-                                            # ESOP-inclusive with disclosure (no separate PBT/Depn/
-                                            # ESOP rows on the reporting sheet to reconcile against;
-                                            # ties penny-clean to the Org P-L PBT+Depn+ESOP identity
-                                            # for every overlapping month — e.g. Feb'26 19.7937 +
-                                            # 0.4167 + 0.8333 = 21.0437). Standard/ESOP-excluded
-                                            # split HELD (Org P-L is FY26, no Mar'25 → not derivable
-                                            # on the TTM window without fabricating the missing month).
+    # ('LDC', 'ebitda') — no GT: the plain/standard EBITDA is HELD (a SAFE held slot). LDC's reporting
+    #   sheet states only the ESOP-ADJUSTED 'Profit Before Tax, depreciation and ESOP' (₹113.6891 TTM);
+    #   Lever 5 sub-A2 moves that to the `ebitda_adjusted` companion (tested in test_real_files_values +
+    #   test_foreign gate) and HOLDS the plain primary so the comparable column isn't contaminated. The
+    #   companion is not in MIS_CONCEPTS, so this gate (plain-comparable coverage) correctly ignores it.
     ('CPC', 'ebitda'): '15.6492',
     ('CPC', 'revenue'): '111.4026',         # fork-b re-source: PL Summary!F8 'Total Revenue' YTD (₹M);
                                             # corroborated by 'PL schedule' (same 1114.03) → own statement
