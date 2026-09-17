@@ -1830,6 +1830,20 @@ def _derive_ebitda_adjusted(fields, prof, *, geo_ccy, inr_mentioned, base_curren
                  concept='ebitda_adjusted')
     adjusted_cr = (rate_card.to_inr(q.absolute_native(), frame.currency) / _CR).quantize(
         _Q, rounding=ROUND_HALF_UP)
+    # Companion-scale drift guard (fail-closed): the companion re-resolves its OWN monetary frame, so a
+    # future file whose re-resolution diverges from the primary's would ship a decade-off number (the
+    # ×1000 fixed mid-build is this class's fingerprint). Bind it to the primary's ALREADY-resolved scale:
+    # the primary's plain row summed on the SAME columns (pv) collapsed to primary.value_cr, so
+    # value_cr/pv is the primary's net ₹Cr-per-raw-unit and adjusted_cr/nv is the companion's. A scale
+    # drift is ALWAYS a decade (≥10×) while rounding is sub-percent, so a [0.5, 2] band separates the two
+    # regimes by orders of magnitude — outside it the companion HOLDS (never emit a wrong-scale number).
+    kp = (primary.value_cr / pv) if pv else None
+    kc = (adjusted_cr / nv) if nv else None
+    if kp is None or not kp or kc is None or not (Decimal('0.5') <= (kc / kp) <= Decimal('2')):
+        fields['ebitda_adjusted'] = Figure('ebitda_adjusted', None, None, prov_adj, held=True,
+            basis=primary.basis, months=primary.months, adjustment_type=atype1,
+            hold_reason='adjusted EBITDA scale diverges from primary EBITDA frame — held')
+        return
     prov_adj.note = f'adjusted EBITDA ({atype1}) = plain + stated adjustment, verified in-sheet'
     fields['ebitda_adjusted'] = Figure('ebitda_adjusted', adjusted_cr, None, prov_adj,
         basis=primary.basis, months=primary.months, adjustment_type=atype1)

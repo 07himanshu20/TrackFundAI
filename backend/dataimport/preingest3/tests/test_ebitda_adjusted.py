@@ -136,6 +136,30 @@ class DerivePath1InSheet(SimpleTestCase):
                                    anchor_cr=Decimal('100'), rate_card=_RC, as_of=(2025, 3))
         self.assertNotIn('ebitda_adjusted', fields)
 
+    def test_companion_scale_drift_from_primary_holds(self):
+        # NEGATIVE CONTROL for the Catch-A companion-scale drift guard: if the companion's re-resolved
+        # frame picks a scale a DECADE off the primary's (the ×1000 class whose fingerprint is the mid-
+        # build bug), the guard must HOLD the companion, not ship a wrong-scale number. Simulate the drift
+        # by forcing the companion's frame one decade below the correct 'crore' → adjusted would be 0.1× →
+        # outside the [0.5, 2] band. (Must-not-misfire is proven by test_bridge_verifies_emits_companion,
+        # which runs the SAME grid with the real frame and EMITS — this control removes only the guard's
+        # target defect and confirms it reddens.)
+        real = ex.units.resolve_monetary_frame
+
+        def _drift(*a, **k):
+            f = real(*a, **k)
+            return types.SimpleNamespace(scale='millions', currency=getattr(f, 'currency', 'INR'),
+                                         escalate=False, reason='decade-drift-sim')
+        ex.units.resolve_monetary_frame = _drift
+        try:
+            fields = self._run(100, 20, 120)
+        finally:
+            ex.units.resolve_monetary_frame = real
+        adj = fields['ebitda_adjusted']
+        self.assertTrue(adj.held and adj.value_cr is None)
+        self.assertIn('scale diverges', (adj.hold_reason or ''))
+        self.assertTrue(fields['ebitda'].confirmed)          # primary comparable stays intact
+
 
 class FailClosedTotal(SimpleTestCase):
     def _co(self, **figs):

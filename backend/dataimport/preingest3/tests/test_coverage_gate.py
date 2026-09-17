@@ -57,6 +57,13 @@ MIS = [
     ('Analisa', '01_Monthly_Financial_Presentation_2025_May_Analisa.xlsx', 'analisa'),
 ]
 
+# COMPANION CONCEPTS — emits that live OUTSIDE the fixed MIS schema (a 5th+ concept, present on only some
+# files) but STILL SHIP in the deliverable (workbook Notes/KPI column). The both-rulers lesson from sub-C:
+# a shipping number must live in BOTH rulers, so this coverage ruler's no-unverified-emit invariant covers
+# them too (Catch B). A held/absent companion is NOT coverage-loss (a companion is optional by nature), so
+# only EMITS are recorded/checked — an emitted companion must be GT'd or it HOLDS.
+COMPANION_CONCEPTS = ['ebitda_adjusted']
+
 # PINNED GROUND TRUTH — every value traced to a raw cell this session (verdict, not count).
 # These live in the TEST (the ruler), never in the engine; the extractor still derives each
 # number universally. Adding a value here is a claim "this emit is confirmed correct".
@@ -89,9 +96,17 @@ GT = {
     ('LDC', 'revenue'): '316.4753', ('LDC', 'cash'): '241.9993', ('LDC', 'headcount'): '309',
     # ('LDC', 'ebitda') — no GT: the plain/standard EBITDA is HELD (a SAFE held slot). LDC's reporting
     #   sheet states only the ESOP-ADJUSTED 'Profit Before Tax, depreciation and ESOP' (₹113.6891 TTM);
-    #   Lever 5 sub-A2 moves that to the `ebitda_adjusted` companion (tested in test_real_files_values +
-    #   test_foreign gate) and HOLDS the plain primary so the comparable column isn't contaminated. The
-    #   companion is not in MIS_CONCEPTS, so this gate (plain-comparable coverage) correctly ignores it.
+    #   Lever 5 sub-A2 moves that to the `ebitda_adjusted` companion and HOLDS the plain primary so the
+    #   comparable column isn't contaminated. The companion is a PRODUCTION emit (it ships in the workbook),
+    #   so it is double-ruler-protected here too — see COMPANION_CONCEPTS and the GT immediately below
+    #   (the both-rulers lesson from sub-C: a shipping number lives in BOTH rulers, never just one).
+    ('LDC', 'ebitda_adjusted'): '113.6891',  # Lever 5 sub-A2 companion (Catch B): PATH-2 ESOP proxy on the
+                                             # INR reporting basis — Σ C41..N41 (TTM 12 cols) = ₹1,136,890,663
+                                             # /1e7 = 113.6891 Cr, tagged ESOP. Emits under the INR-only card
+                                             # (LDC is INR). Analisa's companion (₹0.9194) HOLDS in THIS gate
+                                             # (MYR uncovered under the INR-only card → primary held → PATH 1
+                                             # never runs); it is GT'd in the foreign ruler
+                                             # (test_foreign_coverage_gate::test_analisa_ebitda_adjusted_…).
     ('CPC', 'ebitda'): '15.6492',
     ('CPC', 'revenue'): '111.4026',         # fork-b re-source: PL Summary!F8 'Total Revenue' YTD (₹M);
                                             # corroborated by 'PL schedule' (same 1114.03) → own statement
@@ -135,9 +150,12 @@ def _anchor(anchors, token):
 
 
 def _bucket_all():
-    """Extract every MIS file under production config; return (verified, unverified, held)."""
+    """Extract every MIS file under production config; return (verified, unverified, held, companions).
+    `companions` records only the EMITTED companion concepts (COMPANION_CONCEPTS) — extra-schema numbers
+    that still ship — each tagged 'verified'/'unverified' so the no-unverified-emit invariant covers them
+    too (Catch B). Absent/held companions are omitted (optional by nature, not coverage-loss)."""
     anchors = _anchors()
-    verified, unverified, held = [], [], []
+    verified, unverified, held, companions = [], [], [], []
     for name, fn, token in MIS:
         ca = _anchor(anchors, token)
         rec = extract_company(name, os.path.join(IN, fn), rate_card=default_inr_card('2026-02-28'),
@@ -154,7 +172,14 @@ def _bucket_all():
             else:
                 unverified.append((name, c, str(val),
                                    (f.provenance.sheet if f else ''), (f.provenance.cell if f else '')))
-    return verified, unverified, held
+        for c in COMPANION_CONCEPTS:
+            f = figs.get(c)
+            if f is None or f.value_cr is None:
+                continue                                   # absent/held companion — not coverage-loss
+            ok = (name, c) in GT and abs(f.value_cr - Decimal(GT[(name, c)])) < _TOL
+            companions.append(('verified' if ok else 'unverified', name, c, str(f.value_cr),
+                               f.provenance.sheet, f.provenance.cell))
+    return verified, unverified, held, companions
 
 
 def test_allowlist_discipline():
@@ -172,12 +197,19 @@ def test_allowlist_discipline():
 def test_no_unverified_emit_in_production_coverage():
     """HARD GATE: under the shipping config, every emitted number is verified or (justifiably)
     allowlisted. Any other emit is a number production trusts that nobody has checked."""
-    verified, unverified, held = _bucket_all()
+    verified, unverified, held, companions = _bucket_all()
     leaked = [u for u in unverified if (u[0], u[1]) not in ALLOWLIST]
+    comp_leaked = [c for c in companions if c[0] == 'unverified' and (c[1], c[2]) not in ALLOWLIST]
     total = len(MIS) * len(MIS_CONCEPTS)
+    comp_v = sum(1 for c in companions if c[0] == 'verified')
     scoreboard = (f'COVERAGE [prod/INR-only]: verified {len(verified)}/{total} · '
-                  f'unverified {len(unverified)}/{total} · held {len(held)}/{total}')
+                  f'unverified {len(unverified)}/{total} · held {len(held)}/{total} · '
+                  f'companions verified {comp_v}/{len(companions)}')
     assert not leaked, (
         f'{scoreboard}\nUN-ALLOWLISTED UNVERIFIED EMITS (value-audit to verified, or the emit '
         f'is wrong and must HOLD — do NOT allowlist a verifiable number):\n' +
         '\n'.join(f'  {n}/{c} = {v} @ {sh}!{cell}' for n, c, v, sh, cell in leaked))
+    assert not comp_leaked, (
+        f'{scoreboard}\nUN-ALLOWLISTED UNVERIFIED COMPANION EMITS (a companion SHIPS in the '
+        f'deliverable — GT it or it must HOLD; the both-rulers lesson):\n' +
+        '\n'.join(f'  {n}/{c} = {v} @ {sh}!{cell}' for _s, n, c, v, sh, cell in comp_leaked))
