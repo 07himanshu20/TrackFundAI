@@ -320,3 +320,45 @@ def test_dashboard_bridge_is_widget_map_with_granular_drilldown():
     assert any('Widget' in c for c in flat) and any('Calc Logic' in c for c in flat)   # widget-map header
     assert any(r and r[0] == 'Fund Overview' for r in rows)                            # a curated widget row
     assert any('GRANULAR PROVENANCE FEED' in c for c in flat)                          # drill-down retained
+
+
+# 12 ── CURRENCY UNIT on every money header (attestation) + reddening ─────────
+def test_hdr_appends_cr_only_on_exact_money_names_REDDENING():
+    # every ₹Cr money value must carry its unit — but EXACT-match only. The reddening core: if _hdr ever
+    # switched to substring matching, look-alikes ('EBITDA Margin %', 'EBITDA basis/adj') would be
+    # mislabelled as ₹Cr — a wrong unit on a %/text column. This test goes RED against exactly that.
+    out = mw._hdr(['Revenue', 'EBITDA', 'EBITDA (Standard)', 'Cash', 'Cost', 'Fair value',
+                   'EBITDA Margin %', 'EBITDA basis/adj', 'Head-count', 'MOIC', 'IRR', 'Gain %',
+                   'Company', 'Basis', 'Val Method'])
+    assert out[:6] == ['Revenue (₹Cr)', 'EBITDA (₹Cr)', 'EBITDA (Standard) (₹Cr)',
+                       'Cash (₹Cr)', 'Cost (₹Cr)', 'Fair value (₹Cr)']            # must-handle
+    for bare in ['EBITDA Margin %', 'EBITDA basis/adj', 'Head-count', 'MOIC', 'IRR', 'Gain %',
+                 'Company', 'Basis', 'Val Method']:                               # must-not-misfire
+        assert bare in out and f'{bare} ({mw._CCY})' not in out
+
+
+def test_money_headers_carry_unit_in_built_workbook():
+    cir = _base_cir()
+    cir.records.append(Record('mis', entity_id='Alpha Co', fields={
+        'company': 'Alpha Co', 'revenue': _fig('revenue', 12, col='2026-02-28'),
+        'ebitda': _fig('ebitda', 3, col='2026-02-28'), 'cash': _fig('cash', 8, col='2026-02-28'),
+        'headcount': _fig('headcount', 40, col='2026-02-28')}))
+    wb = mw.build_master(cir, files=['x'])
+    def hdrs(name):
+        return [c for row in _sheet_rows(wb, name) for c in row if isinstance(c, str)]
+    kpi = hdrs('PORTFOLIO_KPI')
+    for h in ('Revenue', 'EBITDA', 'Cash'):
+        assert f'{h} ({mw._CCY})' in kpi, f'PORTFOLIO_KPI must label {h} with the unit'
+    assert 'EBITDA Margin %' in kpi and f'EBITDA Margin % ({mw._CCY})' not in kpi   # % stays bare
+    assert 'Head-count' in kpi and f'Head-count ({mw._CCY})' not in kpi            # count stays bare
+    assert any(c.startswith('PORTFOLIO KPI TRACKER') and mw._CCY in c for c in kpi)  # banner states ₹Cr
+    pm = hdrs('PORTFOLIO_MASTER')
+    assert f'EBITDA (Standard) ({mw._CCY})' in pm and f'Monthly Burn ({mw._CCY})' in pm
+    assert 'Equity %' in pm and f'Equity % ({mw._CCY})' not in pm
+    val = hdrs('VALUATIONS')
+    assert f'Fair Value ({mw._CCY})' in val and f'Unrealised Gain ({mw._CCY})' in val
+    for r in ('Gain %', 'IRR', 'Multiple'):                                         # ratios stay bare
+        assert r in val and f'{r} ({mw._CCY})' not in val
+    moic = hdrs('MOIC_TVPI_DPI')
+    assert f'Cost ({mw._CCY})' in moic and f'Fair value ({mw._CCY})' in moic
+    assert 'Value' in moic and f'Value ({mw._CCY})' not in moic                     # MOIC 'Value'=ratios

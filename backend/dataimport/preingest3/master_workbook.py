@@ -93,6 +93,28 @@ NR = '— n/r'                 # genuinely not reported in the source (honest ga
 STALE = '⚠ stale'
 _DEFAULT_STALE_MONTHS = 6    # two quarters — AIFs report quarterly (TUNABLE, disclosed)
 
+# ── currency unit on money headers (attestation: a number must never be unit-ambiguous) ──────
+# EVERY monetary value in the workbook is normalised to ₹Cr (crore) — the engine emits value_cr; the
+# source files variously state lakhs / millions / Rs cr, all collapsed to ₹Cr here. So each money column
+# header must carry the unit. ONE registry of money-concept header names + a single helper that appends
+# the unit on an EXACT match only — so 'EBITDA' is labelled while 'EBITDA Margin %' and 'EBITDA basis/adj'
+# are left alone, and every %/ratio/count/text column is untouched. Non-money headers pass through, so
+# _hdr is a no-op unless a registered money name is present.
+_CCY = '₹Cr'
+_MONEY_HEADERS = frozenset({
+    'Revenue', 'EBITDA', 'EBITDA (Standard)', 'Cash', 'Monthly Burn', 'Cost',
+    'Fair Value', 'Fair value', 'Σ Fair Value', 'Unrealised Gain', 'Derived EV',
+    'Commitment', 'Called', 'Uncalled', 'Distributed', 'NAV Share',
+    'Amount', 'Cumulative Called', 'Uncalled Balance',
+    'Committed Base', 'Annual Fee', 'Cumulative', 'GST 18%', 'Total w/ GST',
+    'Gross Proceeds', 'Net Proceeds', 'Gross', 'GP carry', 'Net to LP',
+})
+
+
+def _hdr(cols):
+    """Append the ₹Cr unit to money-concept headers (exact-match only); pass everything else through."""
+    return [f'{c} ({_CCY})' if c in _MONEY_HEADERS else c for c in cols]
+
 
 # ── honesty / staleness / dual-as-of primitives ────────────────────────────
 _MONTHS = {'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
@@ -455,8 +477,8 @@ def _lp_register(wb, cir, ctx):
         return
     ws = wb.create_sheet('LP_REGISTER')
     _rowh(ws, ['LP INVESTOR REGISTER (₹Cr) — fund as-of ' + str(ctx.fund_asof)])
-    _rowh(ws, ['LP / Investor', 'Type', 'Commitment', 'Called', 'Uncalled', '% Funded',
-               'Distributed', 'DPI', 'NAV Share', 'RVPI', 'TVPI', 'IRR', 'KYC', 'Commit cell', 'State'])
+    _rowh(ws, _hdr(['LP / Investor', 'Type', 'Commitment', 'Called', 'Uncalled', '% Funded',
+               'Distributed', 'DPI', 'NAV Share', 'RVPI', 'TVPI', 'IRR', 'KYC', 'Commit cell', 'State']))
     tc = td = tk = Decimal('0')
     hc = hd = hk = False
     for rec in lp:
@@ -496,7 +518,7 @@ def _capital_calls(wb, cir, ctx):
         return
     ws = wb.create_sheet('CAPITAL_CALLS')
     _rowh(ws, ['CAPITAL CALL LEDGER (₹Cr)'])
-    _rowh(ws, ['Call #', 'Date', 'Amount', 'Purpose', 'Cumulative Called', 'Cum Call %', 'Uncalled Balance', 'Cell'])
+    _rowh(ws, _hdr(['Call #', 'Date', 'Amount', 'Purpose', 'Cumulative Called', 'Cum Call %', 'Uncalled Balance', 'Cell']))
     cum = Decimal('0')
     for rec in calls:
         amt = _num(rec.fields.get('amount'))
@@ -522,9 +544,9 @@ def _portfolio_master(wb, cir, ctx):
     ws = wb.create_sheet('PORTFOLIO_MASTER')
     _rowh(ws, ['PORTFOLIO MASTER — per company (₹Cr). Fund cols as-of ' + str(ctx.fund_asof) +
                '; MIS cols carry each company’s own date + ⚠stale if > ' + str(ctx.stale_m) + 'm old'])
-    _rowh(ws, ['#', 'Company', 'Sector', 'Stage', 'Domicile', 'Inv Date', 'Inv Year', 'Yrs Held',
+    _rowh(ws, _hdr(['#', 'Company', 'Sector', 'Stage', 'Domicile', 'Inv Date', 'Inv Year', 'Yrs Held',
                'Cost', 'Equity %', 'Val Method', 'Revenue', 'EBITDA (Standard)', 'Cash', 'Monthly Burn',
-               'Status', 'MIS As-of', 'Stale?', 'Notes'])
+               'Status', 'MIS As-of', 'Stale?', 'Notes']))
     from .nav import _parse_date as _pd
     fund_d = _pd(str(ctx.fund_asof))
     for i, rec in enumerate(inv, start=1):
@@ -561,8 +583,8 @@ def _valuations(wb, cir, ctx):
         return
     ws = wb.create_sheet('VALUATIONS')
     _rowh(ws, ['PORTFOLIO VALUATIONS (₹Cr) — as-of ' + str(ctx.fund_asof)])
-    _rowh(ws, ['#', 'Company', 'Sector', 'Val Method', 'Cost', 'Fair Value', 'Unrealised Gain',
-               'Gain %', 'IRR', 'Multiple', 'Derived EV', 'DLOM', 'Net FV chain', 'Val Date'])
+    _rowh(ws, _hdr(['#', 'Company', 'Sector', 'Val Method', 'Cost', 'Fair Value', 'Unrealised Gain',
+               'Gain %', 'IRR', 'Multiple', 'Derived EV', 'DLOM', 'Net FV chain', 'Val Date']))
     for i, rec in enumerate(inv, start=1):
         f = rec.fields
         cost, fv = _num(f.get('cost')), _num(f.get('fair_value'))
@@ -588,8 +610,8 @@ def _quoted_unquoted(wb, cir, ctx):
                '. A partition of the SAME per-company fair values shown in VALUATIONS — it '
                're-labels, it never re-values. Basis=inferred means derived from valuation '
                'methodology (no source-stated ISIN / exchange / share type), ready to be overridden.'])
-    _rowh(ws, ['#', 'Company', 'Fair Value', 'Classification', 'Basis', 'ISIN', 'Exchange',
-               'Evidence / hold reason'])
+    _rowh(ws, _hdr(['#', 'Company', 'Fair Value', 'Classification', 'Basis', 'ISIN', 'Exchange',
+               'Evidence / hold reason']))
     q = u = h = Decimal('0')
     nq = nu = nh = 0
     fv_incomplete = False
@@ -613,7 +635,7 @@ def _quoted_unquoted(wb, cir, ctx):
                   str(f.get('quoted_evidence') or '')[:70]],
              good=(3,) if iq is True else (), warn=(3, 7) if iq is None else ())
     _row(ws, [])
-    _rowh(ws, ['BUCKET', 'Companies', 'Σ Fair Value', '% of Σ FV'])
+    _rowh(ws, _hdr(['BUCKET', 'Companies', 'Σ Fair Value', '% of Σ FV']))
     tot = q + u + h
     def _pct(x):
         return _f(x / tot) if tot else NR                     # fraction → 0.00%
@@ -695,7 +717,8 @@ def _moic_tvpi_dpi(wb, cir, ctx):
     _rowh(ws, ['MOIC / TVPI / DPI / RVPI — fund performance (as-of ' + str(ctx.fund_asof) + ')'])
     _row(ws, [f'Σ Cost {_f(ctx.sum_cost)} · Σ FV {_f(ctx.sum_fv)} · Called {_f(ctx.called)} · '
               f'Distributed {_f(ctx.distributed)} · '
-              + (f'Residual NAV {_f(ctx.residual_nav)}' if ctx.residual_nav is not None else 'Residual NAV HELD')])
+              + (f'Residual NAV {_f(ctx.residual_nav)}' if ctx.residual_nav is not None else 'Residual NAV HELD')
+              + f'  (all {_CCY})'])
     _row(ws, [])
     _rowh(ws, ['Metric', 'Value', 'Basis', 'State', 'Note'])
     cost_ok = not ctx.cost_held and ctx.sum_cost > 0
@@ -716,7 +739,7 @@ def _moic_tvpi_dpi(wb, cir, ctx):
     _checkrow(ws, 'Total FV = Σ company FV', ctx.sum_fv if not ctx.fv_held else None,
               ctx.sum_fv if not ctx.fv_held else None, held_reason='' if not ctx.fv_held else 'a company FV held')
     _row(ws, [])
-    _rowh(ws, ['Per-company MOIC', 'Cost', 'Fair value', 'MOIC', 'State'])
+    _rowh(ws, _hdr(['Per-company MOIC', 'Cost', 'Fair value', 'MOIC', 'State']))
     for rec in sorted(_recs(cir, 'portfolio_investments'), key=_entity):
         c, fv = _num(rec.fields.get('cost')), _num(rec.fields.get('fair_value'))
         m = _f(fv / c) if (c and fv is not None) else HELD_MARK
@@ -749,7 +772,7 @@ def _waterfall(wb, cir, ctx):
                      good=(4,) if ok else (), warn=() if ok else (4,))
     _waterfall_compute(ws, cir, ctx, terms)
     _row(ws, [])
-    _rowh(ws, ['Distribution', 'Date', 'Type', 'Gross', 'GP carry', 'Net to LP'])
+    _rowh(ws, _hdr(['Distribution', 'Date', 'Type', 'Gross', 'GP carry', 'Net to LP']))
     for rec in dist:
         g, c, n = (_num(rec.fields.get('gross')), _num(rec.fields.get('gp_carry')), _num(rec.fields.get('net')))
         _row(ws, [rec.fields.get('key', ''), rec.fields.get('date', ''), str(rec.fields.get('type', ''))[:24],
@@ -858,7 +881,7 @@ def _sector_allocation(wb, cir, ctx):
         by_cost[sec] += (_num(r.fields.get('cost')) or Decimal('0'))
         by_fv[sec] += (_num(r.fields.get('fair_value')) or Decimal('0'))
     tot_fv = sum(by_fv.values()) or Decimal('1')
-    _rowh(ws, ['Sector', '# Cos', 'Cost', 'Fair Value', '% by FV', 'MOIC'])
+    _rowh(ws, _hdr(['Sector', '# Cos', 'Cost', 'Fair Value', '% by FV', 'MOIC']))
     for sec in sorted(by_fv, key=lambda s: -by_fv[s]):
         moic = _f(by_fv[sec] / by_cost[sec]) if by_cost[sec] else NR
         _row(ws, [sec, by_n[sec], _f(by_cost[sec]), _f(by_fv[sec]), _f(by_fv[sec] / tot_fv), moic])  # frac → 0.00%
@@ -873,8 +896,8 @@ def _exits(wb, cir, ctx):
         return
     ws = wb.create_sheet('EXITS')
     _rowh(ws, ['REALISED EXITS (₹Cr)'])
-    _rowh(ws, ['#', 'Company', 'Sector', 'Exit Date', 'Type', 'Cost', 'Gross Proceeds',
-               'Net Proceeds', 'Realised MOIC', 'Exit IRR'])
+    _rowh(ws, _hdr(['#', 'Company', 'Sector', 'Exit Date', 'Type', 'Cost', 'Gross Proceeds',
+               'Net Proceeds', 'Realised MOIC', 'Exit IRR']))
     tcost = tgross = tnet = Decimal('0')
     inv_sector = {lexicon.normalise_label(_entity(r)): r.fields.get('sector', NR)
                   for r in _recs(cir, 'portfolio_investments')}
@@ -901,7 +924,7 @@ def _fees(wb, cir, ctx):
         return
     ws = wb.create_sheet('FEES')
     _rowh(ws, ['MANAGEMENT FEE SCHEDULE (₹Cr)'])
-    _rowh(ws, ['FY', 'Committed Base', 'Rate', 'Annual Fee', 'Cumulative', 'GST 18%', 'Total w/ GST'])
+    _rowh(ws, _hdr(['FY', 'Committed Base', 'Rate', 'Annual Fee', 'Cumulative', 'GST 18%', 'Total w/ GST']))
     cum = Decimal('0')
     for rec in fees:
         base, rate, fee = (_num(rec.fields.get('committed_base')), _num(rec.fields.get('rate')),
@@ -922,10 +945,10 @@ def _fees(wb, cir, ctx):
 # ── 12. PORTFOLIO_KPI (company MIS — honest per-cell + staleness) ───────────
 def _portfolio_kpi(wb, cir, ctx):
     ws = wb.create_sheet('PORTFOLIO_KPI')
-    _rowh(ws, ['PORTFOLIO KPI TRACKER — company MIS (each at its OWN as-of; ⚠stale if > '
+    _rowh(ws, ['PORTFOLIO KPI TRACKER — company MIS, money in ₹Cr (each at its OWN as-of; ⚠stale if > '
                + str(ctx.stale_m) + 'm before fund as-of ' + str(ctx.fund_asof) + ')'])
-    _rowh(ws, ['Company', 'Sector', 'Stage', 'MIS As-of', 'Age(mo)', 'Stale?', 'Revenue', 'EBITDA',
-               'EBITDA Margin %', 'Cash', 'Head-count', 'Basis', 'State', 'EBITDA basis/adj'])
+    _rowh(ws, _hdr(['Company', 'Sector', 'Stage', 'MIS As-of', 'Age(mo)', 'Stale?', 'Revenue', 'EBITDA',
+               'EBITDA Margin %', 'Cash', 'Head-count', 'Basis', 'State', 'EBITDA basis/adj']))
     inv_by = {lexicon.normalise_label(_entity(r)): r for r in _recs(cir, 'portfolio_investments')}
     emit = held = gap = 0
     for rec in _recs(cir, 'mis', 'company', 'portfolio_companies'):
