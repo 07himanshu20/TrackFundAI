@@ -18,6 +18,68 @@
   let PROV = [];          // provenance objects, referenced by index (no attr-escaping hazard)
   let currentReport = null;  // U6 uncovered-currency report from the last run (drives the rate prompt)
   let currentBase = null;    // the fund base currency applied to the last run (persisted run input)
+  // The foreign currencies the CURRENT run is converting into ₹, with the companies each one affects.
+  // Populated ONLY from real backend data — the rates the user supplied + the report's own 'sites' — so
+  // the progress statements name exactly what is being converted; never a fabricated or guessed line.
+  let convertingCurrencies = [];
+
+  // ISO code → the plain currency name a finance reader recognises (falls back to the bare code). Display
+  // only — it changes no value, and an unknown code still shows, never hidden.
+  const CCY_NAMES = {
+    MYR: 'Malaysian Ringgit', SGD: 'Singapore Dollar', USD: 'US Dollar', EUR: 'Euro',
+    GBP: 'British Pound', AED: 'UAE Dirham', JPY: 'Japanese Yen', CNY: 'Chinese Yuan',
+    HKD: 'Hong Kong Dollar', AUD: 'Australian Dollar', CAD: 'Canadian Dollar', CHF: 'Swiss Franc',
+    THB: 'Thai Baht', IDR: 'Indonesian Rupiah', PHP: 'Philippine Peso', LKR: 'Sri Lankan Rupee',
+    NPR: 'Nepalese Rupee', BDT: 'Bangladeshi Taka', SAR: 'Saudi Riyal', QAR: 'Qatari Riyal',
+    OMR: 'Omani Rial', KWD: 'Kuwaiti Dinar', ZAR: 'South African Rand', NZD: 'New Zealand Dollar',
+  };
+  const ccyName = (code) => {
+    const c = String(code || '').toUpperCase();
+    return CCY_NAMES[c] ? `${CCY_NAMES[c]} (${c})` : c;
+  };
+
+  // Translate the backend's REAL progress percentage into a plain-English line for the finance team.
+  // Each line maps 1:1 to a genuine engine stage boundary (2/5/25/40/45/60/90/100) — no invented steps,
+  // no timer; the % it is keyed on comes straight from the job's progress_pct.
+  function friendlyStage(pct) {
+    const p = Number(pct) || 0;
+    if (p >= 100) return 'Done — your consolidated file is ready.';
+    if (p >= 90) return 'Putting together your consolidated workbook…';
+    if (p >= 60) return 'Reading each company’s figures and converting foreign amounts into ₹…';
+    if (p >= 45) return 'Matching each company to its figures…';
+    if (p >= 40) return 'Reading the fund’s financial statements…';
+    if (p >= 25) return 'Organising the fund’s investment list…';
+    if (p >= 5) return 'Reading your uploaded files…';
+    return 'Getting things ready…';
+  }
+
+  // The currency-conversion statements shown under the bar while a run is in flight. Lists exactly the
+  // currencies this run converts and the companies each affects — the real information a finance reviewer
+  // wants to watch. Hidden once done (100%) or when nothing foreign is being converted.
+  function renderProgressDetail(pct) {
+    const el = $('progress-detail');
+    if (!el) return;
+    const p = Number(pct) || 0;
+    if (!convertingCurrencies.length || p >= 100) { el.style.display = 'none'; el.innerHTML = ''; return; }
+    el.style.display = 'block';
+    el.innerHTML = '<div class="pi3-prog-detail-h">Converting foreign-currency figures into ₹ (Crore):</div>' +
+      convertingCurrencies.map((c) => {
+        const who = (c.entities && c.entities.length)
+          ? ` — for ${c.entities.map(esc).join(', ')}` : '';
+        return `<div class="pi3-prog-detail-line"><b>${esc(ccyName(c.code))}</b> &rarr; ₹${who}</div>`;
+      }).join('');
+  }
+
+  // Show the progress panel immediately (before the run's own polling begins) so a click never lands on a
+  // dead 'Validating…' — the finance user sees continuous, honest feedback from the first moment.
+  function showProgress(msg, pct) {
+    const p = Number(pct) || 0;
+    $('progress-panel').style.display = 'block';
+    $('progress-msg').textContent = msg;
+    $('progress-pct').textContent = p + '%';
+    $('progress-bar').style.width = p + '%';
+    renderProgressDetail(p);
+  }
 
   if (window.Auth && Auth.requireAuth) Auth.requireAuth();
   (function () { const u = window.Auth && Auth.getUser && Auth.getUser(); if (u) $('user-badge').textContent = u.email || u.username || '—'; })();
@@ -58,6 +120,7 @@
     const fd = new FormData();
     selected.forEach((f) => fd.append('files', f, f.name));
     $('btn-run').disabled = true; $('upload-hint').textContent = 'Uploading…';
+    convertingCurrencies = [];   // a brand-new run converts nothing until a rate card is supplied
     try {
       const r = await Auth.apiUpload(API + '/', fd);
       jobId = r.job_id; selected = []; startPolling();
@@ -90,7 +153,8 @@
     try { d = await Auth.apiGet(`${API}/${jobId}/`); } catch (e) { return; }
     $('progress-pct').textContent = (d.progress_pct || 0) + '%';
     $('progress-bar').style.width = (d.progress_pct || 0) + '%';
-    $('progress-msg').textContent = d.progress_message || 'Working…';
+    $('progress-msg').textContent = friendlyStage(d.progress_pct);   // plain English, keyed on the REAL %
+    renderProgressDetail(d.progress_pct);                            // which currencies/companies are converting
     running = !['completed', 'completed_with_errors', 'failed'].includes(d.status);
     renderServerFiles(d.input_files || []);
     if (!running) {
@@ -213,11 +277,20 @@
       if (rate) rows.push({ currency: ccy, rate: rate, date: asOf, source: src });
     });
     if (!rows.length) { notify('Enter at least one rate', 'error'); return; }
-    $('ccy-submit').disabled = true; $('ccy-hint').textContent = 'Validating…';
+    // Record exactly what this run will convert — the currencies the user just priced, each tied to the
+    // companies the backend's report says it affects. Real data only; drives the on-bar statements.
+    convertingCurrencies = rows.map((r) => {
+      const u = ((currentReport && currentReport.uncovered) || []).find((x) => x.currency === r.currency) || {};
+      const entities = (u.sites || []).map((s) => s.entity || s.file || '').filter(Boolean);
+      return { code: r.currency, entities };
+    });
+    $('ccy-submit').disabled = true; $('ccy-hint').textContent = '';
+    showProgress('Checking the exchange rates you entered…', 0);   // continuous feedback from the first click
     try {
       afterCardAccepted(await Auth.apiPost(`${API}/${jobId}/ratecard/`, { manual_rates: rows }));
     } catch (e) {
       $('ccy-submit').disabled = false; $('ccy-hint').textContent = '';
+      $('progress-panel').style.display = 'none';   // validation refused → no re-run; take the bar back down
       notify('Rate card refused: ' + (e.message || ''), 'error');   // the gate's reason surfaces verbatim
     }
   }
@@ -225,10 +298,20 @@
   async function submitScheduleFile(file) {
     const fd = new FormData();
     fd.append('schedule_file', file, file.name);
-    $('ccy-hint').textContent = 'Reading schedule…';
+    // The schedule is priced server-side; the currencies it is meant to cover are the report's uncovered
+    // set, each with the companies it affects — real data for the on-bar statements.
+    convertingCurrencies = ((currentReport && currentReport.uncovered) || []).map((u) => ({
+      code: u.currency, entities: (u.sites || []).map((s) => s.entity || s.file || '').filter(Boolean),
+    }));
+    $('ccy-hint').textContent = '';
+    showProgress('Reading your rate schedule…', 0);
     try {
       afterCardAccepted(await Auth.apiUpload(`${API}/${jobId}/ratecard/`, fd));
-    } catch (e) { $('ccy-hint').textContent = ''; notify('Schedule refused: ' + (e.message || ''), 'error'); }
+    } catch (e) {
+      $('ccy-hint').textContent = '';
+      $('progress-panel').style.display = 'none';   // refused → no re-run; hide the bar
+      notify('Schedule refused: ' + (e.message || ''), 'error');
+    }
   }
 
   function afterCardAccepted(r) {

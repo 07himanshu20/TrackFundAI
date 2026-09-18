@@ -33,6 +33,11 @@
     .pi3-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
     .pi3-progress { height: 6px; background: var(--card2); border-radius: 3px; overflow: hidden; }
     .pi3-progress > i { display: block; height: 100%; background: var(--accent); transition: width .3s ease; }
+    /* Finance-friendly, real-data statements shown under the bar while a run converts currencies. */
+    #progress-detail { margin-top: 11px; display: none; }
+    .pi3-prog-detail-h { font-size: 11px; font-weight: 600; color: var(--text2); margin-bottom: 5px; }
+    .pi3-prog-detail-line { font-size: 11px; color: var(--text3); line-height: 1.75; }
+    .pi3-prog-detail-line b { color: var(--accent3); font-weight: 600; }
     .pi3-resolve-row { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center;
                        padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-sm);
                        margin-bottom: 8px; background: var(--card); }
@@ -133,6 +138,7 @@
               <span id="progress-pct" style="color:var(--accent3);">0%</span>
             </div>
             <div class="pi3-progress"><i id="progress-bar" style="width:0%"></i></div>
+            <div id="progress-detail"></div>
           </div>
         </div>
 
