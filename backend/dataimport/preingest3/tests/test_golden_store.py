@@ -239,9 +239,9 @@ def test_warm_run_output_is_byte_identical_to_cold(tmp_path):
     cold run (empty store) populates it; a warm run (same files, same config, same logic) serves the cached
     Records; the emitted master workbook must be BYTE-IDENTICAL — the cache changes speed, never numbers.
     The workbook is a pure function of the CIR, so this closes the loop on the store's core promise. (The
-    currency_report is a separate RunResult field, intentionally observation-order dependent on a warm
-    serve, and not part of the workbook — see pipeline.run's re-observation note — so it is out of scope
-    here by design.)"""
+    currency_report is a separate RunResult field, not part of the workbook; that a warm serve reconstructs
+    it IDENTICALLY — so the rate-card prompt survives caching — is proven by
+    test_warm_run_currency_report_matches_cold_so_rate_prompt_survives_caching below.)"""
     from backend.dataimport.preingest3 import pipeline, master_workbook as mw
     from backend.dataimport.preingest3.ratecard import default_inr_card
 
@@ -267,6 +267,52 @@ def test_warm_run_output_is_byte_identical_to_cold(tmp_path):
 
     assert warm_bytes == cold_bytes, \
         'warm run (served from the golden store) differs from cold — a cache HIT changed the answer'
+
+
+@_real
+@pytest.mark.slow
+def test_warm_run_currency_report_matches_cold_so_rate_prompt_survives_caching(tmp_path, monkeypatch):
+    """REDDENING — the repeat-run rate-prompt bug. The uncovered-currency report drives the rate-card
+    prompt, and it MUST be identical on a warm (cache-served) run and a cold run. A cache HIT skips
+    extraction, so before the fix the run-scoped currency ledger was never repopulated for served files:
+    `uncovered` came back EMPTY and `prompt_required` False, so on a REPEAT upload of already-seen files
+    the prompt silently vanished — the foreign figures were held with no way to supply a rate (exactly the
+    reported bug). The fix carries each file's currency verdicts with its cached record and REPLAYS them
+    into the ledger on a hit. Real corpus (Chemopharm/Analisa MYR, Chemoscience SGD) + the default INR-only
+    card, so cold legitimately reports MYR/SGD uncovered → a genuine cache-served warm run MUST report the
+    SAME. Reddens against the pre-fix pipeline (warm uncovered=[] ≠ cold)."""
+    from backend.dataimport.preingest3 import pipeline, extract as _extract
+    from backend.dataimport.preingest3.ratecard import default_inr_card
+
+    files = [(f, os.path.join(IN, f)) for f in sorted(os.listdir(IN)) if f.endswith('.xlsx')
+             and not f.startswith('~$')]
+    store = str(tmp_path / 'store')
+    rc = default_inr_card('2026-06-30')          # INR-only → the corpus's MYR/SGD are legitimately uncovered
+
+    calls = {'n': 0}
+    real = _extract.extract_company
+    monkeypatch.setattr(_extract, 'extract_company',
+                        lambda *a, **k: (calls.__setitem__('n', calls['n'] + 1) or real(*a, **k)))
+    monkeypatch.setattr(pipeline, 'extract_company', _extract.extract_company)
+
+    def _report(res):
+        cr = res.currency_report or {}
+        return (sorted(u['currency'] for u in (cr.get('uncovered') or [])), bool(cr.get('prompt_required')))
+
+    cold = pipeline.run(files, as_of='2026-06-30', org='ccywarm', rate_card=rc, store_dir=store)
+    cold_unc, cold_prompt = _report(cold)
+    cold_calls = calls['n']
+    assert cold_prompt and cold_unc, 'setup: cold run must detect the corpus foreign currencies as uncovered'
+
+    calls['n'] = 0
+    warm = pipeline.run(files, as_of='2026-06-30', org='ccywarm', rate_card=rc, store_dir=store)
+    warm_unc, warm_prompt = _report(warm)
+    assert calls['n'] < cold_calls, 'setup: warm run must actually serve from the cache (fewer extractions)'
+
+    assert (warm_unc, warm_prompt) == (cold_unc, cold_prompt), (
+        f'warm (cache-served) currency report differs from cold — the rate-card prompt would not survive a '
+        f'repeat run: warm uncovered={warm_unc} prompt={warm_prompt} vs cold uncovered={cold_unc} '
+        f'prompt={cold_prompt}')
 
 
 # ══════════════════════════════════════════════════════════════════════════════════

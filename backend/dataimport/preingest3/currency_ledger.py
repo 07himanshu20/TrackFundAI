@@ -26,7 +26,7 @@ place to revisit if a non-INR-reporting fund is ever onboarded.
 from __future__ import annotations
 
 import contextvars
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List, Optional, Tuple
 
 from .ratecard import BASE_CURRENCY
@@ -229,6 +229,15 @@ def observe(*, currency, escalate, reason, flags) -> None:
     led = _ACTIVE.get()
     if led is not None:
         led.record(currency=currency, escalate=escalate, reason=reason, flags=flags)
+
+
+def restamp(observations, *, entity, source_file):
+    """Return copies of `observations` re-tagged to (entity, source_file). Used when a CACHED file's
+    currency verdicts are replayed into the run ledger on a cache hit: currency detection is deterministic
+    and model-free, so a served file's verdicts must still populate the uncovered-currency report exactly
+    as a fresh extraction would — re-stamping to the CURRENT attribution keeps a re-attributed file
+    (same content, new company) sited correctly. Values/flags are untouched; only the source tags move."""
+    return [replace(o, entity=entity, source_file=source_file) for o in (observations or [])]
 
 
 def context(*, entity=None, source_file=None) -> None:

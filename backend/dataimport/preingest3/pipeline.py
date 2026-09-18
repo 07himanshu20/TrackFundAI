@@ -921,9 +921,23 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
             # point, so the parent ledger's sequence matches a sequential run exactly.
             rec, _obs = _precomputed[ck]
             _ccy_ledger.merge_observations(_obs)
-        else:                                     # same file+config, new attribution only
+            # Carry the currency verdicts WITH the record so a future CACHE HIT can replay them. Currency
+            # detection/conversion is deterministic and model-free, so it must be reconstructed on EVERY
+            # run — otherwise a repeat run of already-seen files serves the held figures but loses the
+            # 'these need a rate' signal, the uncovered report comes back empty, and the rate-card prompt
+            # silently never appears (the exact repeat-run bug this closes).
+            rec.currency_obs = list(_obs)
+        else:                                     # CACHE HIT — same file+config, new attribution only.
+            # Replay the served file's currency verdicts into the run ledger (re-stamped to the current
+            # company) so the uncovered-currency report — and thus the rate-card prompt — is IDENTICAL to
+            # a fresh extraction. A pre-fix entry carries none → replays nothing, but its logic_version
+            # has changed, so it is already a guaranteed miss that recomputes and stores them.
+            _hit_obs = currency_ledger.restamp(getattr(rec, 'currency_obs', None),
+                                               entity=ca.company, source_file=label)
             rec = Record(rec.domain, entity_id=ca.company, fields=dict(rec.fields))
             rec.fields['company'] = ca.company
+            rec.currency_obs = _hit_obs
+            _ccy_ledger.merge_observations(_hit_obs)
         extraction[ck] = rec
         if _store_dir and not from_store:         # persist fresh computes (never re-write a disk hit)
             golden_store.put(_store_dir, ck, rec)
@@ -980,9 +994,10 @@ def run(files: List[Tuple[str, str]], *, as_of: str, org: str = 'default',
     _p(90, 'Assembling consolidated record')
     logger.info('[preingest3] run complete — model boundary: %s', metrics.summary())
     # U6 Phase 2: build the uncovered-currency report from every verdict observed this run,
-    # then release the ledger so it can never bleed into another run. (A reused-cache entity is
-    # not re-extracted, so its currency is not re-observed; any run that CHANGES the rate card
-    # busts that cache and re-observes — which is exactly the remediation loop.)
+    # then release the ledger so it can never bleed into another run. A reused-cache entity is not
+    # re-extracted, but its currency verdicts were CARRIED with the cached record and REPLAYED into the
+    # ledger at its emit point above (currency is deterministic/model-free), so the report — and the
+    # rate-card prompt — is identical whether a file was freshly extracted or served from the cache.
     # A company whose schedules disagreed on domicile in a way that implies DIFFERENT currencies has
     # had its domicile withheld (fund_anchor._resolve_domicile → None), so U6 already fail-closes its
     # currency for lack of geo evidence; disclose WHY so the fail-closed hold is explained, not silent.
