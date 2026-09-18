@@ -1466,7 +1466,7 @@ def _grid_resource(prof, concept, primary_sheet, *, ident, label, geo_ccy, inr_m
 #   • KEEP     — not an aggregate ("Gross Revenue", or a Σ of pure operating sub-lines with no Other-Income
 #     sibling) → emit the located row (no evidence of contamination; a known-operating figure).
 _TOTAL_INCOME_RE = re.compile(r'\btotal\s+(income|revenue|revenues)\b', re.I)
-_REV_FROM_OPS_RE = re.compile(r'\brevenue\s+from\s+operation', re.I)
+_REV_FROM_OPS_RE = re.compile(r'\brevenues?\s+from\s+operation', re.I)
 # 'Other income' is UNAMBIGUOUSLY non-operating in every industry — unlike "interest income", which IS
 # operating revenue for a lender/NBFC — so it is the one safe positive-evidence discriminator here.
 _OTHER_INCOME_RE = re.compile(r'\bother\s+incomes?\b', re.I)

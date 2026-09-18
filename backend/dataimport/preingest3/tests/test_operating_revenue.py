@@ -265,3 +265,58 @@ def test_bar3_pure_operating_reconciling_is_keep_not_construct():
             ['Service revenue', 40, 60],
             ['Total Revenue', 100, 130]]
     assert _disp(rows, 3) == ('keep', None)
+
+
+# ══ plural 'Revenues from Operations' (universal label variant — the RfO recogniser must accept it) ════
+# 'Revenue from operations' also occurs PLURAL ('Revenues from Operations'), often prefixed 'Total ' as a
+# clean operating-revenue subtotal (Clientell shape) — NOT a Total-Income aggregate. If the recogniser
+# only knows the singular, the clean operating line is mis-classified as a Total-Income aggregate and
+# needlessly routed through the purity proof (its hold reason then blames operating-purity instead of the
+# true cause). Linguistic variant, universal — the fix widens 'revenue' → 'revenues?' (one optional 's').
+AGG_WITH_PLURAL_RFO = [
+    ['Particulars', 'Apr-2025', 'May-2025'],
+    ['Revenues from Operations', 100, 200],   # plural RfO row (the clean operating line)
+    ['Other income', 5, 6],
+    ['Total income', 105, 206],
+]
+
+
+def test_rfo_regex_matches_singular_and_plural_but_not_bare_total_revenues():
+    # must-handle: the plural (and the 'Total '-prefixed plural) is recognised as Revenue-from-operations…
+    assert extract._REV_FROM_OPS_RE.search('Revenues from Operations')
+    assert extract._REV_FROM_OPS_RE.search('Total Revenues from Operations')
+    # … the singular still matches (no regression) …
+    assert extract._REV_FROM_OPS_RE.search('Revenue from operations')
+    # … must-not-misfire: a bare 'Total Revenues' (no 'from operations') is NOT an RfO line — it is a
+    # Total-Revenue AGGREGATE; the optional-'s' must not make it register as operating revenue.
+    assert extract._REV_FROM_OPS_RE.search('Total Revenues') is None
+
+
+def test_plural_total_revenues_from_operations_is_not_an_aggregate():
+    # 'Total Revenues from Operations' is a clean operating-revenue subtotal, NOT a Total-Income aggregate
+    # (the 'Total' belongs to the operating-revenue label). It must NOT be routed through the purity proof.
+    # RED before the plural fix: the singular-only regex missed 'Revenues', so _is_total_income_aggregate
+    # returned True and the disposition fell to a purity-proof HOLD.
+    rows = [['Particulars', 'Apr-2025', 'May-2025'],
+            ['Total Revenues from Operations', 100, 200]]
+    assert extract._is_total_income_aggregate(rows, 0, 1) is False
+    assert extract._operating_revenue_disposition(rows, 0, 1, acts=ACTS) == ('keep', None)
+
+
+def test_disposition_relocates_to_plural_rfo_row():
+    # an aggregate ('Total income') with a stated PLURAL 'Revenues from Operations' row above it →
+    # relocate to that clean operating line (row 1). RED before the fix (relocate primitive missed plural).
+    assert extract._operating_revenue_row(AGG_WITH_PLURAL_RFO, 0, 3) == 1
+    assert extract._operating_revenue_disposition(AGG_WITH_PLURAL_RFO, 0, 3, acts=ACTS) == ('relocate', 1)
+
+
+def test_plain_total_revenues_aggregate_still_holds_after_plural_fix():
+    # must-not-misfire (the aggregate side): a genuine 'Total Revenues' aggregate that folds in non-op
+    # Other Income with NO RfO row, and an unlabelled excess (total > Σ), must STILL be an aggregate and
+    # HOLD — the optional-'s' widening must not leak the aggregate through as a clean operating line.
+    rows = [['Particulars', 'Apr-2025', 'May-2025'],
+            ['Product', 100, 200],
+            ['Other income', 5, 6],
+            ['Total Revenues', 130, 250]]      # total > Σ components → cannot construct → HOLD
+    assert extract._is_total_income_aggregate(rows, 0, 3) is True
+    assert extract._operating_revenue_disposition(rows, 0, 3, acts=ACTS)[0] == 'hold'
