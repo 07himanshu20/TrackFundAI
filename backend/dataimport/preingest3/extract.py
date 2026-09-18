@@ -820,6 +820,16 @@ def _sheet_vintage_flags(rows, ax, as_of, found) -> Tuple[bool, bool]:
     mq = [pc for pc in acts if pc.kind in _POINT_IN_TIME_KINDS and 2000 <= pc.order[0] < 9000]
     if not mq:
         return (False, False)
+    # Quarantine a trailing cadence-break TYPO period (e.g. Clientell's stray '2026-12-25' wedged between
+    # Nov-2025 and Jan-2026) before judging vintage — reuse the SAME peeler collapse uses, so a clean
+    # actuals series is not misread as forward-projecting off a lone data-entry typo. A genuine plan sheet's
+    # IN-CADENCE forward columns are NOT peeled (no gross gap) → fwd still fires → still excluded (the
+    # budget-as-actual door stays shut). Never touches an interior period; only an anomalous future tail.
+    _outliers = periods._period_outlier_cols([pc for pc in mq if pc.kind in (periods.MONTH, periods.QUARTER)])
+    if _outliers:
+        mq = [pc for pc in mq if pc.col not in _outliers]
+        if not mq:
+            return (False, False)
     cad = _axis_cadence_months(ax)
     if cad is None:
         stale = False

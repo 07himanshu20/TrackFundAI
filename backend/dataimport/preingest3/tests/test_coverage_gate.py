@@ -131,7 +131,11 @@ GT = {
                                             # a sum); recovered by the 'total staff' lexicon synonym + carrier
     ('Clientell', 'cash'): '9.3253',        # fork-b re-source: Analysis!B19 'Cash Balance' Feb-26 (₹Lakh),
                                             # corroborated by the ~₹9.2Cr summary cell in the same column
-    ('Clientell', 'headcount'): '19',       # Feb'26 period-end (AM80); NOT an average/sum
+    ('Clientell', 'headcount'): '19',       # 'Operational Metrics'!'Total Headcount' Feb-26 (AM80) = 19,
+                                            # the latest ≤as-of actual of a dense monthly series (22→19); a
+                                            # stray out-of-cadence 'Dec-2026' typo header is peeled as a
+                                            # cadence-break outlier so the sheet isn't misread as forward-plan.
+                                            # NOT an average/sum. Cross-sheet re-source (Analysis carries none).
 }
 
 # GENUINELY-UNVERIFIABLE emits only. Empty by design. Shape enforced by the discipline test.

@@ -105,6 +105,20 @@ def test_hubler_mis_values_trace_to_cells():
     _close(f['cash'], '1.0621', basis='point_in_time', cell='BB98')
 
 
+def test_clientell_headcount_resourced_cross_sheet_with_typo_column_peeled():
+    # Clientell's best sheet ('Analysis') carries NO headcount; the count lives on 'Operational Metrics'
+    # ('Total Headcount', a dense monthly series 22→19). That sheet also has a stray out-of-cadence
+    # 'Dec-2026' typo header that would falsely mark it forward-projecting and exclude the whole sheet from
+    # re-source — until the cadence-break outlier is peeled in the vintage flags. Latest ≤Feb-26 actual =
+    # 19 (a point-in-time count, NOT an average/sum); recovered by the fork-b cross-sheet re-source.
+    f = _extract(_anchors(), 'clientell', 'AVF_2026_03_16_P_Clientell_MIS_Feb26.xlsx')
+    _close(f['headcount'], 19, basis='point_in_time')
+    assert f['headcount'].provenance.sheet == 'Operational Metrics'
+    assert f['headcount'].provenance.row_label == 'Total Headcount'
+    # the fix is isolated: Analysis revenue/EBITDA remain correctly HELD (operating-purity / self-inconsistent)
+    assert f['revenue'].held and f['ebitda'].held
+
+
 def test_find_equivalent_stock_row_recovers_balance_and_reddens_when_absent():
     """R4 unit + NEGATIVE CONTROL. The dedicated closing_cash locator finds a real 'Closing
     balance' stock row (so a flow-bound cash can recover), while SKIPPING flow lines ('Cash

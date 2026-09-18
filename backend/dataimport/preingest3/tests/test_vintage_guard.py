@@ -82,6 +82,17 @@ def _plan_pl():                     # a forward AOP/budget: real values in month
     return [hdr, rev, ebitda]
 
 
+def _current_pl_typo():             # Clientell-shape: dense MONTHLY actuals through Feb-26 with ONE stray
+    # far-future TYPO header (Dec-26) wedged mid-row (a data-entry error). The dominant monthly cadence
+    # makes the lone gross-jump column a peelable outlier → the sheet is a CURRENT actuals series, not a
+    # forward plan; without peeling it, that typo would falsely mark the sheet forward-projecting.
+    ms = _months([(2025, m) for m in range(4, 13)] + [(2026, 1), (2026, 12), (2026, 2)])
+    n = len(ms)
+    return [['Statement of Profit and Loss (INR Cr)'] + ms,
+            ['Revenue'] + [100 + i for i in range(n)],
+            ['EBITDA'] + [10 + i for i in range(n)]]
+
+
 def _write_book(path, sheets):
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
@@ -106,7 +117,7 @@ def _axlc(rows):
 
 # ── fixture sanity: the synthetic sheets are TIME SERIES with the intended vintages ───────────────
 def test_fixtures_are_time_series_with_expected_vintage():
-    for rows in (_stale_bs(), _current_bs(), _stale_pl(), _current_pl(), _plan_pl()):
+    for rows in (_stale_bs(), _current_bs(), _stale_pl(), _current_pl(), _plan_pl(), _current_pl_typo()):
         ax = periods.detect_period_axis(rows)
         assert ax.is_time_series and ax.columns, 'fixture must be a time series, not a comparison grid'
     ax, _ = _axlc(_current_bs())
@@ -150,6 +161,30 @@ def test_sheet_vintage_flags_classify_stale_current_and_plan():
     assert flags(_stale_pl()) == (True, False)      # stale, not forward
     assert flags(_current_pl()) == (False, False)   # current actual
     assert flags(_plan_pl()) == (False, True)       # reaches as-of but has post-as-of plan values → forward
+
+
+# ── stray future-dated TYPO vs genuine forward PLAN (the surgical peel + mandatory must-not-misfire) ──
+def test_stray_future_typo_peeled_but_genuine_plan_still_forward():
+    # MUST-HANDLE (Clientell): a lone out-of-cadence future TYPO header is peeled → the sheet reads as a
+    # CURRENT actuals series (fwd=False), so its current actual is re-sourceable rather than dropped.
+    # MUST-NOT-MISFIRE: a genuine plan sheet's IN-CADENCE forward columns are NOT peeled → fwd still fires
+    # → the budget-as-actual door stays shut. The discriminator is CADENCE (a gross gap), never merely
+    # 'the sheet has a future-dated column'. If this pair cannot both be green, the item must stay HELD.
+    def flags(rows):
+        ax, lc = _axlc(rows)
+        found = {c: extract._find_concept_row(rows, lc, c, ax.axis_rows[0] + 1, len(rows), ax.columns)
+                 for c in MIS_CONCEPTS}
+        found = {c: r for c, r in found.items() if r is not None}
+        return _sheet_vintage_flags(rows, ax, _ASOF, found)
+    def mq_cols(rows):
+        ax, _ = _axlc(rows)
+        return [c for c in ax.columns if c.kind in (periods.MONTH, periods.QUARTER)]
+    assert periods._period_outlier_cols(mq_cols(_current_pl_typo())), \
+        'the stray far-future typo column must be a peelable cadence-break outlier'
+    assert not periods._period_outlier_cols(mq_cols(_plan_pl())), \
+        'a genuine in-cadence forward plan must NOT be peeled (or the guard would leak budget-as-actual)'
+    assert flags(_current_pl_typo()) == (False, False)   # typo peeled → current actuals, not forward
+    assert flags(_plan_pl()) == (False, True)            # genuine plan unchanged → forward → excluded
 
 
 def test_as_of_none_makes_guard_inert():
