@@ -8,6 +8,7 @@
 (() => {
   let queuedFiles = [];
   let isImporting = false;
+  let autoIngestActive = false;   // true while a pre-ingestion 'Proceed to dashboard' hand-off is running
   let deleteTargetFileId = null;
   let deleteTargetFundName = '';
 
@@ -112,6 +113,55 @@
     loadStuckImports();
     loadUploadedFiles();
     loadNotifCount();
+
+    // If we arrived here via the pre-ingestion 'Proceed to dashboard' hand-off, auto-import the
+    // consolidated workbook (no user click) using the SAME upload + progress flow as a manual upload.
+    maybeAutoIngest();
+  }
+
+  // ── Auto-ingest hand-off from the pre-ingestion layer ─────────
+  // The pre-ingestion 'Proceed to dashboard' button redirects here with ?ingest=<pre-ingestion job id>.
+  // We pull that run's finished consolidated workbook from its own download endpoint and feed it straight
+  // into the existing queue + startUpload() path, so the user lands on the Data Ingestion tab and simply
+  // watches the progress bar. No new backend endpoint; the normal manual flow is untouched when the param
+  // is absent. Any failure falls back to a clear message + the manual uploader.
+  const INGEST_KEY = 'tfai_pi3_ingest';
+  async function maybeAutoIngest() {
+    // Read the hand-off intent from EITHER the URL param OR sessionStorage. The URL param alone is
+    // fragile: it is dropped by an auth-refresh redirect (login → back here), a back/forward-cache
+    // restore, or reaching this page via the nav — any of which left the user on an empty uploader
+    // with no explanation. sessionStorage survives all of those within the same tab, so the intent is
+    // never silently lost. Universal: keyed on the pre-ingestion job id, works for any run.
+    let pi3JobId = null;
+    try {
+      pi3JobId = new URLSearchParams(location.search).get('ingest')
+                 || sessionStorage.getItem(INGEST_KEY);
+    } catch (e) { return; }
+    if (!pi3JobId) return;
+    // Strip the URL param (cosmetic — the intent now lives in sessionStorage) but DO NOT clear the
+    // stored intent yet: if the download triggers an auth-refresh redirect, the intent must survive
+    // the round-trip so the import resumes automatically when the user lands back here.
+    try { history.replaceState(null, '', location.pathname); } catch (e) { /* no-op */ }
+    if (isImporting) return;   // an import is already running in this tab — don't stack a second one
+    autoIngestActive = true;
+    const progressEl = document.getElementById('import-progress');
+    try {
+      if (progressEl) progressEl.classList.add('active');
+      updateProgress(0, 'Fetching the consolidated workbook from the pre-ingestion layer…');
+      const blob = await Auth.apiGetBlob(`/dataimport/preingest3/${pi3JobId}/download/`);
+      const file = new File([blob], 'TFAI.xlsx',
+        { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      handleFiles([file]);      // queue it exactly as a manual selection would
+      await startUpload();      // upload + connect the SSE progress stream — no user click
+      // The import has started — consume the intent so a plain refresh will NOT re-import, while a
+      // fresh 'Proceed to dashboard' click (which writes the key again) always re-imports.
+      try { sessionStorage.removeItem(INGEST_KEY); } catch (e) { /* no-op */ }
+    } catch (e) {
+      autoIngestActive = false;
+      try { sessionStorage.removeItem(INGEST_KEY); } catch (e) { /* no-op */ }
+      updateProgress(0, 'Could not auto-import the consolidated workbook — please upload it manually below. ('
+                        + ((e && e.message) ? e.message : 'error') + ')');
+    }
   }
 
   // ── Notifications ─────────────────────────────────────────
@@ -812,6 +862,17 @@
     // Refresh both panels
     loadStuckImports();
     loadUploadedFiles();
+
+    // If this import came from the pre-ingestion 'Proceed to dashboard' hand-off and finished cleanly,
+    // fulfil the button's promise: show the result briefly, then open the dashboard. A manual upload
+    // (autoIngestActive === false) stays on this page so the user can review the summary at their pace.
+    if (autoIngestActive && (!errors || errors.length === 0)) {
+      autoIngestActive = false;
+      updateProgress(100, 'Imported ✓ Opening the dashboard…');
+      setTimeout(() => { window.location.href = 'index.html'; }, 1800);
+    } else {
+      autoIngestActive = false;
+    }
   }
 
   // ── Reset UI ──────────────────────────────────────────────

@@ -362,3 +362,34 @@ def test_money_headers_carry_unit_in_built_workbook():
     moic = hdrs('MOIC_TVPI_DPI')
     assert f'Cost ({mw._CCY})' in moic and f'Fair value ({mw._CCY})' in moic
     assert 'Value' in moic and f'Value ({mw._CCY})' not in moic                     # MOIC 'Value'=ratios
+
+
+def test_distributions_sheet_carries_dated_events_REDDENING():
+    """ROOT-CAUSE FIX (2026-09-23): dated LP distributions must live on their OWN
+    DISTRIBUTIONS sheet so the post-ingestion importer reliably classifies +
+    imports them (Net IRR = calls + DATED distributions + terminal NAV). Before
+    the fix the events were ONLY inside WATERFALL_EUR (classified as 'waterfall',
+    never 'distributions'), so 0 dated distributions were imported and Net IRR
+    went blank — and worked only by luck when classification happened to differ."""
+    cir = _base_cir()
+    for k, d, n in (('D1', '15-Jul-25', 40), ('D2', '20-Oct-25', 18), ('D3', '20-Jan-26', 12)):
+        cir.records.append(Record('distributions', entity_id=k, fields={
+            'key': k, 'date': d, 'type': 'Return of capital + gain',
+            'gross': _fig('gross', n), 'gp_carry': _fig('gp_carry', 0), 'net': _fig('net', n)}))
+    wb = mw.build_master(cir, files=['x'])
+    assert 'DISTRIBUTIONS' in wb.sheetnames
+    rows = _sheet_rows(wb, 'DISTRIBUTIONS')
+    for k, d, n in (('D1', '15-Jul-25', 40.0), ('D2', '20-Oct-25', 18.0), ('D3', '20-Jan-26', 12.0)):
+        r = _find(rows, k)
+        assert r is not None, f'distribution {k} missing from DISTRIBUTIONS sheet'
+        assert d in r, f'distribution {k} missing its date {d}'
+        assert n in r, f'distribution {k} missing its net amount {n}'
+
+
+def test_distributions_sheet_empty_when_no_distribution_records():
+    """No distributions → the sheet still exists (13/15-tab shape is invariant) but
+    carries no event rows. Must-not-fabricate control."""
+    wb = mw.build_master(_base_cir(), files=['x'])   # _base_cir has NO distribution records
+    assert 'DISTRIBUTIONS' in wb.sheetnames
+    rows = _sheet_rows(wb, 'DISTRIBUTIONS')
+    assert _find(rows, 'D1') is None

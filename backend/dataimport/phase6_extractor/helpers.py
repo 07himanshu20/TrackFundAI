@@ -20,6 +20,10 @@ _JUNK_RE = re.compile(
     r'^t\s*o\s*t\s*a\s*l\s*$|'
     r'^total\s+(called|exits|distributions|investors|lps|committed|drawdown)\b|'
     r'^totals?\s*[:\-]?\s*$|'
+    r'^[σΣ](?:[^\w]|$)|'  # Σ / "Σ (hole-aware)" — the Greek sum symbol is a totals-row
+                          # marker (used by the consolidated workbook's Σ rows). Universal:
+                          # Σ never begins a real company / LP / metric name, so a first
+                          # cell that is Σ (alone or Σ + space/paren/etc.) is always a total.
     r'^notes?\s*[:\-\(]|'
     r'^summary\s*[:\-]?\s*$|'
     r'^disclaimer|'

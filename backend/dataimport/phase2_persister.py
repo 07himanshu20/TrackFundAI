@@ -93,6 +93,21 @@ def _d(v) -> Optional[Decimal]:
         return None
 
 
+def _invested_amount(row: dict) -> Optional[Decimal]:
+    """Universal invested-cost accessor for a portfolio_investments row.
+
+    The Stage-1 classifier prompt lists BOTH `Amount_Invested -> total_invested`
+    and `Cost_of_Investment -> cost_basis` as valid mappings, so a workbook's
+    "Cost" column may land under either synonym depending on the (non-deterministic)
+    model classification. The invested amount must be recovered regardless of which
+    one it picked, otherwise every investment row is dropped as "no amount". Order
+    is preservation-safe: the historical chain wins first, `cost_basis` is only a
+    last-resort fallback, so a row that already carries total_invested is unchanged.
+    """
+    return _d(row.get('total_invested') or row.get('tranche_amount')
+              or row.get('amount') or row.get('cost_basis'))
+
+
 def _date(v) -> Optional[date]:
     if v is None or v == '':
         return None
@@ -1331,7 +1346,7 @@ def _persist_portfolio(organization, scheme, rows: list, valuation_rows: list, u
         name = _str(row.get('company_name'), 255)
         if not name or name not in company_map:
             continue
-        amount = _d(row.get('total_invested') or row.get('tranche_amount') or row.get('amount'))
+        amount = _invested_amount(row)
         if not amount:
             continue  # no amount → not a real investment row
         instrument = _enum(row.get('instrument_type'), _INSTRUMENT_MAP, default='equity')
@@ -1350,7 +1365,7 @@ def _persist_portfolio(organization, scheme, rows: list, valuation_rows: list, u
 
         # Aggregate group-level fields
         total_amount = sum(
-            (_d(r.get('total_invested') or r.get('tranche_amount') or r.get('amount')) or Decimal('0'))
+            (_invested_amount(r) or Decimal('0'))
             for r in group_rows
         )
         first_row = group_rows[0]
@@ -1383,7 +1398,7 @@ def _persist_portfolio(organization, scheme, rows: list, valuation_rows: list, u
                 td = _resolve_investment_date(
                     r.get('investment_date') or r.get('tranche_date'), scheme,
                 )
-                tamt = _d(r.get('total_invested') or r.get('tranche_amount') or r.get('amount'))
+                tamt = _invested_amount(r)
                 if td and tamt:
                     tcf.append((td, tamt))
             term = latest_fv_by_company.get(name)
@@ -1451,7 +1466,7 @@ def _persist_portfolio(organization, scheme, rows: list, valuation_rows: list, u
 
         # Write one Tranche per source row, numbered sequentially (1..N)
         for idx, row in enumerate(group_rows, start=1):
-            t_amount = _d(row.get('total_invested') or row.get('tranche_amount') or row.get('amount')) or Decimal('0')
+            t_amount = _invested_amount(row) or Decimal('0')
             t_date = (
                 _resolve_investment_date(
                     row.get('investment_date') or row.get('tranche_date'), scheme,
@@ -3176,7 +3191,7 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
                 prov['fund_nav_method_label']  = _nav_prov.get('method_label')
                 prov['fund_nav_formula']       = _nav_prov.get('formula')
                 prov['fund_nav_priority_ladder'] = [
-                    'P1 — Compute via the universal AIF NAV formula. All 7 balance-sheet components (Realised, Unrealised, Cash, Receivables, Mgmt Fee, Carry, Other Liabilities) must be present. When available, the computed value ALWAYS wins over the extracted cell.',
+                    'P1 — Compute via the universal AIF NAV formula. All 6 balance-sheet components (Unrealised, Cash, Receivables, Mgmt Fee, Carry, Other Liabilities) must be present. Realised gains are excluded — they already left the fund as distributions, so adding them would double-count. When available, the computed value ALWAYS wins over the extracted cell.',
                     'P2 — Fall back to the extracted "TOTAL FUND NAV" cell from the workbook when any component is missing.',
                 ]
                 prov['fund_nav_computed_value']  = _nav_prov.get('computed_value')
@@ -3190,25 +3205,11 @@ def _persist_fund_metrics(organization, scheme, fp: dict, wf: dict,
                 # Build a professional flat table the sidebar can render
                 # verbatim. Each row = one formula input + numeric value +
                 # role (positive/negative in the formula) + human origin.
-                _rb = _c.get('realised_basis') or 'realised_gains'
-                _realised_label = (
-                    'Realised Gains on Exits'
-                    if _rb == 'realised_gains'
-                    else 'Realised Value (Exit Proceeds — cost basis fallback)'
-                )
-                _realised_origin = (
-                    'sum(ExitEvent.realized_gain_loss) — profit portion of exits '
-                    '(proceeds − cost). Only the gain counts because the cost basis '
-                    'is already recognised via Called Capital (AIF audited-NAV convention).'
-                    if _rb == 'realised_gains'
-                    else 'sum(ExitEvent.proceeds) — gross cash returned from exits '
-                         '(used as a fallback; the workbook did not publish per-exit gain data).'
-                )
+                # Realised gains are NOT a NAV term (2026-09-22 correction) —
+                # they already left the fund as distributions, so they are
+                # reported via DPI / the realised_gain metric, never summed into
+                # NAV. The balance-sheet breakdown below is six rows.
                 prov['fund_nav_inputs_breakdown'] = [
-                    {'label': _realised_label,
-                     'value_rs_cr': _c.get('realised'),
-                     'role': 'Positive (+)',
-                     'origin': _realised_origin},
                     {'label': 'Unrealised Value (Residual NAV)',
                      'value_rs_cr': _c.get('unrealised'),
                      'role': 'Positive (+)',

@@ -220,31 +220,35 @@ def rvpi(residual_nav_amt: Optional[Decimal], called: Optional[Decimal]) -> Opti
     return rn / c
 
 
-# ── §5.1 Fund NAV (P1 Computed) — the SEVEN components, exactly ───────────────
-# Fund NAV = Realised Gains + Unrealised Value + Cash + Receivables
+# ── §5.1 Fund NAV (P1 Computed) — the SIX components, exactly ─────────────────
+# Fund NAV = Unrealised Value (FV) + Cash + Receivables
 #            − Mgmt Fee Payable − Carry Payable − Other Liabilities
-# Dropping any term is the bug the parity gate + component-count assertion exist
-# to catch (the earlier 781.4 omitted Realised Gains).
-_NAV51_FIELDS = ('realised_gains', 'unrealised_value', 'cash', 'receivables',
+# NAV is the balance-sheet identity (Assets − Liabilities). Realised gains are
+# NOT a term (2026-09-22 correction): exit proceeds already left the fund as
+# distributions (captured in DPI) or sit in Cash, so a "+ Realised" term would
+# double-count them — it overstated this fund's NAV by 45 (781.4 → 826.4).
+# Dropping any of the SIX real terms is the bug the parity gate + component-count
+# assertion exist to catch.
+_NAV51_FIELDS = ('unrealised_value', 'cash', 'receivables',
                  'mgmt_fee_payable', 'carry_payable', 'other_liabilities')
 
 
-def fund_nav_51(realised_gains, unrealised_value, cash, receivables,
+def fund_nav_51(unrealised_value, cash, receivables,
                 mgmt_fee_payable, carry_payable, other_liabilities) -> Optional[Decimal]:
-    vals = [_d(realised_gains), _d(unrealised_value), _d(cash), _d(receivables),
+    vals = [_d(unrealised_value), _d(cash), _d(receivables),
             _d(mgmt_fee_payable), _d(carry_payable), _d(other_liabilities)]
     if any(v is None for v in vals):
         return None
-    rg, uv, ca, rc, mfp, cp, ol = vals
-    return rg + uv + ca + rc - mfp - cp - ol
+    uv, ca, rc, mfp, cp, ol = vals
+    return uv + ca + rc - mfp - cp - ol
 
 
-def fund_nav_51_components(realised_gains, unrealised_value, cash, receivables,
+def fund_nav_51_components(unrealised_value, cash, receivables,
                            mgmt_fee_payable, carry_payable, other_liabilities):
     """The signed component list, for the actionable NAV disclosure + the
-    seven-component assertion. Order/signs match formula.html §5.1 verbatim."""
+    six-component assertion. Order/signs match formula.html §5.1 verbatim
+    (balance-sheet identity; realised gains are NOT a term — see fund_nav_51)."""
     return [
-        ('+ Realised Gains on Exits', _d(realised_gains)),
         ('+ Unrealised Value (FV of holding)', _d(unrealised_value)),
         ('+ Cash & Cash Equivalents', _d(cash)),
         ('+ Receivables', _d(receivables)),

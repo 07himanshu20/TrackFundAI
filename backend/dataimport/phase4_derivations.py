@@ -2267,9 +2267,15 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
 
     # ══ UNIVERSAL FUND NAV (AIF-standard, 2026-07-14) ═══════════════════
     #
-    # Formula:  NAV = Realised + Unrealised + Cash + Receivables
+    # Formula:  NAV = Unrealised + Cash + Receivables
     #                 − Mgmt Fee Payable − Carry Payable
     #                 − Other Liabilities (Fund Expenses + Tax + Borrowings)
+    #
+    # NAV is the balance-sheet identity (Assets − Liabilities). Realised gains
+    # are NOT a term (2026-09-22 correction): exit proceeds already left the
+    # fund as distributions (or sit in Cash), so a "+ Realised" term would
+    # double-count them and overstate NAV. Realised gains are reported on their
+    # own (realised_gain metric) and via DPI — never summed into NAV.
     #
     # 2-tier priority ladder:
     #   P1  p1_computed_universal   All balance-sheet components extracted
@@ -2283,26 +2289,13 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
     # Provenance in FundMetric.inputs_used carries BOTH values + the source
     # cell so the sidebar can show computed and extracted side-by-side.
     #
-    # Realised term = REALISED GAINS (profit portion only), not gross proceeds.
-    # The AIF Section-A convention treats the cost basis of exited investments
-    # as already recognised through Called Capital, so only the GAIN portion
-    # (proceeds − cost) contributes to NAV. Universal — matches ILPA/SEBI
-    # audited NAV convention for every AIF workbook.
-    #
-    # realised_gain = Σ ExitEvent.realized_gain_loss for this scheme
-    # Falls back to total_realised (proceeds) only if no exit-level gain
-    # data is available — with a diagnostic tag so the sidebar can show
-    # which value was used.
-    _rg_agg = ExitEvent.objects.filter(
-        investment__scheme=scheme
-    ).aggregate(_gain=Sum('realized_gain_loss'))
-    _realised_gain_sum = _safe_decimal(_rg_agg.get('_gain'))
-    if _realised_gain_sum is not None and _realised_gain_sum > 0:
-        _nav_realised = _realised_gain_sum
-        _nav_realised_basis = 'realised_gains'  # sum(ExitEvent.realized_gain_loss)
-    else:
-        _nav_realised = total_realised if total_realised is not None else Decimal('0')
-        _nav_realised_basis = 'realised_proceeds'  # fallback — includes cost basis
+    # Realised gains are deliberately EXCLUDED from NAV (2026-09-22 correction).
+    # NAV is the balance-sheet net worth at the reporting date; realised exit
+    # proceeds have already left the fund as distributions (or are captured in
+    # Cash), so a separate "+ Realised" term would double-count them (it
+    # overstated this fund's NAV by exactly the realised-gains amount). Realised
+    # gains are reported on their own (realised_gain metric) and via DPI — never
+    # added into NAV. Universal: true for every AIF that has made distributions.
 
     # residual (unrealised portfolio FV) — fresh compute matching carry base
     _nav_lh = Valuation.objects.filter(investment=OuterRef('pk')).exclude(
@@ -2356,7 +2349,7 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
 
     if not _nav_missing:
         _nav_computed = (
-            _nav_realised + _nav_residual + _bs_cash + _receivables_total
+            _nav_residual + _bs_cash + _receivables_total
             - _bs_mgmt - _bs_carry - _other_liab_total
         ).quantize(Decimal('0.01'))
         _nav_method = 'p1_computed_universal'
@@ -2394,7 +2387,7 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
             if _nav_method == 'p1_computed_universal'
             else 'P2 — Extracted from workbook cell (one or more formula components missing)'
         ),
-        'formula': ('NAV = Realised + Unrealised + Cash + Receivables '
+        'formula': ('NAV = Unrealised + Cash + Receivables '
                     '− Mgmt Fee Payable − Carry Payable '
                     '− Other Liabilities (Fund Expenses + Tax + Borrowings)'),
         'computed_value':  (float(_nav_computed) if _nav_computed is not None else None),
@@ -2404,10 +2397,7 @@ def compute_all_fund_aggregates(fund, scheme, unified_json: dict = None) -> dict
             'cell':  _nav_extracted_cell,
             'label': _nav_extracted_label,
         },
-        'realised_basis':      _nav_realised_basis,
         'components': {
-            'realised':           (float(_nav_realised) if _nav_realised is not None else None),
-            'realised_basis':     _nav_realised_basis,
             'unrealised':         (float(_nav_residual) if _nav_residual is not None else None),
             'cash':               (float(_bs_cash) if _bs_cash is not None else None),
             'receivables':        (float(_receivables_total) if _receivables_total is not None else None),

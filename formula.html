@@ -745,13 +745,13 @@ where years = (as_of_date &minus; CapitalCall.call_date) &divide; 365.25</div>
 <p class="meaning"><i>The audited net asset value of the fund at the reporting date.</i></p>
 
 <h4>Formula &mdash; Universal AIF NAV (P1, all components present)</h4>
-<div class="formula-box"><span class="fx-label">Fund NAV &mdash; P1 Computed</span>Fund NAV = Realised Gains on Exits
-         + Unrealised Value (Residual portfolio at fair value)
+<div class="formula-box"><span class="fx-label">Fund NAV &mdash; P1 Computed</span>Fund NAV = Unrealised Value (Residual portfolio at fair value)
          + Cash &amp; Cash Equivalents
          + Receivables (Interest / Dividend + Other)
          &minus; Management Fee Payable
          &minus; Carry Payable
          &minus; Other Liabilities (Fund Expenses + Tax + Borrowings)</div>
+<p class="meaning"><i>NAV is the balance-sheet identity (Assets &minus; Liabilities). Realised gains are <b>not</b> a term &mdash; exit proceeds have already left the fund as distributions (captured in DPI), so adding them back would double-count.</i></p>
 
 <h4>Fallback Formula &mdash; Extracted (P2)</h4>
 <div class="formula-box"><span class="fx-label">Fund NAV &mdash; P2 Extracted</span>Fund NAV = extracted "TOTAL FUND NAV" cell from the workbook</div>
@@ -759,7 +759,6 @@ where years = (as_of_date &minus; CapitalCall.call_date) &divide; 365.25</div>
 <h4>Component Sources</h4>
 <table>
   <tr><th>Component</th><th>Source</th></tr>
-  <tr><td>Realised Gains</td><td>&Sigma; ExitEvent.realized_gain_loss (fallback ExitEvent.proceeds)</td></tr>
   <tr><td>Unrealised Value</td><td>&Sigma; latest Valuation.fair_value_of_holding per Investment (excluding synthetic mark-to-cost)</td></tr>
   <tr><td>Cash &amp; Cash Equivalents</td><td>NAVRecord.cash_balance or Gemini-extracted cell</td></tr>
   <tr><td>Receivables</td><td>Extracted cells: Interest / Dividend receivable + Other receivables</td></tr>

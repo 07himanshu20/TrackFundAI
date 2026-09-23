@@ -70,16 +70,39 @@
       }).join('');
   }
 
+  // Place the single progress panel where it belongs for the current action: during the foreign-currency
+  // flow (the rate prompt is on screen) put it DIRECTLY BELOW that prompt so the finance user sees the bar
+  // in context; otherwise keep it at its home position (above the results). Pure DOM relocation of the one
+  // panel — one bar, one set of ids, no duplication.
+  function positionProgressPanel() {
+    const panel = $('progress-panel'), ccy = $('ccy-panel');
+    if (ccy && ccy.style.display && ccy.style.display !== 'none') {
+      ccy.insertAdjacentElement('afterend', panel);          // below 'Foreign currency detected…'
+    } else {
+      $('results').insertAdjacentElement('beforebegin', panel);   // home (above results)
+    }
+  }
+
   // Show the progress panel immediately (before the run's own polling begins) so a click never lands on a
   // dead 'Validating…' — the finance user sees continuous, honest feedback from the first moment.
   function showProgress(msg, pct) {
     const p = Number(pct) || 0;
+    positionProgressPanel();
     $('progress-panel').style.display = 'block';
     $('progress-msg').textContent = msg;
     $('progress-pct').textContent = p + '%';
     $('progress-bar').style.width = p + '%';
     renderProgressDetail(p);
   }
+
+  // ── cross-refresh persistence ──
+  // The backend ALREADY persists every run (PreIngestJob + its uploaded files + results); only this
+  // in-memory pointer was lost on a hard refresh, which is why the screen went blank. Remember the active
+  // job id so a refresh can re-attach and restore the view. localStorage is per-browser and best-effort —
+  // every access is guarded so storage being off/full/blocked can never break the page.
+  const JOB_KEY = 'pi3_active_job';
+  function saveJob(id) { try { localStorage.setItem(JOB_KEY, id); } catch (e) { /* storage unavailable */ } }
+  function clearJob() { try { localStorage.removeItem(JOB_KEY); } catch (e) { /* no-op */ } }
 
   if (window.Auth && Auth.requireAuth) Auth.requireAuth();
   (function () { const u = window.Auth && Auth.getUser && Auth.getUser(); if (u) $('user-badge').textContent = u.email || u.username || '—'; })();
@@ -123,7 +146,7 @@
     convertingCurrencies = [];   // a brand-new run converts nothing until a rate card is supplied
     try {
       const r = await Auth.apiUpload(API + '/', fd);
-      jobId = r.job_id; selected = []; startPolling();
+      jobId = r.job_id; saveJob(jobId); selected = []; startPolling();
     } catch (e) { notify('Upload failed: ' + e.message, 'error'); $('btn-run').disabled = false; }
   };
 
@@ -141,6 +164,9 @@
 
   function startPolling() {
     setRunning(true);
+    $('btn-new-run').style.display = '';        // a job is active → offer the explicit reset
+    $('btn-proceed').style.display = 'none';    // not ready to hand off until this run completes
+    positionProgressPanel();                    // below the currency prompt during the FX flow, else home
     $('progress-panel').style.display = 'block';
     clearInterval(poll);
     poll = setInterval(refresh, 1500);
@@ -178,6 +204,50 @@
     }
   }
 
+  // ── restore the last job across a hard refresh ──
+  // Re-attach to the saved job and re-render its state — results if finished, or resume the live bar if
+  // still processing — so uploaded files, progress and processed data survive a refresh. Fully guarded: a
+  // gone / other-org job (404), an API error, or storage being off all fall back to the normal empty
+  // upload state, never a broken page. Reuses the SAME render/poll functions a live run uses (no new paths).
+  async function restoreLastJob() {
+    let saved = null;
+    try { saved = localStorage.getItem(JOB_KEY); } catch (e) { return; }
+    if (!saved) return;
+    let d;
+    try { d = await Auth.apiGet(`${API}/${saved}/`); }
+    catch (e) { clearJob(); return; }           // deleted / another org / gone → clear, show empty upload
+    jobId = saved;
+    $('btn-new-run').style.display = '';
+    renderServerFiles(d.input_files || []);
+    if (['completed', 'completed_with_errors', 'failed'].includes(d.status)) {
+      render(d);                                 // identical to what refresh() renders on completion
+      if (d.status === 'failed') notify('Last run failed: ' + (d.progress_message || ''), 'error');
+    } else {
+      startPolling();                            // still processing → resume the live progress bar
+    }
+  }
+
+  // Explicit 'start over' — the replacement for the old 'hard-refresh to reset' behaviour, now that a
+  // refresh RESTORES instead of clearing. Non-destructive by design: it clears only the local pointer and
+  // resets the view to a fresh upload; the previous run stays saved on the server (remove its files with the
+  // per-file Delete when you actually want them gone). Never touches the backend.
+  function startNewRun() {
+    clearInterval(poll);
+    clearJob();
+    jobId = null; selected = []; running = false;
+    currentReport = null; currentBase = null; convertingCurrencies = [];
+    setRunning(false);
+    $('results').style.display = 'none';
+    $('progress-panel').style.display = 'none';
+    $('btn-new-run').style.display = 'none';
+    $('btn-proceed').style.display = 'none';
+    $('btn-download').disabled = true;
+    $('queue').innerHTML = '';
+    $('btn-run').style.display = '';             // renderServerFiles had hidden it; bring it back
+    $('upload-hint').textContent = '';
+    renderQueue();                               // jobId is null again → the empty client-side queue
+  }
+
   // ── server-side file list (post-upload) with delete ──
   function renderServerFiles(files) {
     $('queue').innerHTML = files.map((f) => `
@@ -200,7 +270,9 @@
     const rv = d.review || {};
     const c = rv.counts || {};
     $('results').style.display = 'block';
+    $('btn-new-run').style.display = '';        // results are showing → keep the reset available
     $('btn-download').disabled = !d.has_output;
+    $('btn-proceed').style.display = d.has_output ? '' : 'none';   // hand-off to the dashboard once ready
     $('kpis').innerHTML = [
       ['Files', c.files], ['Attributed', c.attributed], ['Held for review', c.held_files],
       ['Companies', c.companies], ['Read errors', c.read_errors],
@@ -484,4 +556,21 @@
       URL.revokeObjectURL(u);
     } catch (e) { notify('Download failed: ' + e.message, 'error'); }
   };
+
+  // Proceed to dashboard: hand this run's consolidated workbook to the post-ingestion 'Data Ingestion'
+  // tab, which fetches it and auto-imports it (no user click). The pre-ingestion job id rides on the URL;
+  // the workbook itself is pulled server-side from that job's output, so no large file crosses via storage.
+  $('btn-proceed').onclick = () => {
+    if (!jobId) return;
+    // Persist the hand-off intent so the Data Ingestion page auto-imports even if the URL param is
+    // dropped by an auth-refresh redirect or a back/forward-cache restore. The param is kept too as
+    // the primary signal; data-upload.js reads whichever is present.
+    try { sessionStorage.setItem('tfai_pi3_ingest', jobId); } catch (e) { /* storage unavailable */ }
+    location.href = 'data-upload.html?ingest=' + encodeURIComponent(jobId);
+  };
+
+  $('btn-new-run').onclick = startNewRun;
+
+  // On load, re-attach to the last job (if any) so a hard refresh never loses uploaded files or results.
+  restoreLastJob();
 })();

@@ -112,35 +112,40 @@ def test_ilpa_identity_tvpi_equals_dpi_plus_rvpi():
     assert _q(t) == _q(d + r)
 
 
-def test_fund_nav_51_is_826_4_seven_components():
-    nav = F.fund_nav_51(REALISED_GAIN, FV, CASH, RECV, MGMT_PAY, CARRY_PAY, OTHER_LIAB)
-    assert nav == D('826.4')                                  # §5.1 seven-term
+def test_fund_nav_51_is_781_4_six_components():
+    nav = F.fund_nav_51(FV, CASH, RECV, MGMT_PAY, CARRY_PAY, OTHER_LIAB)
+    assert nav == D('781.4')                                  # §5.1 six-term balance-sheet NAV
 
 
-def test_fund_nav_51_reddens_if_a_component_is_dropped():
-    """Reddening control for the exact bug that shipped (781.4 dropped Realised
-    Gains): omit the realised-gains term and the NAV must move by exactly 45."""
-    six_term = (FV + CASH + RECV - MGMT_PAY - CARRY_PAY - OTHER_LIAB)   # no realised gains
-    assert six_term == D('781.4')
-    assert F.fund_nav_51(REALISED_GAIN, FV, CASH, RECV, MGMT_PAY, CARRY_PAY, OTHER_LIAB) - six_term == REALISED_GAIN
+def test_fund_nav_51_excludes_realised_gains_no_double_count():
+    """Reddening control for the double-count bug (2026-09-22): NAV is the
+    balance-sheet identity (Assets − Liabilities); realised gains are NOT added
+    because exit proceeds already left the fund as distributions. The correct
+    six-term NAV is 781.4; a with-realised build (826.4) overstates it by exactly
+    the realised-gains term — the 45 that must NEVER be added back into NAV."""
+    nav = F.fund_nav_51(FV, CASH, RECV, MGMT_PAY, CARRY_PAY, OTHER_LIAB)
+    assert nav == D('781.4')                                  # balance-sheet NAV
+    with_realised = nav + REALISED_GAIN                        # the double-count that must not happen
+    assert with_realised == D('826.4')
+    assert with_realised - nav == REALISED_GAIN               # overstatement = realised gains, exactly
 
 
-def test_nav_51_component_list_has_exactly_seven_terms():
-    comps = F.fund_nav_51_components(REALISED_GAIN, FV, CASH, RECV, MGMT_PAY, CARRY_PAY, OTHER_LIAB)
-    assert len(comps) == 7
-    assert sum(v for _, v in comps) == D('826.4')
+def test_nav_51_component_list_has_exactly_six_terms():
+    comps = F.fund_nav_51_components(FV, CASH, RECV, MGMT_PAY, CARRY_PAY, OTHER_LIAB)
+    assert len(comps) == 6
+    assert sum(v for _, v in comps) == D('781.4')
 
 
 def test_nav_emits_per_document_with_logged_rollforward_discrepancy():
-    """§5.1 + §6.3, as written: 826.4 passes the ONLY gate (≤5× invested) and is
+    """§5.1 + §6.3, as written: 781.4 passes the ONLY gate (≤5× invested) and is
     EMITTED; the roll-forward 806.25 is a Stage-4 LOGGED cross-check (advisory
     divergence), NOT a hold. Document-faithful — no extra two-method HOLD."""
     rf = F.rollforward_nav(CALLED, DIST, PNL_ITD, CARRY_PAY)
     assert rf == D('806.25')                                  # model-free identity
-    assert F.nav_sanity_ok(D('826.4'), INVESTED) is True      # §6.3 ≤5×448 → EMITS
-    cc = F.nav_rollforward_crosscheck(D('826.4'), rf)
-    assert _q(cc.gap) == D('20.1500')                         # discrepancy captured for the log
-    assert _q(cc.gap_pct, '0.01') == D('2.44')
+    assert F.nav_sanity_ok(D('781.4'), INVESTED) is True      # §6.3 ≤5×448 → EMITS
+    cc = F.nav_rollforward_crosscheck(D('781.4'), rf)
+    assert _q(cc.gap) == D('-24.8500')                        # discrepancy captured for the log
+    assert _q(cc.gap_pct, '0.01') == D('3.18')
     assert cc.diverges is True                                # ADVISORY only — drives the note
     assert 'review before relying' in cc.note                 # actionable reason logged
 
@@ -148,16 +153,16 @@ def test_nav_emits_per_document_with_logged_rollforward_discrepancy():
 def test_nav_sanity_rejects_above_5x_invested():
     """§6.3 reddening control: the one real NAV gate — a NAV > 5× invested is rejected
     (extraction error), while a normal NAV passes."""
-    assert F.nav_sanity_ok(D('826.4'), INVESTED) is True      # 1.85× → OK
+    assert F.nav_sanity_ok(D('781.4'), INVESTED) is True      # 1.74× → OK
     assert F.nav_sanity_ok(D('2500'), INVESTED) is False      # 5.58× → rejected
-    assert F.nav_sanity_ok(D('826.4'), None) is False         # no invested → cannot gate
+    assert F.nav_sanity_ok(D('781.4'), None) is False         # no invested → cannot gate
 
 
 def test_nav_crosscheck_is_advisory_not_a_gate():
     """The cross-check NEVER holds: a sub-1% gap is 'within band', a missing method is
     'unavailable' — neither blanks the emitted NAV (that's what §5.1/§6.3 decide)."""
-    assert F.nav_rollforward_crosscheck(D('826.4'), D('822.0')).diverges is False   # 0.53%
-    assert F.nav_rollforward_crosscheck(D('826.4'), None).diverges is False         # missing → not a hold
+    assert F.nav_rollforward_crosscheck(D('781.4'), D('777.0')).diverges is False   # 0.56%
+    assert F.nav_rollforward_crosscheck(D('781.4'), None).diverges is False         # missing → not a hold
 
 
 # ── xirr reddening controls (the single pipeline solver) ──────────────────────

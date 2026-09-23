@@ -84,7 +84,7 @@ def _fmt_for(label):
     if '₹' in str(label) or 'cr' in toks or (toks & _MONEY_TOKENS):
         return _FMT_MONEY
     return None                       # ratios/counts/text left general (full precision)
-_SHEETS = ['MASTER_INPUTS', 'LP_REGISTER', 'CAPITAL_CALLS', 'PORTFOLIO_MASTER',
+_SHEETS = ['MASTER_INPUTS', 'LP_REGISTER', 'CAPITAL_CALLS', 'DISTRIBUTIONS', 'PORTFOLIO_MASTER',
            'VALUATIONS', 'QUOTED_UNQUOTED', 'NAV_CALC', 'MOIC_TVPI_DPI', 'WATERFALL_EUR',
            'SECTOR_ALLOCATION', 'EXITS', 'FEES', 'PORTFOLIO_KPI', 'DASHBOARD_BRIDGE',
            'RECONCILIATION']
@@ -192,6 +192,7 @@ def build_master(cir: CIR, *, rate_card=None, files: List[str] = None,
     _master_inputs(wb, cir, ctx, files or [], title, rate_card)
     _lp_register(wb, cir, ctx)
     _capital_calls(wb, cir, ctx)
+    _distributions(wb, cir, ctx)
     _portfolio_master(wb, cir, ctx)
     _valuations(wb, cir, ctx)
     _quoted_unquoted(wb, cir, ctx)
@@ -534,6 +535,41 @@ def _capital_calls(wb, cir, ctx):
     _rowh(ws, ['CHECKS', 'LHS', 'RHS', 'Verdict', 'Detail'])
     _catrow(ws, 'capital_calls_rows_sum_to_total', 'Σ calls = stated total', ctx)
     _catrow(ws, 'capital_calls_tie_to_called', 'Calls tie to capital-account called', ctx)
+
+
+# ── 3b. DISTRIBUTIONS (the inflow half of the LP capital-account ledger) ─────
+def _distributions(wb, cir, ctx):
+    """Dated LP distribution events on their OWN canonically-named sheet — the
+    inflow side of the capital account (CAPITAL_CALLS is the outflow side).
+
+    ROOT-CAUSE FIX (2026-09-23): the same distribution records are also shown
+    inside WATERFALL_EUR for the waterfall narrative, but a mixed sheet named
+    'WATERFALL_EUR' classifies as a waterfall — never as distributions — so the
+    post-ingestion importer never turned those rows into dated Distribution
+    events, leaving Net IRR unable to compute (calls + DATED distributions +
+    terminal NAV). Giving distributions their own dedicated, canonically-named
+    sheet makes them reliably classifiable and imported — the LP cashflow ledger
+    becomes self-contained at VALUE level, exactly like every other sheet."""
+    dist = sorted(_recs(cir, 'distributions'), key=lambda r: r.fields.get('key', ''))
+    if not dist:
+        return
+    ws = wb.create_sheet('DISTRIBUTIONS')
+    _rowh(ws, ['FUND DISTRIBUTIONS TO LPS (₹Cr) — one row per distribution event, dated'])
+    _rowh(ws, _hdr(['Distribution #', 'Date', 'Type', 'Gross', 'GP carry', 'Net to LP', 'Cumulative']))
+    cum = tg = tc = tn = Decimal('0')
+    for rec in dist:
+        g, c, n = (_num(rec.fields.get('gross')), _num(rec.fields.get('gp_carry')), _num(rec.fields.get('net')))
+        if n is not None:
+            cum += n
+        tg += g or 0; tc += c or 0; tn += n or 0
+        _row(ws, [rec.fields.get('key', _entity(rec)), rec.fields.get('date', ''),
+                  str(rec.fields.get('type', ''))[:28],
+                  _f(g) if g is not None else HELD_MARK,
+                  _f(c) if c is not None else HELD_MARK,
+                  _f(n) if n is not None else HELD_MARK, _f(cum)],
+             warn=() if n is not None else (5,))
+    _row(ws, [])
+    _row(ws, ['TOTAL', '', '', _f(tg), _f(tc), _f(tn)])
 
 
 # ── 4. PORTFOLIO_MASTER (investments ⋈ company MIS) ─────────────────────────

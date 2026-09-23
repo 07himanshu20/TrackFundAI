@@ -722,16 +722,19 @@ _METRIC_LABEL_RULES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
          'cost'),
     ),
     'fund_nav_latest': (
-        ('closing fund nav', 'net asset value', 'closing nav', 'fund nav'),
+        ('closing fund nav', 'net asset value', 'closing nav', 'fund nav',
+         # consolidated NAV_CALC PATH A row — the finished LP NAV (net of carry).
+         # Specific enough to never match "Gross NAV (before carry)".
+         'nav — lp (net of carry)', 'nav - lp (net of carry)'),
         ('per unit', 'per share', 'per lp', 'per investor', 'opening'),
     ),
     # ── Balance-sheet snapshot components (universal AIF NAV formula) ──
-    # NAV = Realised + Unrealised + Cash + Receivables
+    # NAV = Unrealised + Cash + Receivables
     #       − Mgmt Fee Payable − Carry Payable − Other Liabilities (Fund Exp + Tax)
-    # These 7 canonical scalars let Phase 4 reconcile the current-period
-    # audited NAV cell (e.g. TOTAL FUND NAV) against a fully-transparent
-    # computed value. Substrings are chosen to match every common AIF
-    # balance-sheet wording — universal across funds, not Trivesta-specific.
+    # These canonical scalars let Phase 4 reconcile the current-period audited
+    # NAV cell against a fully-transparent computed value. Realised gains are NOT
+    # a NAV term (they already left the fund as distributions). Substrings match
+    # every common AIF balance-sheet wording — universal, not file-specific.
     'bs_cash': (
         ('cash and cash equivalents', 'cash & cash equivalents',
          'cash equivalents', 'fund cash', 'cash at bank',
@@ -746,7 +749,10 @@ _METRIC_LABEL_RULES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
          'interest income receivable',
          'dividend income receivable',
          'interest receivable', 'dividend receivable',
-         'accrued interest', 'accrued dividend'),
+         'accrued interest', 'accrued dividend',
+         # consolidated NAV_CALC grouped receivables line — a single combined
+         # figure (interest/div + other); maps here so Receivables total = it.
+         'receivables (interest/div + other)', 'receivables (interest'),
         ('paid', 'received', 'ytd', 'per lp'),
     ),
     'bs_other_receivables': (
@@ -1595,6 +1601,29 @@ def build_unified_json(per_sheet: dict, workbook_data: dict) -> dict:
                 'lp_count', 'portfolio_companies'):
         if key in fund_master:
             fund_performance[key] = fund_master[key]
+
+    # Accrued (cumulative) management fees — aggregate the fee SCHEDULE so the
+    # dashboard's "Mgmt Fee YTD" tile has an authoritative value instead of a
+    # blank. The FEES sheet (fees_register) carries one row per period with the
+    # calculated fee amount; Σ across periods = cumulative management fee charged
+    # to date. Universal: ANY fund that publishes a periodic fee schedule gets
+    # this; a fund without one keeps the key absent — the tile then falls back to
+    # the NAV-record sum, else blank. Fail-closed: never fabricated.
+    if 'accrued_management_fees' not in fund_performance:
+        _fee_total = 0.0
+        _saw_fee = False
+        for _fr in by_dom.get('fees_register', []):
+            if not isinstance(_fr, dict):
+                continue
+            _fa = _fr.get('fee_amount', _fr.get('annual_fee'))
+            try:
+                _fad = float(str(_fa).replace(',', '').strip())
+            except (TypeError, ValueError):
+                continue
+            _fee_total += _fad
+            _saw_fee = True
+        if _saw_fee and _fee_total > 0:
+            fund_performance['accrued_management_fees'] = round(_fee_total, 4)
 
     # Universal workbook_aggregates for Phase 4 reconciler. Every
     # (label, numeric_value) pair extracted from waterfall_carry or

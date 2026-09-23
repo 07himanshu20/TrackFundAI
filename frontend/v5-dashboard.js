@@ -850,11 +850,11 @@ const _METRIC_COPY = {
   fund_nav: {
     label: 'Fund NAV — Net Asset Value',
     meaning: 'The audited net worth of the fund at the reporting date. Represents everything the fund owns (portfolio + cash + receivables) minus everything it owes (mgmt fee, carry payable, expenses, taxes, borrowings). Computed via the universal AIF NAV formula whenever every balance-sheet component is present; falls back to the extracted "TOTAL FUND NAV" cell only when a component is missing.',
-    formula: 'NAV = Realised + Unrealised + Cash + Receivables − Mgmt Fee Payable − Carry Payable − Other Liabilities (Fund Expenses + Tax + Borrowings)',
+    formula: 'NAV = Unrealised + Cash + Receivables − Mgmt Fee Payable − Carry Payable − Other Liabilities (Fund Expenses + Tax + Borrowings)',
     priority_ladder: [
       { code: 'p1_computed_universal',
         label: 'P1 — Computed via the universal AIF NAV formula',
-        detail: 'All 7 balance-sheet components (Realised + Unrealised + Cash + Receivables − Mgmt Fee − Carry − Other Liabilities) are extracted from the workbook. Computed value is transparent, reproducible, and always wins over the extracted cell.' },
+        detail: 'All 6 balance-sheet components (Unrealised + Cash + Receivables − Mgmt Fee − Carry − Other Liabilities) are extracted from the workbook. Realised gains are deliberately excluded — exit proceeds already left the fund as distributions, so adding them would double-count. Computed value is transparent, reproducible, and always wins over the extracted cell.' },
       { code: 'p2_extracted_from_cell',
         label: 'P2 — Extracted from the workbook TOTAL FUND NAV cell',
         detail: 'Used only when at least one formula component is missing (see Missing inputs table). The extracted number is the CA-audited snapshot; the sidebar shows the source sheet and cell.' },
@@ -1420,7 +1420,7 @@ function openProvenancePanel(metricKey) {
           </div>
         </div>`;
     }
-    // Formula components table — 7 rows, one per formula input
+    // Formula components table — 6 rows, one per formula input
     let _navCompTable = '';
     if (_navRows.length) {
       const _thStyle   = 'text-align:left;padding:8px 10px;background:#f8fafc;color:#334155;font-weight:600;border-bottom:1px solid #e2e8f0;text-transform:uppercase;font-size:10px;letter-spacing:.5px;';
@@ -3806,7 +3806,13 @@ async function loadAccountingNAV() {
         });
       }
     }
-    if ($('acc-mgmt-fee'))   $('acc-mgmt-fee').textContent   = totalMgmtFee > 0 ? fmtCr(totalMgmtFee) : '—';
+    // Mgmt Fee YTD — prefer the authoritative cumulative fee from the fee
+    // schedule (FundMetric.accrued_management_fees, Σ of the FEES sheet's
+    // per-period fee amounts); fall back to the NAV-record sum only when the
+    // metric is absent. Never fabricated — blank when neither source has it.
+    const _fmMgmtFee   = (typeof fmValue === 'function') ? fmValue('accrued_management_fees') : null;
+    const _displayMgmtFee = (_fmMgmtFee != null && _fmMgmtFee > 0) ? _fmMgmtFee : totalMgmtFee;
+    if ($('acc-mgmt-fee'))   $('acc-mgmt-fee').textContent   = _displayMgmtFee > 0 ? fmtCr(_displayMgmtFee) : '—';
 
     // Unrealised Value — FundMetric.unrealised_gain stores Active FV per
     // user spec (AIF Section-A convention: gross value, not FV−Cost).
