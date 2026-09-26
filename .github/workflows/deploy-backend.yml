@@ -30,9 +30,12 @@ jobs:
             echo "Pulling latest code..."
             git pull origin main
 
+            echo "Installing Python packages from requirements.txt..."
+            sudo -u ubuntu ./venv/bin/pip install --no-input --disable-pip-version-check -r requirements.txt
+
             echo "Running migrations..."
             sudo -u ubuntu bash -c "TFAI_ENV=development \
-            GOOGLE_APPLICATION_CREDENTIALS=/home/ubuntu/aifdashboard-178f4d2a2a6f.json \
+            GOOGLE_APPLICATION_CREDENTIALS=/home/ubuntu/trackfundaianshu-907fb906853b.json \
             ./venv/bin/python manage.py migrate --noinput"
 
             echo "Restarting TrackFundAI service..."

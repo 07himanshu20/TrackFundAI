@@ -4,6 +4,9 @@ djangorestframework-simplejwt==5.5.1
 django-cors-headers==4.4.0
 psycopg2-binary==2.9.9
 openpyxl==3.1.5
+# Fast Excel reader for pre-ingestion (dataimport/preingest3/identity.py). If missing, the app silently
+# falls back to openpyxl, which is ~1.6x slower on the same files.
+python-calamine==0.8.2
 pandas==2.2.3
 # Vertex AI (Google Gen AI SDK) — TrackFundAI is 100% on Vertex AI.
 # AI Studio's `google-generativeai` is BANNED — see api/gemini_service.py
